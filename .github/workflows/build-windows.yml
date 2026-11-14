@@ -1,0 +1,36 @@
+name: Build HYPERCOLOR for Windows
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows x64 VST3
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository and JUCE
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Configure CMake
+        run: cmake -S . -B build -A x64
+
+      - name: Build HYPERCOLOR VST3
+        run: cmake --build build --config Release --target HYPERCOLOR_VST3 --parallel 4
+
+      - name: Upload Windows VST3
+        uses: actions/upload-artifact@v7
+        with:
+          name: HYPERCOLOR-Windows-x64-VST3
+          path: build/HYPERCOLOR_artefacts/Release/VST3/HYPERCOLOR.vst3/
+          if-no-files-found: error
+          retention-days: 14
