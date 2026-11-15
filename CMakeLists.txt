@@ -39,12 +39,14 @@ juce_generate_juce_header(HYPERCOLOR)
 
 target_sources(HYPERCOLOR
     PRIVATE
+        src/dsp/granular/CircularAudioBuffer.cpp
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginEditor.cpp
 )
 
 target_include_directories(HYPERCOLOR
     PRIVATE
+        src
         src/plugin
 )
 
@@ -91,4 +93,31 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME HYPERCOLOR.Processor COMMAND HYPERCOLORTests)
+
+    add_executable(HYPERCOLORCircularAudioBufferTests
+        src/dsp/granular/CircularAudioBuffer.cpp
+        tests/CircularAudioBufferTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORCircularAudioBufferTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(
+        HYPERCOLORCircularAudioBufferTests
+        PRIVATE
+            cxx_std_20
+    )
+
+    target_link_libraries(HYPERCOLORCircularAudioBufferTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.CircularAudioBuffer
+        COMMAND HYPERCOLORCircularAudioBufferTests
+    )
 endif()
