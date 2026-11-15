@@ -132,6 +132,129 @@ bool isFinite(const juce::AudioBuffer<float>& buffer)
     return true;
 }
 
+bool isSilent(const juce::AudioBuffer<float>& buffer)
+{
+    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+    {
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+        {
+            if (buffer.getSample(channel, sample) != 0.0f)
+                return false;
+        }
+    }
+
+    return true;
+}
+
+bool buffersDiffer(
+    const juce::AudioBuffer<float>& first,
+    const juce::AudioBuffer<float>& second,
+    float tolerance = 1.0e-5f
+)
+{
+    if (first.getNumChannels() != second.getNumChannels()
+        || first.getNumSamples() != second.getNumSamples())
+    {
+        return true;
+    }
+
+    for (int channel = 0; channel < first.getNumChannels(); ++channel)
+    {
+        for (int sample = 0; sample < first.getNumSamples(); ++sample)
+        {
+            if (std::abs(
+                    first.getSample(channel, sample)
+                    - second.getSample(channel, sample)
+                ) > tolerance)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+void expectParameterContract(
+    TestContext& context,
+    HypercolorAudioProcessor& processor,
+    const char* parameterID,
+    float expectedMinimum,
+    float expectedMaximum,
+    float expectedDefault
+)
+{
+    auto* parameter = processor.getValueTreeState().getParameter(parameterID);
+    context.expect(parameter != nullptr, "expected APVTS parameter should exist");
+
+    if (parameter == nullptr)
+        return;
+
+    const auto actualMinimum = parameter->convertFrom0to1(0.0f);
+    const auto actualMaximum = parameter->convertFrom0to1(1.0f);
+    const auto actualDefault = parameter->convertFrom0to1(
+        parameter->getDefaultValue()
+    );
+
+    context.expect(
+        std::abs(actualMinimum - expectedMinimum) < 1.0e-4f,
+        "parameter minimum should match its public contract"
+    );
+    context.expect(
+        std::abs(actualMaximum - expectedMaximum) < 1.0e-4f,
+        "parameter maximum should match its public contract"
+    );
+    context.expect(
+        std::abs(actualDefault - expectedDefault) < 1.0e-4f,
+        "parameter default should match its public contract"
+    );
+}
+
+void testGranularParameterContracts(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainDensity,
+        0.0f,
+        120.0f,
+        20.0f
+    );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainSize,
+        10.0f,
+        500.0f,
+        100.0f
+    );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainPosition,
+        0.0f,
+        1.0f,
+        0.0f
+    );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainPitch,
+        -24.0f,
+        24.0f,
+        0.0f
+    );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainReverse,
+        0.0f,
+        1.0f,
+        0.0f
+    );
+}
+
 void testLayoutsAndBlockSizes(TestContext& context)
 {
     for (const auto testSampleRate : sampleRates)
@@ -245,6 +368,147 @@ juce::AudioBuffer<float> renderMono(
     juce::MidiBuffer midi;
     processor.processBlock(buffer, midi);
     return buffer;
+}
+
+juce::AudioBuffer<float> renderGranularParameters(
+    float density,
+    float grainSize,
+    float position,
+    float pitch,
+    bool reverse,
+    int samples = 36000
+)
+{
+    HypercolorAudioProcessor processor;
+    (void) processor.setBusesLayout(
+        { juce::AudioChannelSet::mono(), juce::AudioChannelSet::mono() }
+    );
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, density);
+    setParameter(processor, hypercolor::ParameterIDs::grainSize, grainSize);
+    setParameter(processor, hypercolor::ParameterIDs::grainPosition, position);
+    setParameter(processor, hypercolor::ParameterIDs::grainPitch, pitch);
+    setParameter(
+        processor,
+        hypercolor::ParameterIDs::grainReverse,
+        reverse ? 1.0f : 0.0f
+    );
+    processor.prepareToPlay(sampleRate, 64);
+
+    juce::AudioBuffer<float> buffer(1, samples);
+
+    for (int sample = 0; sample < samples; ++sample)
+    {
+        const auto phase = static_cast<float>(sample % 997) / 997.0f;
+        buffer.setSample(
+            0,
+            sample,
+            0.35f * std::sin(phase * juce::MathConstants<float>::twoPi)
+                + 0.15f * phase
+        );
+    }
+
+    juce::MidiBuffer midi;
+    processor.processBlock(buffer, midi);
+    return buffer;
+}
+
+void testGranularParametersReachEngine(TestContext& context)
+{
+    const auto noDensity = renderGranularParameters(
+        0.0f,
+        100.0f,
+        0.0f,
+        0.0f,
+        false
+    );
+    const auto defaultRender = renderGranularParameters(
+        20.0f,
+        100.0f,
+        0.0f,
+        0.0f,
+        false
+    );
+    const auto highDensity = renderGranularParameters(
+        120.0f,
+        100.0f,
+        0.0f,
+        0.0f,
+        false
+    );
+    const auto shortGrains = renderGranularParameters(
+        20.0f,
+        10.0f,
+        0.0f,
+        0.0f,
+        false
+    );
+    const auto longGrains = renderGranularParameters(
+        20.0f,
+        500.0f,
+        0.0f,
+        0.0f,
+        false
+    );
+    const auto oldPosition = renderGranularParameters(
+        20.0f,
+        100.0f,
+        1.0f,
+        0.0f,
+        false
+    );
+    const auto pitched = renderGranularParameters(
+        20.0f,
+        100.0f,
+        0.0f,
+        12.0f,
+        false
+    );
+    const auto reversed = renderGranularParameters(
+        20.0f,
+        100.0f,
+        0.0f,
+        0.0f,
+        true
+    );
+
+    context.expect(
+        isSilent(noDensity),
+        "Density 0 should suppress all grain starts"
+    );
+    context.expect(
+        buffersDiffer(defaultRender, highDensity),
+        "Density changes should alter the real granular output"
+    );
+    context.expect(
+        buffersDiffer(shortGrains, longGrains),
+        "Grain Size changes should alter the real granular output"
+    );
+    context.expect(
+        buffersDiffer(defaultRender, oldPosition),
+        "Position changes should alter the real granular output"
+    );
+    context.expect(
+        buffersDiffer(defaultRender, pitched),
+        "Pitch changes should alter the real granular output"
+    );
+    context.expect(
+        buffersDiffer(defaultRender, reversed),
+        "Reverse changes should alter the real granular output"
+    );
+
+    for (const auto* rendered : {
+             &noDensity,
+             &defaultRender,
+             &highDensity,
+             &shortGrains,
+             &longGrains,
+             &oldPosition,
+             &pitched,
+             &reversed })
+    {
+        context.expect(isFinite(*rendered), "granular parameter output should stay finite");
+    }
 }
 
 void testGranularDryWetMix(TestContext& context)
@@ -394,11 +658,63 @@ void testNonFiniteInputAndRealtimeAllocations(TestContext& context)
     );
 }
 
+void testBlockRateGranularAutomation(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    (void) processor.setBusesLayout(
+        { juce::AudioChannelSet::mono(), juce::AudioChannelSet::mono() }
+    );
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, 0.0f);
+    processor.prepareToPlay(sampleRate, 64);
+
+    juce::AudioBuffer<float> history(1, 12000);
+    fillBuffer(history, 0.25f);
+    juce::MidiBuffer midi;
+    processor.processBlock(history, midi);
+    context.expect(isSilent(history), "Density 0 should keep wet output silent");
+
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, 120.0f);
+    juce::AudioBuffer<float> automated(1, 1000);
+    fillBuffer(automated, 0.25f);
+    processor.processBlock(automated, midi);
+    context.expect(
+        !isSilent(automated),
+        "Density automation should reach Engine on the next audio block"
+    );
+}
+
+bool removeParameterFromXml(
+    juce::XmlElement& xml,
+    const char* parameterID
+)
+{
+    for (auto* child = xml.getFirstChildElement(); child != nullptr;)
+    {
+        auto* next = child->getNextElement();
+
+        if (child->getStringAttribute("id") == parameterID)
+        {
+            xml.removeChildElement(child, true);
+            return true;
+        }
+
+        child = next;
+    }
+
+    return false;
+}
+
 void testStateRoundTrip(TestContext& context)
 {
     HypercolorAudioProcessor source;
     setParameter(source, hypercolor::ParameterIDs::dryWet, 37.5f);
     setParameter(source, hypercolor::ParameterIDs::outputGain, -7.2f);
+    setParameter(source, hypercolor::ParameterIDs::grainDensity, 73.5f);
+    setParameter(source, hypercolor::ParameterIDs::grainSize, 321.5f);
+    setParameter(source, hypercolor::ParameterIDs::grainPosition, 0.731f);
+    setParameter(source, hypercolor::ParameterIDs::grainPitch, -7.25f);
+    setParameter(source, hypercolor::ParameterIDs::grainReverse, 1.0f);
 
     juce::MemoryBlock state;
     source.getStateInformation(state);
@@ -421,6 +737,114 @@ void testStateRoundTrip(TestContext& context)
         ) - (-7.2f)) < 0.01f,
         "Output Gain should survive state round-trip"
     );
+    context.expect(
+        std::abs(getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::grainDensity
+        ) - 73.5f) < 0.01f,
+        "Grain Density should survive state round-trip"
+    );
+    context.expect(
+        std::abs(getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::grainSize
+        ) - 321.5f) < 0.01f,
+        "Grain Size should survive state round-trip"
+    );
+    context.expect(
+        std::abs(getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::grainPosition
+        ) - 0.731f) < 0.002f,
+        "Grain Position should survive state round-trip"
+    );
+    context.expect(
+        std::abs(getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::grainPitch
+        ) - (-7.25f)) < 0.01f,
+        "Grain Pitch should survive state round-trip"
+    );
+    context.expect(
+        getParameterValue(restored, hypercolor::ParameterIDs::grainReverse)
+            == 1.0f,
+        "Grain Reverse should survive state round-trip"
+    );
+
+    auto oldStateXml = juce::AudioProcessor::getXmlFromBinary(
+        state.getData(),
+        static_cast<int>(state.getSize())
+    );
+    context.expect(oldStateXml != nullptr, "saved state XML should support migration test");
+
+    if (oldStateXml != nullptr)
+    {
+        for (const auto* parameterID : {
+                 hypercolor::ParameterIDs::grainDensity,
+                 hypercolor::ParameterIDs::grainSize,
+                 hypercolor::ParameterIDs::grainPosition,
+                 hypercolor::ParameterIDs::grainPitch,
+                 hypercolor::ParameterIDs::grainReverse })
+        {
+            context.expect(
+                removeParameterFromXml(*oldStateXml, parameterID),
+                "legacy state fixture should remove each granular parameter"
+            );
+        }
+
+        juce::MemoryBlock oldState;
+        juce::AudioProcessor::copyXmlToBinary(*oldStateXml, oldState);
+        setParameter(restored, hypercolor::ParameterIDs::grainDensity, 99.0f);
+        setParameter(restored, hypercolor::ParameterIDs::grainSize, 400.0f);
+        setParameter(restored, hypercolor::ParameterIDs::grainPosition, 0.9f);
+        setParameter(restored, hypercolor::ParameterIDs::grainPitch, 17.0f);
+        setParameter(restored, hypercolor::ParameterIDs::grainReverse, 1.0f);
+        restored.setStateInformation(
+            oldState.getData(),
+            static_cast<int>(oldState.getSize())
+        );
+
+        context.expect(
+            std::abs(getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainDensity
+            ) - 20.0f) < 0.01f,
+            "legacy state should restore default Grain Density"
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainSize
+            ) - 100.0f) < 0.01f,
+            "legacy state should restore default Grain Size"
+        );
+        context.expect(
+            getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainPosition
+            ) == 0.0f,
+            "legacy state should restore default Grain Position"
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainPitch
+            )) < 0.01f,
+            "legacy state should restore default Grain Pitch"
+        );
+        context.expect(
+            getParameterValue(restored, hypercolor::ParameterIDs::grainReverse)
+                == 0.0f,
+            "legacy state should restore default Grain Reverse"
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::dryWet
+            ) - 37.5f) < 0.01f,
+            "legacy state should still restore existing parameters"
+        );
+    }
 
     const auto dryWetBeforeInvalidState = getParameterValue(
         restored,
@@ -476,11 +900,14 @@ int main()
     TestContext context;
 
     testLayoutsAndBlockSizes(context);
+    testGranularParameterContracts(context);
     testOutputGain(context);
     testGranularDryWetMix(context);
+    testGranularParametersReachEngine(context);
     testStereoGranularProcessing(context);
     testFallbackResetAndReprepare(context);
     testNonFiniteInputAndRealtimeAllocations(context);
+    testBlockRateGranularAutomation(context);
     testStateRoundTrip(context);
 
     if (context.getFailures() == 0)

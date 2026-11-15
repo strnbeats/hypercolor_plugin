@@ -23,19 +23,17 @@ constexpr float outputGainMinimumDb = -24.0f;
 constexpr float outputGainMaximumDb = 12.0f;
 constexpr float outputGainDefaultDb = 0.0f;
 
-// Temporary Phase 1F settings. These are replaced by APVTS-backed granular
-// parameters in a later phase without changing the GranularEngine contract.
 constexpr hypercolor::dsp::granular::GranularEngineParameters
-    temporaryGranularParameters {
-        20.0,  // Density: grains per second
-        100.0, // Grain Size: milliseconds
-        0.0,   // Position: freshest valid material
-        0.0,   // Pitch: semitones
-        false  // Reverse
-    };
+    defaultGranularParameters;
 
 bool readFiniteNumber(const juce::var& value, double& result)
 {
+    if (value.isBool())
+    {
+        result = static_cast<bool>(value) ? 1.0 : 0.0;
+        return true;
+    }
+
     if (value.isInt() || value.isInt64() || value.isDouble())
     {
         result = static_cast<double>(value);
@@ -88,6 +86,45 @@ bool hasValidParameterValue(
     return numericValue >= minimum
         && numericValue <= maximum;
 }
+
+bool hasValidBooleanParameterValue(
+    const juce::ValueTree& state,
+    const juce::String& parameterID
+)
+{
+    const auto child = state.getChildWithProperty("id", parameterID);
+
+    if (!child.isValid() || !child.hasProperty("value"))
+        return false;
+
+    double numericValue = 0.0;
+    return readFiniteNumber(child.getProperty("value"), numericValue)
+        && (numericValue == 0.0 || numericValue == 1.0);
+}
+
+bool addDefaultParameterIfMissing(
+    juce::ValueTree& state,
+    const juce::ValueTree& parameterTemplateState,
+    const juce::String& parameterID,
+    double defaultValue
+)
+{
+    if (state.getChildWithProperty("id", parameterID).isValid())
+        return true;
+
+    const auto templateChild = parameterTemplateState.getChildWithProperty(
+        "id",
+        parameterID
+    );
+
+    if (!templateChild.isValid())
+        return false;
+
+    auto defaultChild = templateChild.createCopy();
+    defaultChild.setProperty("value", defaultValue, nullptr);
+    state.addChild(defaultChild, -1, nullptr);
+    return true;
+}
 }
 
 HypercolorAudioProcessor::HypercolorAudioProcessor()
@@ -123,9 +160,29 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     outputGainParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::outputGain
     );
+    grainDensityParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainDensity
+    );
+    grainSizeParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainSize
+    );
+    grainPositionParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainPosition
+    );
+    grainPitchParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainPitch
+    );
+    grainReverseParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainReverse
+    );
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
+    jassert(grainDensityParameter != nullptr);
+    jassert(grainSizeParameter != nullptr);
+    jassert(grainPositionParameter != nullptr);
+    jassert(grainPitchParameter != nullptr);
+    jassert(grainReverseParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -176,6 +233,67 @@ HypercolorAudioProcessor::createParameterLayout()
         },
         outputGainDefaultDb,
         decibelAttributes
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainDensity, 1 },
+        "Grain Density",
+        juce::NormalisableRange<float> {
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::minimumDensityGrainsPerSecond
+            ),
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::maximumDensityGrainsPerSecond
+            ),
+            0.1f
+        },
+        static_cast<float>(defaultGranularParameters.densityGrainsPerSecond),
+        juce::AudioParameterFloatAttributes().withLabel("grains/s")
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainSize, 1 },
+        "Grain Size",
+        juce::NormalisableRange<float> {
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::minimumGrainSizeMilliseconds
+            ),
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::maximumGrainSizeMilliseconds
+            ),
+            0.1f
+        },
+        static_cast<float>(defaultGranularParameters.grainSizeMilliseconds),
+        juce::AudioParameterFloatAttributes().withLabel("ms")
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainPosition, 1 },
+        "Grain Position",
+        juce::NormalisableRange<float> { 0.0f, 1.0f, 0.001f },
+        static_cast<float>(defaultGranularParameters.positionNormalized)
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainPitch, 1 },
+        "Grain Pitch",
+        juce::NormalisableRange<float> {
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::minimumPitchSemitones
+            ),
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::maximumPitchSemitones
+            ),
+            0.01f
+        },
+        static_cast<float>(defaultGranularParameters.pitchSemitones),
+        juce::AudioParameterFloatAttributes().withLabel("st")
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainReverse, 1 },
+        "Grain Reverse",
+        defaultGranularParameters.reverse
     ));
 
     return layout;
@@ -259,6 +377,7 @@ void HypercolorAudioProcessor::processBlock(
     }
 
     updateParameterTargets();
+    const auto granularParameters = readGranularParameters();
 
     const auto numChannels = juce::jmin(
         totalInputChannels,
@@ -283,7 +402,8 @@ void HypercolorAudioProcessor::processBlock(
                 scratchBlockSize,
                 buffer.getNumSamples() - startSample
             ),
-            numChannels
+            numChannels,
+            granularParameters
         );
     }
 }
@@ -309,11 +429,33 @@ void HypercolorAudioProcessor::updateParameterTargets() noexcept
     );
 }
 
+hypercolor::dsp::granular::GranularEngineParameters
+HypercolorAudioProcessor::readGranularParameters() const noexcept
+{
+    return {
+        static_cast<double>(
+            grainDensityParameter->load(std::memory_order_relaxed)
+        ),
+        static_cast<double>(
+            grainSizeParameter->load(std::memory_order_relaxed)
+        ),
+        static_cast<double>(
+            grainPositionParameter->load(std::memory_order_relaxed)
+        ),
+        static_cast<double>(
+            grainPitchParameter->load(std::memory_order_relaxed)
+        ),
+        grainReverseParameter->load(std::memory_order_relaxed) >= 0.5f
+    };
+}
+
 void HypercolorAudioProcessor::processChunk(
     juce::AudioBuffer<float>& buffer,
     int startSample,
     int numSamples,
-    int numChannels
+    int numChannels,
+    const hypercolor::dsp::granular::GranularEngineParameters&
+        granularParameters
 ) noexcept
 {
     for (int channel = 0; channel < numChannels; ++channel)
@@ -346,7 +488,7 @@ void HypercolorAudioProcessor::processChunk(
     const auto granularResult = granularEnginePrepared
         ? granularEngine.processBlock(
             granularBlock,
-            temporaryGranularParameters
+            granularParameters
         )
         : hypercolor::dsp::granular::GranularEngineProcessResult::engineNotPrepared;
     const auto useDryFallback = granularResult
@@ -483,7 +625,7 @@ void HypercolorAudioProcessor::setStateInformation(
     if (xml == nullptr || !xml->hasTagName(stateTreeType))
         return;
 
-    const auto restoredState = juce::ValueTree::fromXml(*xml);
+    auto restoredState = juce::ValueTree::fromXml(*xml);
 
     if (!restoredState.isValid()
         || restoredState.getType() != parameters.state.getType())
@@ -512,6 +654,42 @@ void HypercolorAudioProcessor::setStateInformation(
         schemaVersion = static_cast<int>(numericVersion);
     }
 
+    const auto parameterTemplateState = parameters.copyState();
+
+    if (!addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainDensity,
+            defaultGranularParameters.densityGrainsPerSecond
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainSize,
+            defaultGranularParameters.grainSizeMilliseconds
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainPosition,
+            defaultGranularParameters.positionNormalized
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainPitch,
+            defaultGranularParameters.pitchSemitones
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainReverse,
+            static_cast<double>(defaultGranularParameters.reverse)
+        ))
+    {
+        return;
+    }
+
     if (schemaVersion < 0
         || schemaVersion > currentStateSchemaVersion
         || !hasValidParameterValue(
@@ -525,6 +703,46 @@ void HypercolorAudioProcessor::setStateInformation(
             hypercolor::ParameterIDs::outputGain,
             outputGainMinimumDb,
             outputGainMaximumDb
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainDensity,
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::minimumDensityGrainsPerSecond
+            ),
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::maximumDensityGrainsPerSecond
+            )
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainSize,
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::minimumGrainSizeMilliseconds
+            ),
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::maximumGrainSizeMilliseconds
+            )
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainPosition,
+            0.0f,
+            1.0f
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainPitch,
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::minimumPitchSemitones
+            ),
+            static_cast<float>(
+                hypercolor::dsp::granular::GrainScheduler::maximumPitchSemitones
+            )
+        )
+        || !hasValidBooleanParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainReverse
         ))
     {
         return;

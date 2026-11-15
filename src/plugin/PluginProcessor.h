@@ -49,17 +49,26 @@ private:
         createParameterLayout();
 
     void updateParameterTargets() noexcept;
+    [[nodiscard]] hypercolor::dsp::granular::GranularEngineParameters
+        readGranularParameters() const noexcept;
     void processChunk(
         juce::AudioBuffer<float>& buffer,
         int startSample,
         int numSamples,
-        int numChannels
+        int numChannels,
+        const hypercolor::dsp::granular::GranularEngineParameters&
+            granularParameters
     ) noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
 
     std::atomic<float>* dryWetParameter = nullptr;
     std::atomic<float>* outputGainParameter = nullptr;
+    std::atomic<float>* grainDensityParameter = nullptr;
+    std::atomic<float>* grainSizeParameter = nullptr;
+    std::atomic<float>* grainPositionParameter = nullptr;
+    std::atomic<float>* grainPitchParameter = nullptr;
+    std::atomic<float>* grainReverseParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
