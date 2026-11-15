@@ -65,3 +65,30 @@ target_link_libraries(HYPERCOLOR
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
 )
+
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(HYPERCOLORTests)
+
+    target_sources(HYPERCOLORTests
+        PRIVATE
+            tests/ProcessorTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORTests
+        PRIVATE
+            src/plugin
+            ${CMAKE_CURRENT_BINARY_DIR}/HYPERCOLOR_artefacts/JuceLibraryCode
+            JUCE/modules
+    )
+
+    target_link_libraries(HYPERCOLORTests
+        PRIVATE
+            HYPERCOLOR
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME HYPERCOLOR.Processor COMMAND HYPERCOLORTests)
+endif()

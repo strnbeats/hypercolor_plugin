@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 
+#include "PluginParameters.h"
+
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
 public:
@@ -38,6 +40,31 @@ public:
     void getStateInformation(juce::MemoryBlock& destData) override;
     void setStateInformation(const void* data, int sizeInBytes) override;
 
+    juce::AudioProcessorValueTreeState& getValueTreeState() noexcept;
+    const juce::AudioProcessorValueTreeState& getValueTreeState() const noexcept;
+
 private:
+    static juce::AudioProcessorValueTreeState::ParameterLayout
+        createParameterLayout();
+
+    void updateParameterTargets() noexcept;
+    void processChunk(
+        juce::AudioBuffer<float>& buffer,
+        int startSample,
+        int numSamples,
+        int numChannels
+    ) noexcept;
+
+    juce::AudioProcessorValueTreeState parameters;
+
+    std::atomic<float>* dryWetParameter = nullptr;
+    std::atomic<float>* outputGainParameter = nullptr;
+
+    juce::AudioBuffer<float> dryBuffer;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        dryWetSmoother;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
+        outputGainSmoother;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(HypercolorAudioProcessor)
 };
