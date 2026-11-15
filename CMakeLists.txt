@@ -40,6 +40,8 @@ juce_generate_juce_header(HYPERCOLOR)
 target_sources(HYPERCOLOR
     PRIVATE
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/Grain.cpp
+        src/dsp/granular/GrainPool.cpp
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginEditor.cpp
 )
@@ -120,4 +122,47 @@ if(BUILD_TESTING)
         NAME HYPERCOLOR.CircularAudioBuffer
         COMMAND HYPERCOLORCircularAudioBufferTests
     )
+
+    add_executable(HYPERCOLORGrainTests
+        src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/Grain.cpp
+        tests/GrainTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGrainTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(HYPERCOLORGrainTests PRIVATE cxx_std_20)
+
+    target_link_libraries(HYPERCOLORGrainTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME HYPERCOLOR.Grain COMMAND HYPERCOLORGrainTests)
+
+    add_executable(HYPERCOLORGrainPoolTests
+        src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/Grain.cpp
+        src/dsp/granular/GrainPool.cpp
+        tests/GrainPoolTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGrainPoolTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(HYPERCOLORGrainPoolTests PRIVATE cxx_std_20)
+
+    target_link_libraries(HYPERCOLORGrainPoolTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME HYPERCOLOR.GrainPool COMMAND HYPERCOLORGrainPoolTests)
 endif()
