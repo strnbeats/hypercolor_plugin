@@ -23,6 +23,17 @@ constexpr float outputGainMinimumDb = -24.0f;
 constexpr float outputGainMaximumDb = 12.0f;
 constexpr float outputGainDefaultDb = 0.0f;
 
+// Temporary Phase 1F settings. These are replaced by APVTS-backed granular
+// parameters in a later phase without changing the GranularEngine contract.
+constexpr hypercolor::dsp::granular::GranularEngineParameters
+    temporaryGranularParameters {
+        20.0,  // Density: grains per second
+        100.0, // Grain Size: milliseconds
+        0.0,   // Position: freshest valid material
+        0.0,   // Pitch: semitones
+        false  // Reverse
+    };
+
 bool readFiniteNumber(const juce::var& value, double& result)
 {
     if (value.isInt() || value.isInt64() || value.isDouble())
@@ -177,8 +188,20 @@ void HypercolorAudioProcessor::prepareToPlay(
 {
     const auto safeSampleRate = juce::jmax(1.0, sampleRate);
     const auto scratchBlockSize = juce::jmax(1, samplesPerBlock);
+    const auto inputChannels = getTotalNumInputChannels();
 
     dryBuffer.setSize(2, scratchBlockSize, false, false, true);
+
+    const hypercolor::core::ProcessSpec processSpec {
+        sampleRate,
+        samplesPerBlock > 0
+            ? static_cast<std::uint32_t>(samplesPerBlock)
+            : 0u,
+        inputChannels > 0
+            ? static_cast<std::uint32_t>(inputChannels)
+            : 0u
+    };
+    granularEnginePrepared = granularEngine.prepare(processSpec);
 
     dryWetSmoother.reset(safeSampleRate, parameterSmoothingSeconds);
     outputGainSmoother.reset(safeSampleRate, parameterSmoothingSeconds);
@@ -196,6 +219,8 @@ void HypercolorAudioProcessor::prepareToPlay(
 
 void HypercolorAudioProcessor::releaseResources()
 {
+    granularEngine.reset();
+    granularEnginePrepared = false;
 }
 
 bool HypercolorAudioProcessor::isBusesLayoutSupported(
@@ -303,8 +328,31 @@ void HypercolorAudioProcessor::processChunk(
         );
     }
 
-    // Future wet DSP will process this region of `buffer` here. Keeping the
-    // dry copy separate now makes the global mix path stable from Phase 1A.
+    hypercolor::dsp::granular::GranularAudioBlockView granularBlock;
+    granularBlock.numChannels = static_cast<std::uint32_t>(numChannels);
+
+    for (int channel = 0; channel < numChannels; ++channel)
+    {
+        granularBlock.inputChannels[static_cast<std::size_t>(channel)] = {
+            dryBuffer.getReadPointer(channel),
+            static_cast<std::size_t>(numSamples)
+        };
+        granularBlock.outputChannels[static_cast<std::size_t>(channel)] = {
+            buffer.getWritePointer(channel, startSample),
+            static_cast<std::size_t>(numSamples)
+        };
+    }
+
+    const auto granularResult = granularEnginePrepared
+        ? granularEngine.processBlock(
+            granularBlock,
+            temporaryGranularParameters
+        )
+        : hypercolor::dsp::granular::GranularEngineProcessResult::engineNotPrepared;
+    const auto useDryFallback = granularResult
+            == hypercolor::dsp::granular::GranularEngineProcessResult::engineNotPrepared
+        || granularResult
+            == hypercolor::dsp::granular::GranularEngineProcessResult::invalidConfiguration;
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
@@ -313,18 +361,24 @@ void HypercolorAudioProcessor::processChunk(
 
         for (int channel = 0; channel < numChannels; ++channel)
         {
-            const auto drySample = dryBuffer.getSample(channel, sample);
-            const auto wetSample = buffer.getSample(
-                channel,
-                startSample + sample
-            );
+            const auto rawDrySample = dryBuffer.getSample(channel, sample);
+            const auto drySample = std::isfinite(rawDrySample)
+                ? rawDrySample
+                : 0.0f;
+            const auto rawWetSample = useDryFallback
+                ? drySample
+                : buffer.getSample(channel, startSample + sample);
+            const auto wetSample = std::isfinite(rawWetSample)
+                ? rawWetSample
+                : 0.0f;
             const auto mixedSample = drySample
                 + wet * (wetSample - drySample);
+            const auto outputSample = mixedSample * outputGain;
 
             buffer.setSample(
                 channel,
                 startSample + sample,
-                mixedSample * outputGain
+                std::isfinite(outputSample) ? outputSample : 0.0f
             );
         }
     }

@@ -85,6 +85,7 @@ if(BUILD_TESTING)
 
     target_include_directories(HYPERCOLORTests
         PRIVATE
+            src
             src/plugin
             ${CMAKE_CURRENT_BINARY_DIR}/HYPERCOLOR_artefacts/JuceLibraryCode
             JUCE/modules

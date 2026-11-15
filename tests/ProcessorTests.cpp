@@ -1,7 +1,54 @@
 #include "PluginProcessor.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <new>
+
+namespace allocationProbe
+{
+std::atomic<bool> enabled { false };
+std::atomic<std::size_t> count { 0 };
+}
+
+void* operator new(std::size_t size)
+{
+    if (allocationProbe::enabled.load(std::memory_order_relaxed))
+        allocationProbe::count.fetch_add(1, std::memory_order_relaxed);
+
+    if (auto* memory = std::malloc(size))
+        return memory;
+
+    throw std::bad_alloc {};
+}
+
+void* operator new[](std::size_t size)
+{
+    return ::operator new(size);
+}
+
+void operator delete(void* memory) noexcept
+{
+    std::free(memory);
+}
+
+void operator delete[](void* memory) noexcept
+{
+    ::operator delete(memory);
+}
+
+void operator delete(void* memory, std::size_t) noexcept
+{
+    ::operator delete(memory);
+}
+
+void operator delete[](void* memory, std::size_t) noexcept
+{
+    ::operator delete[](memory);
+}
 
 namespace
 {
@@ -71,6 +118,20 @@ void fillBuffer(juce::AudioBuffer<float>& buffer, float value)
     }
 }
 
+bool isFinite(const juce::AudioBuffer<float>& buffer)
+{
+    for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+    {
+        for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+        {
+            if (!std::isfinite(buffer.getSample(channel, sample)))
+                return false;
+        }
+    }
+
+    return true;
+}
+
 void testLayoutsAndBlockSizes(TestContext& context)
 {
     for (const auto testSampleRate : sampleRates)
@@ -89,6 +150,11 @@ void testLayoutsAndBlockSizes(TestContext& context)
                         { channelSet, channelSet }
                     ),
                     "mono/stereo layout should be accepted"
+                );
+                setParameter(
+                    processor,
+                    hypercolor::ParameterIDs::dryWet,
+                    0.0f
                 );
 
                 // Deliberately prepare for less than the delivered block in
@@ -120,6 +186,7 @@ void testLayoutsAndBlockSizes(TestContext& context)
 void testOutputGain(TestContext& context)
 {
     HypercolorAudioProcessor processor;
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 0.0f);
     processor.prepareToPlay(sampleRate, 64);
     setParameter(
         processor,
@@ -143,6 +210,187 @@ void testOutputGain(TestContext& context)
     context.expect(
         buffer.getSample(0, 0) > buffer.getSample(0, buffer.getNumSamples() - 1),
         "Output Gain automation should be smoothed"
+    );
+}
+
+juce::AudioBuffer<float> renderMono(
+    float dryWet,
+    float outputGainDb = 0.0f,
+    int samples = 12000
+)
+{
+    HypercolorAudioProcessor processor;
+    (void) processor.setBusesLayout(
+        { juce::AudioChannelSet::mono(), juce::AudioChannelSet::mono() }
+    );
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, dryWet);
+    setParameter(
+        processor,
+        hypercolor::ParameterIDs::outputGain,
+        outputGainDb
+    );
+    processor.prepareToPlay(sampleRate, 64);
+
+    juce::AudioBuffer<float> buffer(1, samples);
+
+    for (int sample = 0; sample < samples; ++sample)
+    {
+        buffer.setSample(
+            0,
+            sample,
+            0.2f + 0.1f * static_cast<float>(sample % 101) / 100.0f
+        );
+    }
+
+    juce::MidiBuffer midi;
+    processor.processBlock(buffer, midi);
+    return buffer;
+}
+
+void testGranularDryWetMix(TestContext& context)
+{
+    const auto dry = renderMono(0.0f);
+    const auto half = renderMono(50.0f);
+    const auto wet = renderMono(100.0f);
+    const auto attenuatedWet = renderMono(100.0f, -6.0f);
+    const auto wetGain = juce::Decibels::decibelsToGain(-6.0f);
+    auto wetDiffersFromDry = false;
+    auto wetContainsSignal = false;
+
+    for (int sample = 0; sample < dry.getNumSamples(); ++sample)
+    {
+        const auto expectedInput = 0.2f
+            + 0.1f * static_cast<float>(sample % 101) / 100.0f;
+        context.expect(
+            std::abs(dry.getSample(0, sample) - expectedInput) < 1.0e-6f,
+            "Dry/Wet 0% should preserve dry input"
+        );
+
+        const auto drySample = dry.getSample(0, sample);
+        const auto wetSample = wet.getSample(0, sample);
+        wetDiffersFromDry = wetDiffersFromDry
+            || std::abs(wetSample - drySample) > 1.0e-4f;
+        wetContainsSignal = wetContainsSignal
+            || std::abs(wetSample) > 1.0e-5f;
+        context.expect(
+            std::abs(
+                half.getSample(0, sample)
+                - 0.5f * (drySample + wetSample)
+            ) < 2.0e-5f,
+            "Dry/Wet 50% should linearly mix dry and granular wet"
+        );
+        context.expect(
+            std::abs(
+                attenuatedWet.getSample(0, sample)
+                - wetSample * wetGain
+            ) < 2.0e-5f,
+            "Output Gain should apply to the granular wet signal"
+        );
+    }
+
+    context.expect(wetDiffersFromDry, "granular wet should differ from dry input");
+    context.expect(wetContainsSignal, "granular wet should become audible after history accumulates");
+    context.expect(isFinite(wet), "granular wet output should remain finite");
+}
+
+void testStereoGranularProcessing(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    processor.prepareToPlay(sampleRate, 17);
+
+    juce::AudioBuffer<float> buffer(2, 12000);
+
+    for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+    {
+        const auto left = 0.1f
+            + 0.2f * static_cast<float>(sample % 97) / 96.0f;
+        buffer.setSample(0, sample, left);
+        buffer.setSample(1, sample, -0.5f * left);
+    }
+
+    juce::MidiBuffer midi;
+    processor.processBlock(buffer, midi);
+    auto foundWet = false;
+
+    for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+    {
+        const auto left = buffer.getSample(0, sample);
+        const auto right = buffer.getSample(1, sample);
+        foundWet = foundWet || std::abs(left) > 1.0e-5f;
+
+        if (std::abs(left) > 1.0e-5f)
+        {
+            context.expect(
+                std::abs(right + 0.5f * left) < 2.0e-5f,
+                "stereo granular processing should preserve channel relationship"
+            );
+        }
+    }
+
+    context.expect(foundWet, "stereo granular wet should become audible");
+    context.expect(isFinite(buffer), "stereo granular output should remain finite");
+}
+
+void testFallbackResetAndReprepare(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    setParameter(processor, hypercolor::ParameterIDs::outputGain, -6.0f);
+    processor.prepareToPlay(1.0, 64);
+
+    juce::AudioBuffer<float> fallbackBuffer(2, 64);
+    fillBuffer(fallbackBuffer, 0.5f);
+    juce::MidiBuffer midi;
+    processor.processBlock(fallbackBuffer, midi);
+    const auto expectedFallback = 0.5f
+        * juce::Decibels::decibelsToGain(-6.0f);
+    context.expect(
+        std::abs(fallbackBuffer.getSample(0, 0) - expectedFallback) < 1.0e-5f,
+        "failed Engine prepare should fall back to dry signal with Output Gain"
+    );
+
+    processor.releaseResources();
+    processor.prepareToPlay(sampleRate, 64);
+    juce::AudioBuffer<float> wetBuffer(2, 12000);
+    fillBuffer(wetBuffer, 0.25f);
+    processor.processBlock(wetBuffer, midi);
+    context.expect(isFinite(wetBuffer), "reprepared granular output should stay finite");
+    context.expect(
+        std::any_of(
+            wetBuffer.getReadPointer(0),
+            wetBuffer.getReadPointer(0) + wetBuffer.getNumSamples(),
+            [](float value) { return std::abs(value) > 1.0e-5f; }
+        ),
+        "Engine should process again after release and reprepare"
+    );
+}
+
+void testNonFiniteInputAndRealtimeAllocations(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    processor.prepareToPlay(sampleRate, 64);
+
+    juce::AudioBuffer<float> history(2, 10000);
+    fillBuffer(history, 0.25f);
+    juce::MidiBuffer midi;
+    processor.processBlock(history, midi);
+
+    juce::AudioBuffer<float> buffer(2, 1024);
+    fillBuffer(buffer, 0.25f);
+    buffer.setSample(0, 0, std::numeric_limits<float>::quiet_NaN());
+    buffer.setSample(1, 1, std::numeric_limits<float>::infinity());
+
+    allocationProbe::count.store(0, std::memory_order_relaxed);
+    allocationProbe::enabled.store(true, std::memory_order_relaxed);
+    processor.processBlock(buffer, midi);
+    allocationProbe::enabled.store(false, std::memory_order_relaxed);
+
+    context.expect(isFinite(buffer), "non-finite input must not reach plugin output");
+    context.expect(
+        allocationProbe::count.load(std::memory_order_relaxed) == 0,
+        "prepared processBlock should perform no heap allocations"
     );
 }
 
@@ -229,6 +477,10 @@ int main()
 
     testLayoutsAndBlockSizes(context);
     testOutputGain(context);
+    testGranularDryWetMix(context);
+    testStereoGranularProcessing(context);
+    testFallbackResetAndReprepare(context);
+    testNonFiniteInputAndRealtimeAllocations(context);
     testStateRoundTrip(context);
 
     if (context.getFailures() == 0)

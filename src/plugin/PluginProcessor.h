@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 
 #include "PluginParameters.h"
+#include "dsp/granular/GranularEngine.h"
 
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
@@ -61,6 +62,8 @@ private:
     std::atomic<float>* outputGainParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
+    hypercolor::dsp::granular::GranularEngine granularEngine;
+    bool granularEnginePrepared = false;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         dryWetSmoother;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
