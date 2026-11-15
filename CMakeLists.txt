@@ -40,6 +40,7 @@ juce_generate_juce_header(HYPERCOLOR)
 target_sources(HYPERCOLOR
     PRIVATE
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/GranularEngine.cpp
         src/dsp/granular/Grain.cpp
         src/dsp/granular/GrainPool.cpp
         src/dsp/granular/GrainRenderer.cpp
@@ -192,6 +193,34 @@ if(BUILD_TESTING)
     add_test(
         NAME HYPERCOLOR.GrainRenderer
         COMMAND HYPERCOLORGrainRendererTests
+    )
+
+    add_executable(HYPERCOLORGranularEngineTests
+        src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/GranularEngine.cpp
+        src/dsp/granular/Grain.cpp
+        src/dsp/granular/GrainPool.cpp
+        src/dsp/granular/GrainRenderer.cpp
+        src/dsp/granular/GrainScheduler.cpp
+        tests/GranularEngineTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGranularEngineTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(HYPERCOLORGranularEngineTests PRIVATE cxx_std_20)
+
+    target_link_libraries(HYPERCOLORGranularEngineTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.GranularEngine
+        COMMAND HYPERCOLORGranularEngineTests
     )
 
     add_executable(HYPERCOLORGrainSchedulerTests
