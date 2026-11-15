@@ -48,6 +48,7 @@ GrainInitResult Grain::initialise(
     // Commit only after every check succeeds, keeping failed initialisation
     // transactional and leaving this grain inactive.
     sourceRegion = init.sourceRegion;
+    startPosition = init.startPosition;
     readPosition = init.startPosition;
     playbackRate = init.playbackRate;
     durationFrames = init.durationFrames;
@@ -71,9 +72,13 @@ void Grain::advanceAfterRender() noexcept
         return;
     }
 
-    // Do not advance past the final trajectory position. On the last frame,
-    // the method returns above and preserves p(N - 1).
-    readPosition += playbackRate;
+    // Derive every position from immutable initial state. This exactly matches
+    // the arithmetic contract used by CircularAudioBuffer trajectory checks.
+    readPosition = CircularAudioBuffer::calculateLinearTrajectoryPosition(
+        startPosition,
+        playbackRate,
+        renderedFrames
+    );
 }
 
 void Grain::markFinished() noexcept
@@ -85,6 +90,7 @@ void Grain::markFinished() noexcept
 void Grain::reset() noexcept
 {
     sourceRegion = {};
+    startPosition = 0.0;
     readPosition = 0.0;
     playbackRate = 1.0;
     durationFrames = 0;

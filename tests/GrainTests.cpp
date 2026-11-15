@@ -25,6 +25,11 @@ static_assert(noexcept(std::declval<Grain&>().advanceAfterRender()));
 static_assert(noexcept(std::declval<Grain&>().markFinished()));
 static_assert(noexcept(std::declval<Grain&>().reset()));
 static_assert(noexcept(std::declval<const Grain&>().getWindowCoefficient()));
+static_assert(noexcept(CircularAudioBuffer::calculateLinearTrajectoryPosition(
+    0.0,
+    1.0,
+    0
+)));
 
 class TestContext
 {
@@ -85,6 +90,34 @@ bool prepareAndFill(
          ++frameIndex)
     {
         const std::array frame { static_cast<float>(frameIndex) };
+
+        if (!buffer.writeFrame(frame))
+            return false;
+    }
+
+    return true;
+}
+
+bool prepareWithHistory(
+    CircularAudioBuffer& buffer,
+    std::size_t capacityFrames,
+    std::size_t logicalFrames,
+    std::size_t historyFrames
+)
+{
+    if (!buffer.prepare(
+            ProcessSpec { sampleRate, 64, 1 },
+            durationForFrames(capacityFrames),
+            durationForFrames(logicalFrames)))
+    {
+        return false;
+    }
+
+    for (std::size_t frameIndex = 0;
+         frameIndex < historyFrames;
+         ++frameIndex)
+    {
+        const std::array frame { static_cast<float>(frameIndex % 1024) };
 
         if (!buffer.writeFrame(frame))
             return false;
@@ -311,6 +344,183 @@ void testExactPositionsAndLifecycle(TestContext& context)
     );
 }
 
+void testFractionalTrajectory(
+    TestContext& context,
+    double playbackRate,
+    double startPosition,
+    std::uint32_t durationFrames
+)
+{
+    constexpr std::size_t capacityFrames = 176400;
+    constexpr std::size_t historyFrames = 132300;
+    CircularAudioBuffer buffer;
+    context.expect(
+        prepareWithHistory(
+            buffer,
+            capacityFrames,
+            capacityFrames,
+            historyFrames
+        ),
+        "fractional trajectory source should prepare"
+    );
+
+    Grain grain;
+    const auto init = makeInit(
+        buffer,
+        startPosition,
+        playbackRate,
+        durationFrames
+    );
+    context.expect(
+        buffer.isLinearTrajectoryValid(
+            init.sourceRegion,
+            init.startPosition,
+            init.playbackRate,
+            init.durationFrames
+        ),
+        "fractional trajectory should pass source validation"
+    );
+    context.expect(
+        grain.initialise(init, buffer) == GrainInitResult::success,
+        "fractional grain should initialise"
+    );
+
+    for (std::uint32_t frame = 0; frame < durationFrames; ++frame)
+    {
+        if (frame > 0)
+        {
+            const std::array input { 0.0f };
+            context.expect(
+                buffer.writeFrame(input),
+                "fractional trajectory follow-up write should succeed"
+            );
+        }
+
+        const auto expectedPosition
+            = CircularAudioBuffer::calculateLinearTrajectoryPosition(
+                startPosition,
+                playbackRate,
+                frame
+            );
+        context.expectNear(
+            grain.getReadPosition(),
+            expectedPosition,
+            0.0,
+            "Grain position must use the validated direct formula"
+        );
+
+        float sample = 0.0f;
+        context.expect(
+            buffer.tryReadLinear(
+                grain.getSourceRegion(),
+                0,
+                grain.getReadPosition(),
+                sample
+            ),
+            "every fractional trajectory read should remain valid"
+        );
+        grain.advanceAfterRender();
+    }
+
+    context.expect(grain.isFinished(), "fractional grain should finish exactly");
+    context.expect(
+        grain.getRenderedFrames() == durationFrames,
+        "fractional grain should render exactly N frames"
+    );
+    context.expectNear(
+        grain.getReadPosition(),
+        CircularAudioBuffer::calculateLinearTrajectoryPosition(
+            startPosition,
+            playbackRate,
+            durationFrames - 1
+        ),
+        0.0,
+        "finished fractional grain should retain p(N - 1)"
+    );
+}
+
+void testNonBinaryPlaybackRatesAndBoundaryRegressions(TestContext& context)
+{
+    constexpr std::uint32_t shortDuration = 4096;
+
+    for (const auto semitones : { -23.0, -22.0, 7.0 })
+    {
+        const auto magnitude = std::exp2(semitones / 12.0);
+        testFractionalTrajectory(
+            context,
+            magnitude,
+            40000.0,
+            shortDuration
+        );
+        testFractionalTrajectory(
+            context,
+            -magnitude,
+            80000.0,
+            shortDuration
+        );
+    }
+
+    constexpr std::uint32_t regressionDuration = 22050;
+    constexpr double newestExclusive = 132300.0;
+    const auto freshestEndpoint = std::nextafter(
+        newestExclusive - 1.0,
+        -std::numeric_limits<double>::infinity()
+    );
+    const auto forwardRate = std::exp2(-22.0 / 12.0);
+    const auto forwardStart = freshestEndpoint
+        - forwardRate * static_cast<double>(regressionDuration - 1);
+    testFractionalTrajectory(
+        context,
+        forwardRate,
+        forwardStart,
+        regressionDuration
+    );
+
+    const auto reverseRate = -std::exp2(-23.0 / 12.0);
+    const auto reverseStart = std::abs(reverseRate)
+        * static_cast<double>(regressionDuration - 1);
+    testFractionalTrajectory(
+        context,
+        reverseRate,
+        reverseStart,
+        regressionDuration
+    );
+}
+
+void testSharedTrajectoryArithmeticAtLargePositions(TestContext& context)
+{
+    constexpr auto offset = std::uint32_t { 95999 };
+    const auto rate = std::exp2(7.0 / 12.0);
+    const std::array starts {
+        std::ldexp(1.0, 20) - 200000.0,
+        std::ldexp(1.0, 32) - 200000.0,
+        std::ldexp(1.0, 52) - 200000.0,
+        std::nextafter(
+            std::ldexp(1.0, 53),
+            -std::numeric_limits<double>::infinity()
+        ) - 500000.0
+    };
+
+    for (const auto start : starts)
+    {
+        const auto expected = std::fma(
+            rate,
+            static_cast<double>(offset),
+            start
+        );
+        context.expectNear(
+            CircularAudioBuffer::calculateLinearTrajectoryPosition(
+                start,
+                rate,
+                offset
+            ),
+            expected,
+            0.0,
+            "shared position helper should retain its exact FMA contract"
+        );
+    }
+}
+
 void testHannWindow(TestContext& context)
 {
     CircularAudioBuffer buffer;
@@ -422,6 +632,29 @@ void testResetLogicalDurationAndSourceInvalidation(TestContext& context)
     context.expect(grain.getDurationFrames() == 0, "reset should clear duration");
     context.expect(grain.getRenderedFrames() == 0, "reset should clear render count");
     context.expect(grain.getWindowCoefficient() == 0.0f, "inactive window should be zero");
+
+    for (std::size_t frameIndex = 0; frameIndex < 16; ++frameIndex)
+    {
+        const std::array frame { 0.0f };
+        context.expect(buffer.writeFrame(frame), "reuse source write should succeed");
+    }
+
+    const auto reuse = makeInit(buffer, 10.0, 0.5, 4);
+    context.expect(
+        grain.initialise(reuse, buffer) == GrainInitResult::success,
+        "reset grain should accept a new trajectory"
+    );
+    grain.advanceAfterRender();
+    context.expectNear(
+        grain.getReadPosition(),
+        CircularAudioBuffer::calculateLinearTrajectoryPosition(
+            reuse.startPosition,
+            reuse.playbackRate,
+            1
+        ),
+        0.0,
+        "reused grain must use its new immutable start position"
+    );
 }
 }
 
@@ -433,6 +666,8 @@ int main()
     testForwardReverseAndStationary(context);
     testInvalidInitialisation(context);
     testExactPositionsAndLifecycle(context);
+    testNonBinaryPlaybackRatesAndBoundaryRegressions(context);
+    testSharedTrajectoryArithmeticAtLargePositions(context);
     testHannWindow(context);
     testResetLogicalDurationAndSourceInvalidation(context);
 

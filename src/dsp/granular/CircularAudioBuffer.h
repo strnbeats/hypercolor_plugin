@@ -2,6 +2,7 @@
 
 #include "core/ProcessSpec.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -47,6 +48,21 @@ public:
     static constexpr double maximumSupportedSampleRate = 192000.0;
     static constexpr double productMaximumDurationSeconds = 10.0;
     static constexpr double defaultLogicalDurationSeconds = 4.0;
+
+    // Shared arithmetic contract for every validated and rendered trajectory.
+    // std::fma fixes the operation and rounding model across translation units.
+    [[nodiscard]] static double calculateLinearTrajectoryPosition(
+        double startPosition,
+        double playbackRate,
+        std::uint32_t frameOffset
+    ) noexcept
+    {
+        return std::fma(
+            playbackRate,
+            static_cast<double>(frameOffset),
+            startPosition
+        );
+    }
 
     CircularAudioBuffer() = default;
     ~CircularAudioBuffer() = default;
@@ -134,13 +150,13 @@ private:
         const LinearTaps& taps
     ) const noexcept;
     [[nodiscard]] bool isTrajectoryPositionPhysicallyValid(
-        long double startPosition,
-        long double playbackRate,
-        AbsoluteFrame offset
+        double startPosition,
+        double playbackRate,
+        std::uint32_t offset
     ) const noexcept;
     [[nodiscard]] bool isTrajectoryPositionInsideSource(
         const SourceRegion& sourceRegion,
-        long double position
+        double position
     ) const noexcept;
     [[nodiscard]] AbsoluteFrame getPhysicalOldestAtFutureOffset(
         AbsoluteFrame offset

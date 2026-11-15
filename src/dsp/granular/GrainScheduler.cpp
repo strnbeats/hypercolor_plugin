@@ -1,0 +1,323 @@
+#include "dsp/granular/GrainScheduler.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace hypercolor::dsp::granular
+{
+namespace
+{
+constexpr auto maximumExactDoubleInteger = std::uint64_t { 1 }
+    << std::numeric_limits<double>::digits;
+
+bool sampleRatesMatch(double first, double second) noexcept
+{
+    const auto scale = std::max(std::abs(first), std::abs(second));
+    return std::abs(first - second)
+        <= std::numeric_limits<double>::epsilon() * scale;
+}
+}
+
+bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
+{
+    const auto validSpec = std::isfinite(spec.sampleRate)
+        && spec.sampleRate >= CircularAudioBuffer::minimumSupportedSampleRate
+        && spec.sampleRate <= CircularAudioBuffer::maximumSupportedSampleRate
+        && spec.maximumBlockSize > 0
+        && (spec.numChannels == 1 || spec.numChannels == 2);
+
+    if (!validSpec)
+    {
+        sampleRate = 0.0;
+        scaledPhase = 0.0;
+        prepared = false;
+        return false;
+    }
+
+    sampleRate = spec.sampleRate;
+    scaledPhase = 0.0;
+    prepared = true;
+    return true;
+}
+
+void GrainScheduler::reset() noexcept
+{
+    scaledPhase = 0.0;
+}
+
+GrainSchedulerStepResult GrainScheduler::processSample(
+    const GrainSchedulerParameters& parameters,
+    const CircularAudioBuffer& source,
+    GrainPool& pool
+) noexcept
+{
+    if (!prepared)
+        return GrainSchedulerStepResult::schedulerNotPrepared;
+
+    if (!std::isfinite(parameters.densityGrainsPerSecond))
+        return GrainSchedulerStepResult::invalidParameters;
+
+    const auto density = std::clamp(
+        parameters.densityGrainsPerSecond,
+        minimumDensityGrainsPerSecond,
+        maximumDensityGrainsPerSecond
+    );
+    // This is the requested normalized phase equation multiplied by
+    // sampleRate: phase + density / sampleRate becomes scaledPhase + density.
+    const auto accumulated = scaledPhase + density;
+
+    if (accumulated < sampleRate)
+    {
+        scaledPhase = accumulated;
+        return GrainSchedulerStepResult::noEvent;
+    }
+
+    // Product limits guarantee fewer than two events per sample. Consume the
+    // event before validation so failed starts never create timing debt.
+    scaledPhase = accumulated - sampleRate;
+
+    if (!source.isPrepared()
+        || !sampleRatesMatch(source.getSampleRate(), sampleRate))
+        return GrainSchedulerStepResult::sourceUnavailable;
+
+    if (!std::isfinite(parameters.grainSizeMilliseconds)
+        || !std::isfinite(parameters.positionNormalized)
+        || !std::isfinite(parameters.pitchSemitones))
+    {
+        return GrainSchedulerStepResult::invalidParameters;
+    }
+
+    const auto grainSizeMilliseconds = std::clamp(
+        parameters.grainSizeMilliseconds,
+        minimumGrainSizeMilliseconds,
+        maximumGrainSizeMilliseconds
+    );
+    const auto positionNormalized = std::clamp(
+        parameters.positionNormalized,
+        0.0,
+        1.0
+    );
+    const auto pitchSemitones = std::clamp(
+        parameters.pitchSemitones,
+        minimumPitchSemitones,
+        maximumPitchSemitones
+    );
+
+    std::uint32_t durationFrames = 0;
+
+    if (!calculateDurationFrames(grainSizeMilliseconds, durationFrames))
+        return GrainSchedulerStepResult::invalidParameters;
+
+    const auto magnitude = std::exp2(pitchSemitones / 12.0);
+    const auto playbackRate = parameters.reverse ? -magnitude : magnitude;
+
+    if (!std::isfinite(playbackRate))
+        return GrainSchedulerStepResult::invalidParameters;
+
+    const auto sourceRegion = source.captureSourceRegion();
+
+    if (!source.isSourceRegionCurrent(sourceRegion))
+        return GrainSchedulerStepResult::sourceUnavailable;
+
+    if (sourceRegion.isEmpty())
+        return GrainSchedulerStepResult::insufficientHistory;
+
+    double startPosition = 0.0;
+
+    const auto positionResult = calculateStartPosition(
+        sourceRegion,
+        durationFrames,
+        playbackRate,
+        positionNormalized,
+        startPosition
+    );
+
+    if (positionResult == StartPositionResult::insufficientHistory)
+    {
+        return GrainSchedulerStepResult::insufficientHistory;
+    }
+
+    if (positionResult == StartPositionResult::invalidRepresentation)
+        return GrainSchedulerStepResult::invalidTrajectory;
+
+    if (!source.isLinearTrajectoryValid(
+            sourceRegion,
+            startPosition,
+            playbackRate,
+            durationFrames
+        ))
+    {
+        return GrainSchedulerStepResult::invalidTrajectory;
+    }
+
+    const GrainInit init {
+        sourceRegion,
+        startPosition,
+        playbackRate,
+        durationFrames,
+        GrainWindow::hann
+    };
+
+    switch (pool.tryStart(init, source))
+    {
+        case GrainStartResult::started:
+            return GrainSchedulerStepResult::started;
+        case GrainStartResult::poolFull:
+            return GrainSchedulerStepResult::poolFull;
+        case GrainStartResult::invalidGrain:
+            return GrainSchedulerStepResult::invalidTrajectory;
+        case GrainStartResult::traversalInProgress:
+            return GrainSchedulerStepResult::traversalInProgress;
+    }
+
+    return GrainSchedulerStepResult::invalidTrajectory;
+}
+
+bool GrainScheduler::isPrepared() const noexcept
+{
+    return prepared;
+}
+
+bool GrainScheduler::calculateDurationFrames(
+    double grainSizeMilliseconds,
+    std::uint32_t& result
+) const noexcept
+{
+    result = 0;
+
+    const auto exactFrames = static_cast<long double>(
+            grainSizeMilliseconds
+        ) * static_cast<long double>(sampleRate) / 1000.0L;
+    const auto roundedFrames = std::round(exactFrames);
+
+    if (!std::isfinite(roundedFrames)
+        || roundedFrames < 0.0L
+        || roundedFrames
+            > static_cast<long double>(
+                std::numeric_limits<std::uint32_t>::max()
+            ))
+    {
+        return false;
+    }
+
+    result = std::max(
+        Grain::minimumDurationFrames,
+        static_cast<std::uint32_t>(roundedFrames)
+    );
+    return true;
+}
+
+GrainScheduler::StartPositionResult
+GrainScheduler::calculateStartPosition(
+    const CircularAudioBuffer::SourceRegion& sourceRegion,
+    std::uint32_t durationFrames,
+    double playbackRate,
+    double positionNormalized,
+    double& result
+) const noexcept
+{
+    result = 0.0;
+
+    if (sourceRegion.isEmpty()
+        || durationFrames < Grain::minimumDurationFrames
+        || !std::isfinite(playbackRate)
+        || !std::isfinite(positionNormalized))
+    {
+        return StartPositionResult::invalidRepresentation;
+    }
+
+    const auto oldest = static_cast<long double>(sourceRegion.oldest);
+    const auto newestExclusive = static_cast<long double>(
+        sourceRegion.newestExclusive
+    );
+    const auto travel = std::abs(static_cast<long double>(playbackRate))
+        * static_cast<long double>(durationFrames - 1);
+    const auto oldestFreshEndpoint = oldest + travel;
+    const auto upperFreshEndpointExclusive = newestExclusive - 1.0L;
+
+    if (!std::isfinite(travel)
+        || !std::isfinite(oldestFreshEndpoint)
+        || !std::isfinite(upperFreshEndpointExclusive)
+        || oldestFreshEndpoint >= upperFreshEndpointExclusive)
+    {
+        return StartPositionResult::insufficientHistory;
+    }
+
+    const auto upperAsDouble = static_cast<double>(
+        upperFreshEndpointExclusive
+    );
+
+    if (!std::isfinite(upperAsDouble))
+        return StartPositionResult::invalidRepresentation;
+
+    auto freshestEndpoint = std::nextafter(
+        upperAsDouble,
+        -std::numeric_limits<double>::infinity()
+    );
+
+    if (!std::isfinite(freshestEndpoint)
+        || static_cast<long double>(freshestEndpoint)
+            >= upperFreshEndpointExclusive
+        || static_cast<long double>(freshestEndpoint)
+            < oldestFreshEndpoint)
+    {
+        return StartPositionResult::invalidRepresentation;
+    }
+
+    const auto selectedEndpoint = static_cast<long double>(freshestEndpoint)
+        - static_cast<long double>(positionNormalized)
+            * (static_cast<long double>(freshestEndpoint)
+                - oldestFreshEndpoint);
+    auto representableEndpoint = static_cast<double>(selectedEndpoint);
+
+    if (!std::isfinite(representableEndpoint))
+        return StartPositionResult::invalidRepresentation;
+
+    if (static_cast<long double>(representableEndpoint)
+        < oldestFreshEndpoint)
+    {
+        representableEndpoint = std::nextafter(
+            representableEndpoint,
+            std::numeric_limits<double>::infinity()
+        );
+    }
+
+    if (!std::isfinite(representableEndpoint)
+        || representableEndpoint > freshestEndpoint
+        || static_cast<long double>(representableEndpoint)
+            < oldestFreshEndpoint
+        || static_cast<long double>(representableEndpoint)
+            >= upperFreshEndpointExclusive)
+    {
+        return StartPositionResult::invalidRepresentation;
+    }
+
+    const auto startAsLongDouble = playbackRate < 0.0
+        ? static_cast<long double>(representableEndpoint)
+        : static_cast<long double>(representableEndpoint) - travel;
+    auto start = static_cast<double>(startAsLongDouble);
+
+    if (!std::isfinite(start))
+        return StartPositionResult::invalidRepresentation;
+
+    if (static_cast<long double>(start) < oldest)
+    {
+        start = std::nextafter(
+            start,
+            std::numeric_limits<double>::infinity()
+        );
+    }
+
+    if (!std::isfinite(start)
+        || start < 0.0
+        || start >= static_cast<double>(maximumExactDoubleInteger)
+        || static_cast<long double>(start) < oldest)
+    {
+        return StartPositionResult::invalidRepresentation;
+    }
+
+    result = start;
+    return StartPositionResult::success;
+}
+}

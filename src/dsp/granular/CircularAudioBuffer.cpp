@@ -249,20 +249,20 @@ bool CircularAudioBuffer::isLinearTrajectoryValid(
         return false;
     }
 
-    const auto lastOffset = static_cast<AbsoluteFrame>(frameCount - 1);
+    const auto lastOffset = frameCount - 1;
 
-    if (lastOffset > maximumExactDoubleInteger - absoluteWritePosition)
+    if (static_cast<AbsoluteFrame>(lastOffset)
+        > maximumExactDoubleInteger - absoluteWritePosition)
         return false;
 
-    const auto start = static_cast<long double>(startPosition);
-    const auto rate = static_cast<long double>(playbackRate);
-    const auto end = start
-        + rate * static_cast<long double>(lastOffset);
+    const auto end = calculateLinearTrajectoryPosition(
+        startPosition,
+        playbackRate,
+        lastOffset
+    );
 
-    if (!std::isfinite(start)
-        || !std::isfinite(rate)
-        || !std::isfinite(end)
-        || !isTrajectoryPositionInsideSource(sourceRegion, start)
+    if (!std::isfinite(end)
+        || !isTrajectoryPositionInsideSource(sourceRegion, startPosition)
         || !isTrajectoryPositionInsideSource(sourceRegion, end))
     {
         return false;
@@ -273,10 +273,14 @@ bool CircularAudioBuffer::isLinearTrajectoryValid(
     // region. Physical overwrite has one additional piecewise-linear
     // boundary: it is stationary until the buffer fills, then advances by
     // one frame per rendered sample. Endpoints of both pieces are sufficient.
-    if (!isTrajectoryPositionPhysicallyValid(start, rate, 0)
+    if (!isTrajectoryPositionPhysicallyValid(
+            startPosition,
+            playbackRate,
+            0
+        )
         || !isTrajectoryPositionPhysicallyValid(
-            start,
-            rate,
+            startPosition,
+            playbackRate,
             lastOffset
         ))
     {
@@ -292,9 +296,9 @@ bool CircularAudioBuffer::isLinearTrajectoryValid(
 
         if (firstOverwriteOffset <= lastOffset
             && !isTrajectoryPositionPhysicallyValid(
-                start,
-                rate,
-                firstOverwriteOffset
+                startPosition,
+                playbackRate,
+                static_cast<std::uint32_t>(firstOverwriteOffset)
             ))
         {
             return false;
@@ -443,50 +447,53 @@ bool CircularAudioBuffer::areTapsInsideSourceAndPhysicalRanges(
 }
 
 bool CircularAudioBuffer::isTrajectoryPositionPhysicallyValid(
-    long double startPosition,
-    long double playbackRate,
-    AbsoluteFrame offset
+    double startPosition,
+    double playbackRate,
+    std::uint32_t offset
 ) const noexcept
 {
-    const auto position = startPosition
-        + playbackRate * static_cast<long double>(offset);
+    const auto position = calculateLinearTrajectoryPosition(
+        startPosition,
+        playbackRate,
+        offset
+    );
 
     if (!std::isfinite(position)
-        || position < 0.0L
+        || position < 0.0
         || position
-            >= static_cast<long double>(maximumExactDoubleInteger))
+            >= static_cast<double>(maximumExactDoubleInteger))
     {
         return false;
     }
 
     const auto first = std::floor(position);
     const auto oldest = getPhysicalOldestAtFutureOffset(offset);
-    return first >= static_cast<long double>(oldest);
+    return first >= static_cast<double>(oldest);
 }
 
 bool CircularAudioBuffer::isTrajectoryPositionInsideSource(
     const SourceRegion& sourceRegion,
-    long double position
+    double position
 ) const noexcept
 {
     if (!std::isfinite(position)
-        || position < 0.0L
+        || position < 0.0
         || position
-            >= static_cast<long double>(maximumExactDoubleInteger))
+            >= static_cast<double>(maximumExactDoubleInteger))
     {
         return false;
     }
 
     const auto first = std::floor(position);
 
-    if (first < static_cast<long double>(sourceRegion.oldest))
+    if (first < static_cast<double>(sourceRegion.oldest))
         return false;
 
     // Linear interpolation always reserves both taps, including at integer
     // positions. This is the strict x < newestExclusive - 1 contract.
     return sourceRegion.newestExclusive > 0
-        && first + 1.0L
-            < static_cast<long double>(sourceRegion.newestExclusive);
+        && first + 1.0
+            < static_cast<double>(sourceRegion.newestExclusive);
 }
 
 CircularAudioBuffer::AbsoluteFrame

@@ -74,6 +74,7 @@ public:
 
 private:
     CircularAudioBuffer::SourceRegion sourceRegion;
+    double startPosition = 0.0;
     double readPosition = 0.0;
     double playbackRate = 1.0;
     std::uint32_t durationFrames = 0;
