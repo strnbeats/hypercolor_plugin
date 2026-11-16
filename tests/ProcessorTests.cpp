@@ -1,11 +1,13 @@
 #include "PluginProcessor.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <new>
 
 namespace allocationProbe
@@ -705,6 +707,158 @@ bool removeParameterFromXml(
     return false;
 }
 
+void testEditorControlsStateAndResize(TestContext& context)
+{
+    HypercolorAudioProcessor source;
+    setParameter(source, hypercolor::ParameterIDs::grainDensity, 55.5f);
+    setParameter(source, hypercolor::ParameterIDs::grainSize, 222.2f);
+    setParameter(source, hypercolor::ParameterIDs::grainPosition, 0.75f);
+    setParameter(source, hypercolor::ParameterIDs::grainPitch, -5.5f);
+    setParameter(source, hypercolor::ParameterIDs::grainReverse, 1.0f);
+
+    juce::MemoryBlock state;
+    source.getStateInformation(state);
+    HypercolorAudioProcessor restored;
+    restored.setStateInformation(
+        state.getData(),
+        static_cast<int>(state.getSize())
+    );
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor(
+        restored.createEditor()
+    );
+    context.expect(editor != nullptr, "processor should create its editor");
+
+    if (editor == nullptr)
+        return;
+
+    const auto findSlider = [&editor](const char* parameterID)
+    {
+        return dynamic_cast<juce::Slider*>(
+            editor->findChildWithID(parameterID)
+        );
+    };
+    auto* density = findSlider(hypercolor::ParameterIDs::grainDensity);
+    auto* size = findSlider(hypercolor::ParameterIDs::grainSize);
+    auto* position = findSlider(hypercolor::ParameterIDs::grainPosition);
+    auto* pitch = findSlider(hypercolor::ParameterIDs::grainPitch);
+    auto* dryWet = findSlider(hypercolor::ParameterIDs::dryWet);
+    auto* outputGain = findSlider(hypercolor::ParameterIDs::outputGain);
+    auto* reverse = dynamic_cast<juce::Button*>(
+        editor->findChildWithID(hypercolor::ParameterIDs::grainReverse)
+    );
+
+    context.expect(density != nullptr, "editor should expose Density control");
+    context.expect(size != nullptr, "editor should expose Size control");
+    context.expect(position != nullptr, "editor should expose Position control");
+    context.expect(pitch != nullptr, "editor should expose Pitch control");
+    context.expect(reverse != nullptr, "editor should expose Reverse control");
+    context.expect(dryWet != nullptr, "editor should retain Dry/Wet control");
+    context.expect(outputGain != nullptr, "editor should retain Output Gain control");
+
+    if (density != nullptr)
+    {
+        context.expect(
+            std::abs(density->getValue() - 55.5) < 0.01,
+            "Density attachment should reflect restored state"
+        );
+    }
+
+    if (size != nullptr)
+    {
+        context.expect(
+            std::abs(size->getValue() - 222.2) < 0.11,
+            "Size attachment should reflect restored state"
+        );
+    }
+
+    if (position != nullptr)
+    {
+        context.expect(
+            std::abs(position->getValue() - 0.75) < 0.002,
+            "Position attachment should reflect restored state"
+        );
+        context.expect(
+            position->getTextFromValue(position->getValue()).contains("75"),
+            "Position control should display normalized value as percent"
+        );
+    }
+
+    if (pitch != nullptr)
+    {
+        context.expect(
+            std::abs(pitch->getValue() - (-5.5)) < 0.01,
+            "Pitch attachment should reflect restored state"
+        );
+        context.expect(
+            pitch->getTextFromValue(pitch->getValue()).contains("st"),
+            "Pitch control should display semitone units"
+        );
+    }
+
+    if (reverse != nullptr)
+    {
+        context.expect(
+            reverse->getToggleState(),
+            "Reverse attachment should reflect restored On state"
+        );
+        context.expect(
+            reverse->getButtonText().contains("ON"),
+            "Reverse button should state On explicitly"
+        );
+    }
+
+    if (const auto* constrainer = editor->getConstrainer())
+    {
+        context.expect(
+            constrainer->getMinimumWidth() == 480
+                && constrainer->getMinimumHeight() == 320,
+            "editor minimum resize limit should remain 480x320"
+        );
+        context.expect(
+            constrainer->getMaximumWidth() == 960
+                && constrainer->getMaximumHeight() == 630,
+            "editor maximum resize limit should remain 960x630"
+        );
+    }
+    else
+    {
+        context.expect(false, "resizable editor should have a bounds constrainer");
+    }
+
+    const auto controls = std::array<juce::Component*, 7> {
+        density,
+        size,
+        position,
+        pitch,
+        reverse,
+        dryWet,
+        outputGain
+    };
+
+    for (const auto editorSize : {
+             juce::Point<int> { 480, 320 },
+             juce::Point<int> { 960, 630 } })
+    {
+        editor->setSize(editorSize.x, editorSize.y);
+
+        for (const auto* control : controls)
+        {
+            if (control == nullptr)
+                continue;
+
+            context.expect(
+                !control->getBounds().isEmpty(),
+                "granular controls should remain visible at resize limits"
+            );
+            context.expect(
+                editor->getLocalBounds().contains(control->getBounds()),
+                "granular controls should remain inside editor bounds"
+            );
+        }
+    }
+}
+
 void testStateRoundTrip(TestContext& context)
 {
     HypercolorAudioProcessor source;
@@ -909,6 +1063,7 @@ int main()
     testNonFiniteInputAndRealtimeAllocations(context);
     testBlockRateGranularAutomation(context);
     testStateRoundTrip(context);
+    testEditorControlsStateAndResize(context);
 
     if (context.getFailures() == 0)
     {
