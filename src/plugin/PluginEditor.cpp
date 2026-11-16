@@ -6,7 +6,7 @@ namespace
 {
 constexpr std::array<const char*, 8> effectNames {
     "SPACE", "MODULATION", "DRIVE", "TAPE",
-    "BITCRUSH", "FILTER", "COMPRESSOR", "DELAY"
+    "BITCRUSH", "FILTER", "DYNAMICS", "DELAY"
 };
 
 constexpr std::array<std::array<const char*, 9>, 8> effectParameters {{
@@ -261,6 +261,26 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     fxRackLabel.setFont(juce::FontOptions(10.0f).withStyle("Bold"));
     addAndMakeVisible(fxRackLabel);
 
+    moduleTitleLabel.setColour(juce::Label::textColourId, text);
+    moduleTitleLabel.setFont(juce::FontOptions(19.0f).withStyle("Bold"));
+    moduleTitleLabel.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(moduleTitleLabel);
+    moduleSubtitleLabel.setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
+    moduleSubtitleLabel.setFont(juce::FontOptions(9.0f).withStyle("Bold"));
+    moduleSubtitleLabel.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(moduleSubtitleLabel);
+
+    granularNavButton.setButtonText("GRANULAR");
+    granularNavButton.setClickingTogglesState(true);
+    granularNavButton.setRadioGroupId(1701);
+    granularNavButton.setColour(juce::TextButton::buttonColourId, panelRaised);
+    granularNavButton.setColour(juce::TextButton::buttonOnColourId, cyan);
+    granularNavButton.setColour(juce::TextButton::textColourOffId, text);
+    granularNavButton.setColour(juce::TextButton::textColourOnId, hypercolor::ui::palette::background());
+    granularNavButton.setComponentID("module.granular");
+    granularNavButton.onClick = [this] { selectGranular(); };
+    addAndMakeVisible(granularNavButton);
+
     for (std::size_t index = 0; index < effectButtons.size(); ++index)
     {
         auto& button = effectButtons[index];
@@ -272,10 +292,12 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
         button.setColour(juce::TextButton::textColourOffId, text);
         button.setColour(juce::TextButton::textColourOnId, hypercolor::ui::palette::background());
         button.onClick = [this, index] { selectEffect(index); };
-        button.setComponentID("fx." + juce::String(static_cast<int>(index)));
+        button.setComponentID("module." + juce::String(static_cast<int>(index)));
         addAndMakeVisible(button);
     }
-    effectButtons[0].setToggleState(true, juce::dontSendNotification);
+    granularNavButton.setToggleState(true, juce::dontSendNotification);
+    moduleTitleLabel.setText("GRANULAR CORE", juce::dontSendNotification);
+    moduleSubtitleLabel.setText("XY CHARACTER FIELD  //  REAL-TIME HISTORY  //  64 VOICES", juce::dontSendNotification);
     rebuildInspector();
 
     setResizable(true, true);
@@ -337,9 +359,18 @@ void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
     );
     graphics.setColour(hypercolor::ui::palette::lime());
     graphics.drawText(
-        "HYPERCOLOR  //  DIGITAL CHAOS LAB",
+        "PRESET / CURRENT STATE",
         wordmark,
         juce::Justification::centredRight,
+        false
+    );
+
+    graphics.setFont(juce::FontOptions(9.0f).withStyle("Bold"));
+    graphics.setColour(hypercolor::ui::palette::cyan());
+    graphics.drawText(
+        "DIGITAL CHAOS LAB",
+        header.reduced(0.0f, 5.0f).withTrimmedLeft(header.getWidth() * 0.58f),
+        juce::Justification::bottomRight,
         false
     );
 
@@ -365,12 +396,25 @@ void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
     );
 }
 
+void HypercolorAudioProcessorEditor::selectGranular()
+{
+    selectedModule = -1;
+    granularNavButton.setToggleState(true, juce::dontSendNotification);
+    for (auto& button : effectButtons)
+        button.setToggleState(false, juce::dontSendNotification);
+    moduleTitleLabel.setText("GRANULAR CORE", juce::dontSendNotification);
+    moduleSubtitleLabel.setText("XY CHARACTER FIELD  //  REAL-TIME HISTORY  //  64 VOICES", juce::dontSendNotification);
+    rebuildInspector();
+}
+
 void HypercolorAudioProcessorEditor::selectEffect(std::size_t index)
 {
     if (index >= effectButtons.size())
         return;
 
+    selectedModule = static_cast<int>(index);
     selectedEffect = index;
+    granularNavButton.setToggleState(false, juce::dontSendNotification);
     for (std::size_t i = 0; i < effectButtons.size(); ++i)
         effectButtons[i].setToggleState(i == selectedEffect, juce::dontSendNotification);
     rebuildInspector();
@@ -391,14 +435,44 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
         removeChildComponent(&label);
     }
 
+    const std::array<const char*, 9> granularParameters {
+        hypercolor::ParameterIDs::grainCharacter,
+        hypercolor::ParameterIDs::grainPitchRandom,
+        hypercolor::ParameterIDs::grainPositionRandom,
+        hypercolor::ParameterIDs::grainTimingJitter,
+        hypercolor::ParameterIDs::grainStereoSpread,
+        hypercolor::ParameterIDs::grainPanRandom,
+        hypercolor::ParameterIDs::grainEnvelope,
+        nullptr,
+        nullptr
+    };
+    const auto* parameterList = selectedModule < 0
+        ? granularParameters.data()
+        : effectParameters[selectedEffect].data();
+    const auto parameterCount = selectedModule < 0
+        ? std::size_t { 7 }
+        : effectParameterCounts[selectedEffect];
+
     inspectorSectionLabel.setText(
-        juce::String("FX INSPECTOR  /  ") + effectNames[selectedEffect],
+        selectedModule < 0
+            ? "GRANULAR DETAIL  /  VARIATION"
+            : juce::String("MODULE CONTROL  /  ") + effectNames[selectedEffect],
+        juce::dontSendNotification
+    );
+    moduleTitleLabel.setText(
+        selectedModule < 0 ? "GRANULAR CORE" : effectNames[selectedEffect],
+        juce::dontSendNotification
+    );
+    moduleSubtitleLabel.setText(
+        selectedModule < 0
+            ? "XY CHARACTER FIELD  //  REAL-TIME HISTORY  //  64 VOICES"
+            : "LIVE APVTS CONTROL  //  DSP MODULE  //  PARAMETERS RETAINED",
         juce::dontSendNotification
     );
 
-    for (std::size_t i = 0; i < effectParameterCounts[selectedEffect]; ++i)
+    for (std::size_t i = 0; i < parameterCount; ++i)
     {
-        const auto* parameterID = effectParameters[selectedEffect][i];
+        const auto* parameterID = parameterList[i];
         auto* parameter = audioProcessor.getValueTreeState().getParameter(parameterID);
         if (parameter == nullptr)
             continue;
@@ -439,34 +513,90 @@ void HypercolorAudioProcessorEditor::resized()
     headerArea = content.removeFromTop(headerHeight);
     content.removeFromTop(10);
 
-    const auto footerHeight = juce::jlimit(106, 138, getHeight() / 6);
+    const auto footerHeight = juce::jlimit(86, 108, getHeight() / 7);
     auto footer = content.removeFromBottom(footerHeight);
     content.removeFromBottom(10);
-    rackPanel = content.removeFromBottom(58);
-    content.removeFromBottom(10);
+    const auto navigationWidth = juce::jlimit(118, 152, getWidth() / 7);
+    rackPanel = content.removeFromLeft(navigationWidth);
+    content.removeFromLeft(12);
+    auto workspace = content;
+    masterPanel = footer;
 
-    const auto gap = juce::jlimit(10, 18, getWidth() / 70);
-    const auto leftWidth = juce::roundToInt(static_cast<float>(content.getWidth() - gap) * 0.47f);
-    grainControlPanel = content.removeFromLeft(leftWidth);
-    content.removeFromLeft(gap);
-    inspectorPanel = content;
-    auto grainContent = grainControlPanel.reduced(10, 10);
-    const auto xyHeight = juce::jmin(140, juce::jmax(86, juce::roundToInt(static_cast<float>(grainContent.getHeight()) * 0.36f)));
-    xyController.setBounds(grainContent.removeFromTop(xyHeight));
-    grainContent.removeFromTop(8);
-    const auto visualizerHeight = juce::jmin(126, juce::jmax(52, juce::roundToInt(static_cast<float>(grainContent.getHeight()) * 0.50f)));
-    granularVisualizer.setBounds(grainContent.removeFromTop(visualizerHeight));
-    grainContent.removeFromTop(8);
+    fxRackLabel.setBounds(rackPanel.reduced(10, 10).removeFromTop(20));
+    auto navigationArea = rackPanel.reduced(10, 10);
+    navigationArea.removeFromTop(28);
+    granularNavButton.setBounds(navigationArea.removeFromTop(34));
+    navigationArea.removeFromTop(6);
+    for (auto& button : effectButtons)
+    {
+        button.setBounds(navigationArea.removeFromTop(30));
+        navigationArea.removeFromTop(4);
+    }
 
-    auto granularArea = grainContent;
-    auto masterArea = footer.reduced(12, 8);
+    moduleTitleLabel.setBounds(workspace.removeFromTop(27));
+    moduleSubtitleLabel.setBounds(workspace.removeFromTop(18));
+    workspace.removeFromTop(7);
 
-    granularSectionLabel.setBounds(granularArea.removeFromTop(22));
-    masterSectionLabel.setBounds(masterArea.removeFromTop(22));
-    granularArea.removeFromTop(2);
-    masterArea.removeFromTop(2);
+    const bool granularMode = selectedModule < 0;
+    for (auto* component : {
+             static_cast<juce::Component*>(&xyController),
+             static_cast<juce::Component*>(&granularVisualizer),
+             static_cast<juce::Component*>(&granularSectionLabel),
+             static_cast<juce::Component*>(&densitySlider),
+             static_cast<juce::Component*>(&sizeSlider),
+             static_cast<juce::Component*>(&positionSlider),
+             static_cast<juce::Component*>(&pitchSlider),
+             static_cast<juce::Component*>(&reverseButton),
+             static_cast<juce::Component*>(&densityLabel),
+             static_cast<juce::Component*>(&sizeLabel),
+             static_cast<juce::Component*>(&positionLabel),
+             static_cast<juce::Component*>(&pitchLabel),
+             static_cast<juce::Component*>(&reverseLabel),
+             static_cast<juce::Component*>(&positionHintLabel) })
+        component->setVisible(granularMode);
 
-    const auto granularControlWidth = juce::jmax(1, granularArea.getWidth() / 5);
+    if (granularMode)
+    {
+        const auto gap = juce::jlimit(10, 18, workspace.getWidth() / 70);
+        const auto leftWidth = juce::roundToInt(static_cast<float>(workspace.getWidth() - gap) * 0.58f);
+        grainControlPanel = workspace.removeFromLeft(leftWidth);
+        workspace.removeFromLeft(gap);
+        inspectorPanel = workspace;
+        auto grainContent = grainControlPanel.reduced(10, 8);
+        constexpr int minimumControlsHeight = 86;
+        constexpr int minimumVisualizerHeight = 58;
+        const auto availableHeight = grainContent.getHeight();
+        const auto desiredXYHeight = juce::jlimit(
+            120,
+            240,
+            juce::roundToInt(static_cast<float>(availableHeight) * 0.48f)
+        );
+        const auto xyHeight = juce::jmax(
+            80,
+            juce::jmin(
+                desiredXYHeight,
+                juce::jmax(80, availableHeight - minimumVisualizerHeight - minimumControlsHeight)
+            )
+        );
+        xyController.setBounds(grainContent.removeFromTop(xyHeight));
+        grainContent.removeFromTop(8);
+        const auto visualizerHeight = juce::jmax(
+            minimumVisualizerHeight,
+            juce::jmin(
+                160,
+                juce::jmin(
+                    juce::roundToInt(static_cast<float>(grainContent.getHeight()) * 0.58f),
+                    juce::jmax(minimumVisualizerHeight, grainContent.getHeight() - minimumControlsHeight)
+                )
+            )
+        );
+        granularVisualizer.setBounds(grainContent.removeFromTop(visualizerHeight));
+        grainContent.removeFromTop(7);
+        auto granularArea = grainContent;
+        granularSectionLabel.setBounds(granularArea.removeFromTop(20));
+        granularArea.removeFromTop(2);
+
+        const auto granularControlWidth = juce::jmax(1, granularArea.getWidth() / 5);
     std::array<juce::Component*, 5> granularControls {
         &densitySlider,
         &sizeSlider,
@@ -513,13 +643,19 @@ void HypercolorAudioProcessorEditor::resized()
             granularControls[index]->setBounds(cell);
         }
     }
+    }
+    else
+    {
+        grainControlPanel = {};
+        inspectorPanel = workspace;
+        inspectorSliders.front().setVisible(true);
+    }
 
-    inspectorSectionLabel.setBounds(inspectorPanel.reduced(14, 10).removeFromTop(24));
-    auto inspectorArea = inspectorPanel.reduced(14, 10);
-    inspectorArea.removeFromTop(28);
+    auto inspectorArea = inspectorPanel.reduced(16, 12);
+    inspectorSectionLabel.setBounds(inspectorArea.removeFromTop(26));
     inspectorHintLabel.setBounds(inspectorArea.removeFromTop(18));
     inspectorArea.removeFromTop(8);
-    const auto rowHeight = juce::jmax(30, inspectorArea.getHeight() / 9);
+    const auto rowHeight = juce::jmax(31, inspectorArea.getHeight() / 9);
     for (std::size_t i = 0; i < inspectorSliders.size(); ++i)
     {
         if (!inspectorSliders[i].isVisible())
@@ -529,13 +665,9 @@ void HypercolorAudioProcessorEditor::resized()
         inspectorSliders[i].setBounds(row.reduced(3, 1));
     }
 
-    auto rackArea = rackPanel.reduced(12, 7);
-    fxRackLabel.setBounds(rackArea.removeFromLeft(150));
-    rackArea.removeFromLeft(8);
-    const auto rackWidth = juce::jmax(1, rackArea.getWidth() / 8);
-    for (std::size_t i = 0; i < effectButtons.size(); ++i)
-        effectButtons[i].setBounds(rackArea.removeFromLeft(rackWidth).reduced(3, 4));
-
+    auto masterArea = masterPanel.reduced(12, 8);
+    masterSectionLabel.setBounds(masterArea.removeFromTop(20));
+    masterArea.removeFromTop(2);
     auto masterControls = masterArea;
     const auto masterControlWidth = masterControls.getWidth() / 2;
     auto dryWetBounds = masterControls.removeFromLeft(masterControlWidth)

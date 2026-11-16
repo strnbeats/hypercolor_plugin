@@ -22,6 +22,7 @@ public:
     void resized() override;
 
 private:
+    void selectGranular();
     void selectEffect(std::size_t index);
     void rebuildInspector();
 
@@ -63,12 +64,16 @@ private:
     juce::Label inspectorSectionLabel;
     juce::Label inspectorHintLabel;
     juce::Label fxRackLabel;
+    juce::Label moduleTitleLabel;
+    juce::Label moduleSubtitleLabel;
 
+    juce::TextButton granularNavButton;
     std::array<juce::TextButton, 8> effectButtons;
     std::array<juce::Slider, 9> inspectorSliders;
     std::array<juce::Label, 9> inspectorLabels;
     std::array<std::unique_ptr<SliderAttachment>, 9> inspectorAttachments;
     std::size_t selectedEffect = 0;
+    int selectedModule = -1;
 
     SliderAttachment dryWetAttachment;
     SliderAttachment outputGainAttachment;
