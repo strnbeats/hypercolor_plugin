@@ -27,6 +27,9 @@ GrainInitResult Grain::initialise(
     if (state != GrainState::inactive
         || !std::isfinite(init.startPosition)
         || !std::isfinite(init.playbackRate)
+        || !std::isfinite(init.pan)
+        || init.pan < -1.0
+        || init.pan > 1.0
         || init.durationFrames < minimumDurationFrames
         || !isKnownWindow(init.window))
     {
@@ -54,6 +57,7 @@ GrainInitResult Grain::initialise(
     durationFrames = init.durationFrames;
     renderedFrames = 0;
     window = init.window;
+    pan = init.pan;
     state = GrainState::active;
     return GrainInitResult::success;
 }
@@ -96,6 +100,7 @@ void Grain::reset() noexcept
     durationFrames = 0;
     renderedFrames = 0;
     window = GrainWindow::hann;
+    pan = 0.0;
     state = GrainState::inactive;
 }
 
@@ -143,6 +148,11 @@ std::uint32_t Grain::getRenderedFrames() const noexcept
 GrainWindow Grain::getWindow() const noexcept
 {
     return window;
+}
+
+double Grain::getPan() const noexcept
+{
+    return pan;
 }
 
 float Grain::getWindowCoefficient() const noexcept

@@ -122,6 +122,7 @@ struct GrainSnapshot
     std::uint32_t durationFrames = 0;
     std::uint32_t renderedFrames = 0;
     GrainWindow window = GrainWindow::hann;
+    double pan = 0.0;
     bool captured = false;
 };
 
@@ -140,6 +141,7 @@ GrainSnapshot captureFirstActive(GrainPool& pool)
             snapshot.durationFrames = access.getDurationFrames();
             snapshot.renderedFrames = access.getRenderedFrames();
             snapshot.window = access.getWindow();
+            snapshot.pan = access.getPan();
             snapshot.captured = true;
         }
     );
@@ -1069,6 +1071,8 @@ void testCharacterScalingAndSeedDeterminism(TestContext& context)
     parameters.positionNormalized = 0.5;
     parameters.pitchRandomAmount = 1.0;
     parameters.positionRandomAmount = 1.0;
+    parameters.stereoSpreadAmount = 1.0;
+    parameters.panRandomAmount = 1.0;
 
     parameters.character = GranularCharacter::ControlledChaos;
     const auto chaos = startAndCapture(context, parameters, defaultSampleRate, 3.0, 42);
@@ -1137,6 +1141,36 @@ void testCharacterScalingAndSeedDeterminism(TestContext& context)
         std::abs(inferNormalizedPosition(chaos) - 0.5)
             > std::abs(inferNormalizedPosition(atmospheric) - 0.5),
         "ControlledChaos should scale Position Random above Atmospheric"
+    );
+    context.expect(
+        std::abs(chaos.pan) > std::abs(musical.pan),
+        "ControlledChaos should scale stereo variation above Musical"
+    );
+    context.expect(
+        std::abs(chaos.pan) > std::abs(atmospheric.pan),
+        "ControlledChaos should scale pan random above Atmospheric"
+    );
+    const auto noPan = startAndCapture(
+        context,
+        GrainSchedulerParameters {},
+        defaultSampleRate,
+        3.0,
+        42
+    );
+    context.expectNear(noPan.pan, 0.0, 0.0, "zero spread and random pan must be centered");
+    parameters.character = GranularCharacter::ControlledChaos;
+    const auto chaosRepeatPan = startAndCapture(
+        context,
+        parameters,
+        defaultSampleRate,
+        3.0,
+        42
+    );
+    context.expectNear(
+        chaos.pan,
+        chaosRepeatPan.pan,
+        0.0,
+        "equal Scheduler seeds should reproduce per-grain pan"
     );
 }
 

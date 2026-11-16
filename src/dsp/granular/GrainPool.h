@@ -75,6 +75,11 @@ public:
         return grain.getWindow();
     }
 
+    [[nodiscard]] double getPan() const noexcept
+    {
+        return grain.getPan();
+    }
+
     [[nodiscard]] float getWindowCoefficient() const noexcept
     {
         return grain.getWindowCoefficient();

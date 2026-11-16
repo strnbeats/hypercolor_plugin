@@ -11,6 +11,7 @@ namespace
 constexpr auto maximumExactDoubleInteger = std::uint64_t { 1 }
     << std::numeric_limits<double>::digits;
 constexpr std::uint64_t timingSeedStream = 0x54494D494E47524EULL;
+constexpr std::uint64_t panSeedStream = 0x50414E52414E444FULL;
 
 bool sampleRatesMatch(double first, double second) noexcept
 {
@@ -23,7 +24,8 @@ bool sampleRatesMatch(double first, double second) noexcept
 GrainScheduler::GrainScheduler(std::uint64_t randomSeed) noexcept
     : initialRandomSeed(randomSeed),
       random(randomSeed),
-      timingRandom(randomSeed ^ timingSeedStream)
+      timingRandom(randomSeed ^ timingSeedStream),
+      panRandom(randomSeed ^ panSeedStream)
 {
     resetRandomState();
 }
@@ -123,7 +125,9 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         || !std::isfinite(parameters.positionNormalized)
         || !std::isfinite(parameters.pitchSemitones)
         || !std::isfinite(parameters.pitchRandomAmount)
-        || !std::isfinite(parameters.positionRandomAmount))
+        || !std::isfinite(parameters.positionRandomAmount)
+        || !std::isfinite(parameters.stereoSpreadAmount)
+        || !std::isfinite(parameters.panRandomAmount))
     {
         return GrainSchedulerStepResult::invalidParameters;
     }
@@ -176,6 +180,8 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     // when only their depths change.
     const auto pitchRandomSigned = random.nextSignedNormalized();
     const auto positionRandomSigned = random.nextSignedNormalized();
+    const auto spreadRandomSigned = panRandom.nextSignedNormalized();
+    const auto panRandomSigned = panRandom.nextSignedNormalized();
     const auto pitchOffset = pitchRandomSigned
         * maximumPitchRandomDeviationSemitones
         * pitchRandomAmount
@@ -198,7 +204,26 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     const auto magnitude = std::exp2(effectivePitchSemitones / 12.0);
     const auto playbackRate = parameters.reverse ? -magnitude : magnitude;
 
-    if (!std::isfinite(playbackRate))
+    const auto stereoSpreadAmount = std::clamp(
+        parameters.stereoSpreadAmount,
+        0.0,
+        1.0
+    );
+    const auto panRandomAmount = std::clamp(
+        parameters.panRandomAmount,
+        0.0,
+        1.0
+    );
+    const auto pan = std::clamp(
+        spreadRandomSigned * stereoSpreadAmount
+            * static_cast<double>(characterProfile.stereoSpreadScale)
+        + panRandomSigned * maximumPanRandomDeviation * panRandomAmount
+            * static_cast<double>(characterProfile.panRandomScale),
+        -1.0,
+        1.0
+    );
+
+    if (!std::isfinite(playbackRate) || !std::isfinite(pan))
         return GrainSchedulerStepResult::invalidParameters;
 
     double startPosition = 0.0;
@@ -234,7 +259,8 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         startPosition,
         playbackRate,
         durationFrames,
-        GrainWindow::hann
+        GrainWindow::hann,
+        pan
     };
 
     switch (pool.tryStart(init, source))
@@ -261,6 +287,7 @@ void GrainScheduler::resetRandomState() noexcept
 {
     random.reset(initialRandomSeed);
     timingRandom.reset(initialRandomSeed ^ timingSeedStream);
+    panRandom.reset(initialRandomSeed ^ panSeedStream);
     currentTimingRandomSigned = timingRandom.nextSignedNormalized();
     samplesSinceLastEvent = 0;
     hasEmittedEvent = false;

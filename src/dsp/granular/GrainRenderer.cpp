@@ -1,8 +1,10 @@
 #include "dsp/granular/GrainRenderer.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <numbers>
 
 namespace hypercolor::dsp::granular
 {
@@ -62,9 +64,23 @@ GrainRendererResult GrainRenderer::renderSample(
                  channel < numChannels;
                  ++channel)
             {
+                auto channelGain = 1.0;
+                if (numChannels == 2)
+                {
+                    const auto pan = std::clamp(
+                        access.getPan(), -1.0, 1.0
+                    );
+                    const auto angle = (pan + 1.0)
+                        * std::numbers::pi / 4.0;
+                    const auto centreGain = std::sqrt(0.5);
+                    channelGain = channel == 0
+                        ? std::cos(angle) / centreGain
+                        : std::sin(angle) / centreGain;
+                }
                 accumulators[channel]
                     += static_cast<double>(sourceFrame[channel])
-                        * static_cast<double>(window);
+                        * static_cast<double>(window)
+                        * channelGain;
             }
 
             access.advanceAfterRender();

@@ -81,6 +81,8 @@ private:
     std::atomic<float>* grainPitchRandomParameter = nullptr;
     std::atomic<float>* grainPositionRandomParameter = nullptr;
     std::atomic<float>* grainTimingJitterParameter = nullptr;
+    std::atomic<float>* grainStereoSpreadParameter = nullptr;
+    std::atomic<float>* grainPanRandomParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;

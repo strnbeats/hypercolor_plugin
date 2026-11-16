@@ -174,6 +174,19 @@ GrainInit makeInit(
     };
 }
 
+GrainInit makePanInit(
+    const CircularAudioBuffer& source,
+    double startPosition,
+    double playbackRate,
+    std::uint32_t durationFrames,
+    double pan
+)
+{
+    auto init = makeInit(source, startPosition, playbackRate, durationFrames);
+    init.pan = pan;
+    return init;
+}
+
 bool startGrain(
     GrainPool& pool,
     const CircularAudioBuffer& source,
@@ -316,6 +329,58 @@ void testStereoFractionalRead(TestContext& context)
     );
     context.expectNear(output[0], 10.5, 1.0e-6, "left channel interpolation should match");
     context.expectNear(output[1], 121.0, 1.0e-6, "right channel interpolation should match");
+}
+
+void testStereoPanEqualPowerAndCenterCompatibility(TestContext& context)
+{
+    CircularAudioBuffer source;
+    context.expect(fillStereoConstant(source, 1.0f, 1.0f), "pan source should prepare");
+    const GrainRenderer renderer;
+
+    GrainPool centeredPool;
+    context.expect(
+        centeredPool.tryStart(makePanInit(source, 10.5, 0.0, 3, 0.0), source)
+            == GrainStartResult::started,
+        "centered pan grain should start"
+    );
+    std::array centered { 0.0f, 0.0f };
+    context.expect(
+        renderer.renderSample(source, centeredPool, centered)
+            == GrainRendererResult::success,
+        "centered pan should render"
+    );
+
+    GrainPool leftPool;
+    context.expect(
+        leftPool.tryStart(makePanInit(source, 10.5, 0.0, 3, -1.0), source)
+            == GrainStartResult::started,
+        "left pan grain should start"
+    );
+    std::array left { 0.0f, 0.0f };
+    context.expect(
+        renderer.renderSample(source, leftPool, left)
+            == GrainRendererResult::success,
+        "left pan should render"
+    );
+    context.expectNear(centered[0], 0.0, 0.0, "Hann first frame remains zero");
+    context.expectNear(left[0], 0.0, 0.0, "Hann first frame remains zero left");
+
+    context.expect(writeFollowUpFrame(source), "pan follow-up should write");
+    context.expect(
+        renderer.renderSample(source, centeredPool, centered)
+            == GrainRendererResult::success,
+        "centered middle frame should render"
+    );
+    context.expect(writeFollowUpFrame(source), "left pan follow-up should write");
+    context.expect(
+        renderer.renderSample(source, leftPool, left)
+            == GrainRendererResult::success,
+        "left middle frame should render"
+    );
+    context.expectNear(centered[0], 1.0, 1.0e-6, "pan=0 must preserve left channel");
+    context.expectNear(centered[1], 1.0, 1.0e-6, "pan=0 must preserve right channel");
+    context.expectNear(left[0], 1.41421356237, 1.0e-5, "equal-power left gain");
+    context.expectNear(left[1], 0.0, 1.0e-6, "equal-power left pan mutes right");
 }
 
 std::array<float, 5> renderFiveFrameGrain(
@@ -699,6 +764,7 @@ int main()
     testNoActiveGrains(context);
     testMonoFractionalLifecycle(context);
     testStereoFractionalRead(context);
+    testStereoPanEqualPowerAndCenterCompatibility(context);
     testForwardReverseAndHann(context);
     testSummingWithoutNormalisation(context);
     testMaximumVoiceCount(context);

@@ -25,6 +25,7 @@ struct GrainInit
     double playbackRate = 1.0;
     std::uint32_t durationFrames = 0;
     GrainWindow window = GrainWindow::hann;
+    double pan = 0.0;
 };
 
 enum class GrainInitResult : std::uint8_t
@@ -68,6 +69,7 @@ public:
     [[nodiscard]] std::uint32_t getDurationFrames() const noexcept;
     [[nodiscard]] std::uint32_t getRenderedFrames() const noexcept;
     [[nodiscard]] GrainWindow getWindow() const noexcept;
+    [[nodiscard]] double getPan() const noexcept;
 
     // Returns the coefficient for the frame at the current read position.
     [[nodiscard]] float getWindowCoefficient() const noexcept;
@@ -80,6 +82,7 @@ private:
     std::uint32_t durationFrames = 0;
     std::uint32_t renderedFrames = 0;
     GrainWindow window = GrainWindow::hann;
+    double pan = 0.0;
     GrainState state = GrainState::inactive;
 };
 }

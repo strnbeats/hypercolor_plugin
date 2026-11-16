@@ -20,6 +20,8 @@ struct GrainSchedulerParameters
     double pitchRandomAmount = 0.0;
     double positionRandomAmount = 0.0;
     double timingJitterAmount = 0.0;
+    double stereoSpreadAmount = 0.0;
+    double panRandomAmount = 0.0;
 };
 
 enum class GrainSchedulerStepResult : std::uint8_t
@@ -47,6 +49,7 @@ public:
     static constexpr double maximumPitchRandomDeviationSemitones = 12.0;
     static constexpr double maximumPositionRandomDeviation = 0.25;
     static constexpr double maximumTimingJitterFraction = 0.45;
+    static constexpr double maximumPanRandomDeviation = 1.0;
     static constexpr std::uint64_t defaultRandomSeed
         = 0x4859504552434F4CULL;
 
@@ -107,6 +110,7 @@ private:
     std::uint64_t initialRandomSeed = defaultRandomSeed;
     GranularRandom random;
     GranularRandom timingRandom;
+    GranularRandom panRandom;
     double currentTimingRandomSigned = 0.0;
     std::uint64_t samplesSinceLastEvent = 0;
     bool hasEmittedEvent = false;

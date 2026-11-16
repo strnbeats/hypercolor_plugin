@@ -237,6 +237,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     grainTimingJitterParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainTimingJitter
     );
+    grainStereoSpreadParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainStereoSpread
+    );
+    grainPanRandomParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainPanRandom
+    );
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -249,6 +255,8 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(grainPitchRandomParameter != nullptr);
     jassert(grainPositionRandomParameter != nullptr);
     jassert(grainTimingJitterParameter != nullptr);
+    jassert(grainStereoSpreadParameter != nullptr);
+    jassert(grainPanRandomParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -400,6 +408,30 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::grainTimingJitter, 1 },
         "Grain Timing Jitter",
+        juce::NormalisableRange<float> {
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent,
+            0.1f
+        },
+        granularRandomDefaultPercent,
+        percentAttributes
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainStereoSpread, 1 },
+        "Grain Stereo Spread",
+        juce::NormalisableRange<float> {
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent,
+            0.1f
+        },
+        granularRandomDefaultPercent,
+        percentAttributes
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainPanRandom, 1 },
+        "Grain Pan Random",
         juce::NormalisableRange<float> {
             granularRandomMinimumPercent,
             granularRandomMaximumPercent,
@@ -601,6 +633,12 @@ HypercolorAudioProcessor::readGranularParameters() const noexcept
         ) / 100.0,
         static_cast<double>(
             grainTimingJitterParameter->load(std::memory_order_relaxed)
+        ) / 100.0,
+        static_cast<double>(
+            grainStereoSpreadParameter->load(std::memory_order_relaxed)
+        ) / 100.0,
+        static_cast<double>(
+            grainPanRandomParameter->load(std::memory_order_relaxed)
         ) / 100.0
     };
 }
@@ -900,6 +938,18 @@ void HypercolorAudioProcessor::setStateInformation(
             parameterTemplateState,
             hypercolor::ParameterIDs::grainTimingJitter,
             granularRandomDefaultPercent
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainStereoSpread,
+            granularRandomDefaultPercent
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainPanRandom,
+            granularRandomDefaultPercent
         ))
     {
         return;
@@ -980,6 +1030,18 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidParameterValue(
             restoredState,
             hypercolor::ParameterIDs::grainTimingJitter,
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainStereoSpread,
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainPanRandom,
             granularRandomMinimumPercent,
             granularRandomMaximumPercent
         ))
