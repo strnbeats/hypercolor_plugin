@@ -249,4 +249,26 @@ if(BUILD_TESTING)
         NAME HYPERCOLOR.GrainScheduler
         COMMAND HYPERCOLORGrainSchedulerTests
     )
+
+    add_executable(HYPERCOLORGranularTelemetryTests
+        tests/GranularTelemetryTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGranularTelemetryTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(HYPERCOLORGranularTelemetryTests PRIVATE cxx_std_20)
+
+    target_link_libraries(HYPERCOLORGranularTelemetryTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.GranularTelemetry
+        COMMAND HYPERCOLORGranularTelemetryTests
+    )
 endif()
