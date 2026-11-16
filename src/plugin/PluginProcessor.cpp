@@ -217,6 +217,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     (void) effectChain.addModule(&spaceReverb);
     (void) effectChain.addModule(&modulationEffect);
     (void) effectChain.addModule(&driveEffect);
+    (void) effectChain.addModule(&tapeEffect);
     (void) effectChain.addModule(&delayEffect);
     parameters.state.setProperty(
         stateSchemaProperty,
@@ -293,6 +294,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     delayHighCutParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayHighCut);
     delayMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayMix);
     delayWidthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayWidth);
+    tapeDriveParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeDrive);
+    tapeWowParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeWow);
+    tapeFlutterParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeFlutter);
+    tapeWearParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeWear);
+    tapeMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeMix);
+    tapeOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeOutput);
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -335,6 +342,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(delayHighCutParameter != nullptr);
     jassert(delayMixParameter != nullptr);
     jassert(delayWidthParameter != nullptr);
+    jassert(tapeDriveParameter != nullptr);
+    jassert(tapeWowParameter != nullptr);
+    jassert(tapeFlutterParameter != nullptr);
+    jassert(tapeWearParameter != nullptr);
+    jassert(tapeMixParameter != nullptr);
+    jassert(tapeOutputParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -409,6 +422,12 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayHighCut, 1 }, "Delay High Cut", juce::NormalisableRange<float> { 1000.0f, 20000.0f, 1.0f }, 12000.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayMix, 1 }, "Delay Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayWidth, 1 }, "Delay Width", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeDrive, 1 }, "Tape Drive", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 35.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeWow, 1 }, "Tape Wow", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 15.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeFlutter, 1 }, "Tape Flutter", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 10.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeWear, 1 }, "Tape Wear", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 15.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeMix, 1 }, "Tape Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeOutput, 1 }, "Tape Output", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::outputGain, 1 },
@@ -689,6 +708,14 @@ void HypercolorAudioProcessor::processBlock(
         delayMixParameter->load(std::memory_order_relaxed) / 100.0f,
         delayWidthParameter->load(std::memory_order_relaxed) / 100.0f,
         static_cast<float>(bpm)
+    });
+    tapeEffect.setParameters({
+        tapeDriveParameter->load(std::memory_order_relaxed) / 100.0f,
+        tapeWowParameter->load(std::memory_order_relaxed) / 100.0f,
+        tapeFlutterParameter->load(std::memory_order_relaxed) / 100.0f,
+        tapeWearParameter->load(std::memory_order_relaxed) / 100.0f,
+        tapeMixParameter->load(std::memory_order_relaxed) / 100.0f,
+        tapeOutputParameter->load(std::memory_order_relaxed)
     });
 
     const auto numChannels = juce::jmin(
@@ -1202,6 +1229,13 @@ void HypercolorAudioProcessor::setStateInformation(
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayHighCut, 12000.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayMix, 30.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayWidth, 100.0
+        )
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeDrive, 35.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeWow, 15.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeFlutter, 10.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeWear, 15.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeMix, 100.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeOutput, 0.0
         ))
     {
         return;
@@ -1330,6 +1364,12 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayHighCut, 1000.0f, 20000.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayMix, 0.0f, 100.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayWidth, 0.0f, 200.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeDrive, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeWow, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeFlutter, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeWear, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeMix, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeOutput, -24.0f, 12.0f)
         )
     {
         return;

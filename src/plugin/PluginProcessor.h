@@ -9,6 +9,7 @@
 #include "dsp/fx/ModulationEffect.h"
 #include "dsp/fx/DriveEffect.h"
 #include "dsp/fx/DelayEffect.h"
+#include "dsp/fx/TapeEffect.h"
 
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
@@ -118,6 +119,12 @@ private:
     std::atomic<float>* delayHighCutParameter = nullptr;
     std::atomic<float>* delayMixParameter = nullptr;
     std::atomic<float>* delayWidthParameter = nullptr;
+    std::atomic<float>* tapeDriveParameter = nullptr;
+    std::atomic<float>* tapeWowParameter = nullptr;
+    std::atomic<float>* tapeFlutterParameter = nullptr;
+    std::atomic<float>* tapeWearParameter = nullptr;
+    std::atomic<float>* tapeMixParameter = nullptr;
+    std::atomic<float>* tapeOutputParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
@@ -125,6 +132,7 @@ private:
     hypercolor::dsp::fx::ModulationEffect modulationEffect;
     hypercolor::dsp::fx::DriveEffect driveEffect;
     hypercolor::dsp::fx::DelayEffect delayEffect;
+    hypercolor::dsp::fx::TapeEffect tapeEffect;
     hypercolor::dsp::fx::EffectChain effectChain;
     hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
     std::uint64_t telemetryPublishIntervalSamples = 0;

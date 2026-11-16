@@ -58,6 +58,7 @@ target_sources(HYPERCOLOR
         src/dsp/fx/ModulationEffect.cpp
         src/dsp/fx/DriveEffect.cpp
         src/dsp/fx/DelayEffect.cpp
+        src/dsp/fx/TapeEffect.cpp
         src/dsp/granular/CircularAudioBuffer.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
@@ -397,4 +398,16 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags
     )
     add_test(NAME HYPERCOLOR.DelayEffect COMMAND HYPERCOLORDelayEffectTests)
+
+    add_executable(HYPERCOLORTapeEffectTests
+        src/dsp/fx/TapeEffect.cpp
+        tests/TapeEffectTests.cpp
+    )
+    target_include_directories(HYPERCOLORTapeEffectTests PRIVATE src)
+    target_compile_features(HYPERCOLORTapeEffectTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORTapeEffectTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+    add_test(NAME HYPERCOLOR.TapeEffect COMMAND HYPERCOLORTapeEffectTests)
 endif()

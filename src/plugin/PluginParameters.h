@@ -45,4 +45,10 @@ inline constexpr auto delayLowCut = "delayLowCut";
 inline constexpr auto delayHighCut = "delayHighCut";
 inline constexpr auto delayMix = "delayMix";
 inline constexpr auto delayWidth = "delayWidth";
+inline constexpr auto tapeDrive = "tapeDrive";
+inline constexpr auto tapeWow = "tapeWow";
+inline constexpr auto tapeFlutter = "tapeFlutter";
+inline constexpr auto tapeWear = "tapeWear";
+inline constexpr auto tapeMix = "tapeMix";
+inline constexpr auto tapeOutput = "tapeOutput";
 }

@@ -403,8 +403,14 @@ void testGranularParameterContracts(TestContext& context)
     expectParameterContract(context, processor, hypercolor::ParameterIDs::delayHighCut, 1000.0f, 20000.0f, 12000.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::delayMix, 0.0f, 100.0f, 30.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::delayWidth, 0.0f, 200.0f, 100.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeDrive, 0.0f, 100.0f, 35.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeWow, 0.0f, 100.0f, 15.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeFlutter, 0.0f, 100.0f, 10.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeWear, 0.0f, 100.0f, 15.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeMix, 0.0f, 100.0f, 100.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeOutput, -24.0f, 12.0f, 0.0f);
 
-    constexpr std::array<std::string_view, 41> parameterIDs {
+    constexpr std::array<std::string_view, 47> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -445,7 +451,13 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::delayLowCut,
         hypercolor::ParameterIDs::delayHighCut,
         hypercolor::ParameterIDs::delayMix,
-        hypercolor::ParameterIDs::delayWidth
+        hypercolor::ParameterIDs::delayWidth,
+        hypercolor::ParameterIDs::tapeDrive,
+        hypercolor::ParameterIDs::tapeWow,
+        hypercolor::ParameterIDs::tapeFlutter,
+        hypercolor::ParameterIDs::tapeWear,
+        hypercolor::ParameterIDs::tapeMix,
+        hypercolor::ParameterIDs::tapeOutput
     };
 
     for (std::size_t first = 0; first < parameterIDs.size(); ++first)
@@ -836,6 +848,7 @@ void testStereoGranularProcessing(TestContext& context)
     setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
     setParameter(processor, hypercolor::ParameterIDs::reverbMix, 0.0f);
     setParameter(processor, hypercolor::ParameterIDs::modulationMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::tapeMix, 0.0f);
     processor.prepareToPlay(sampleRate, 17);
 
     juce::AudioBuffer<float> buffer(2, 12000);
