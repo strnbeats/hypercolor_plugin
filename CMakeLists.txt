@@ -22,7 +22,7 @@ juce_add_plugin(HYPERCOLOR
 
     PRODUCT_NAME "HYPERCOLOR"
 
-    FORMATS VST3
+    FORMATS VST3 Standalone
 
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
@@ -34,6 +34,20 @@ juce_add_plugin(HYPERCOLOR
 
     VST3_CATEGORIES Fx
 )
+
+if(APPLE)
+    add_custom_command(
+        TARGET HYPERCOLOR_Standalone
+        POST_BUILD
+        COMMAND codesign
+            --force
+            --deep
+            --sign -
+            "$<TARGET_BUNDLE_DIR:HYPERCOLOR_Standalone>"
+        COMMENT "Applying ad-hoc signature to HYPERCOLOR Standalone"
+        VERBATIM
+    )
+endif()
 
 juce_generate_juce_header(HYPERCOLOR)
 
