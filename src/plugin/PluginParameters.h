@@ -51,4 +51,9 @@ inline constexpr auto tapeFlutter = "tapeFlutter";
 inline constexpr auto tapeWear = "tapeWear";
 inline constexpr auto tapeMix = "tapeMix";
 inline constexpr auto tapeOutput = "tapeOutput";
+inline constexpr auto bitcrushBits = "bitcrushBits";
+inline constexpr auto bitcrushRate = "bitcrushRate";
+inline constexpr auto bitcrushMode = "bitcrushMode";
+inline constexpr auto bitcrushMix = "bitcrushMix";
+inline constexpr auto bitcrushOutput = "bitcrushOutput";
 }

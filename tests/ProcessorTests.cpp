@@ -409,8 +409,18 @@ void testGranularParameterContracts(TestContext& context)
     expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeWear, 0.0f, 100.0f, 15.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeMix, 0.0f, 100.0f, 100.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::tapeOutput, -24.0f, 12.0f, 0.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::bitcrushBits, 4.0f, 24.0f, 16.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::bitcrushRate, 500.0f, 44100.0f, 22050.0f);
+    context.expect(
+        dynamic_cast<juce::AudioParameterChoice*>(
+            processor.getValueTreeState().getParameter(hypercolor::ParameterIDs::bitcrushMode)
+        ) != nullptr,
+        "Bitcrush Mode should be an AudioParameterChoice"
+    );
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::bitcrushMix, 0.0f, 100.0f, 100.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::bitcrushOutput, -24.0f, 12.0f, 0.0f);
 
-    constexpr std::array<std::string_view, 47> parameterIDs {
+    constexpr std::array<std::string_view, 52> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -457,7 +467,12 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::tapeFlutter,
         hypercolor::ParameterIDs::tapeWear,
         hypercolor::ParameterIDs::tapeMix,
-        hypercolor::ParameterIDs::tapeOutput
+        hypercolor::ParameterIDs::tapeOutput,
+        hypercolor::ParameterIDs::bitcrushBits,
+        hypercolor::ParameterIDs::bitcrushRate,
+        hypercolor::ParameterIDs::bitcrushMode,
+        hypercolor::ParameterIDs::bitcrushMix,
+        hypercolor::ParameterIDs::bitcrushOutput
     };
 
     for (std::size_t first = 0; first < parameterIDs.size(); ++first)

@@ -218,6 +218,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     (void) effectChain.addModule(&modulationEffect);
     (void) effectChain.addModule(&driveEffect);
     (void) effectChain.addModule(&tapeEffect);
+    (void) effectChain.addModule(&bitcrushEffect);
     (void) effectChain.addModule(&delayEffect);
     parameters.state.setProperty(
         stateSchemaProperty,
@@ -300,6 +301,11 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     tapeWearParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeWear);
     tapeMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeMix);
     tapeOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeOutput);
+    bitcrushBitsParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushBits);
+    bitcrushRateParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushRate);
+    bitcrushModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushMode);
+    bitcrushMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushMix);
+    bitcrushOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushOutput);
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -348,6 +354,11 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(tapeWearParameter != nullptr);
     jassert(tapeMixParameter != nullptr);
     jassert(tapeOutputParameter != nullptr);
+    jassert(bitcrushBitsParameter != nullptr);
+    jassert(bitcrushRateParameter != nullptr);
+    jassert(bitcrushModeParameter != nullptr);
+    jassert(bitcrushMixParameter != nullptr);
+    jassert(bitcrushOutputParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -428,6 +439,11 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeWear, 1 }, "Tape Wear", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 15.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeMix, 1 }, "Tape Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::tapeOutput, 1 }, "Tape Output", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::bitcrushBits, 1 }, "Bitcrush Bits", juce::NormalisableRange<float> { 4.0f, 24.0f, 1.0f }, 16.0f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::bitcrushRate, 1 }, "Bitcrush Rate", juce::NormalisableRange<float> { 500.0f, 44100.0f, 1.0f }, 22050.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::ParameterIDs::bitcrushMode, 1 }, "Bitcrush Mode", juce::StringArray { "Round", "Truncate" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::bitcrushMix, 1 }, "Bitcrush Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::bitcrushOutput, 1 }, "Bitcrush Output", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::outputGain, 1 },
@@ -716,6 +732,13 @@ void HypercolorAudioProcessor::processBlock(
         tapeWearParameter->load(std::memory_order_relaxed) / 100.0f,
         tapeMixParameter->load(std::memory_order_relaxed) / 100.0f,
         tapeOutputParameter->load(std::memory_order_relaxed)
+    });
+    bitcrushEffect.setParameters({
+        bitcrushBitsParameter->load(std::memory_order_relaxed),
+        bitcrushRateParameter->load(std::memory_order_relaxed),
+        bitcrushModeParameter->load(std::memory_order_relaxed) >= 0.5f ? hypercolor::dsp::fx::BitcrushMode::truncate : hypercolor::dsp::fx::BitcrushMode::round,
+        bitcrushMixParameter->load(std::memory_order_relaxed) / 100.0f,
+        bitcrushOutputParameter->load(std::memory_order_relaxed)
     });
 
     const auto numChannels = juce::jmin(
@@ -1236,6 +1259,12 @@ void HypercolorAudioProcessor::setStateInformation(
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeWear, 15.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeMix, 100.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::tapeOutput, 0.0
+        )
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::bitcrushBits, 16.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::bitcrushRate, 22050.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::bitcrushMode, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::bitcrushMix, 100.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::bitcrushOutput, 0.0
         ))
     {
         return;
@@ -1370,6 +1399,11 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeWear, 0.0f, 100.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeMix, 0.0f, 100.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::tapeOutput, -24.0f, 12.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::bitcrushBits, 4.0f, 24.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::bitcrushRate, 500.0f, 44100.0f)
+        || !hasValidChoiceParameterValue(restoredState, hypercolor::ParameterIDs::bitcrushMode, 0, 1)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::bitcrushMix, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::bitcrushOutput, -24.0f, 12.0f)
         )
     {
         return;
