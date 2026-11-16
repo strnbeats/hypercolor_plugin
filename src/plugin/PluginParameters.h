@@ -11,4 +11,7 @@ inline constexpr auto grainSize = "grainSize";
 inline constexpr auto grainPosition = "grainPosition";
 inline constexpr auto grainPitch = "grainPitch";
 inline constexpr auto grainReverse = "grainReverse";
+inline constexpr auto grainCharacter = "grainCharacter";
+inline constexpr auto grainPitchRandom = "grainPitchRandom";
+inline constexpr auto grainPositionRandom = "grainPositionRandom";
 }

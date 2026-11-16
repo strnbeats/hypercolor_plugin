@@ -19,6 +19,12 @@ bool sampleRatesMatch(double first, double second) noexcept
 }
 }
 
+GrainScheduler::GrainScheduler(std::uint64_t randomSeed) noexcept
+    : initialRandomSeed(randomSeed),
+      random(randomSeed)
+{
+}
+
 bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
 {
     const auto validSpec = std::isfinite(spec.sampleRate)
@@ -31,12 +37,14 @@ bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
     {
         sampleRate = 0.0;
         scaledPhase = 0.0;
+        random.reset(initialRandomSeed);
         prepared = false;
         return false;
     }
 
     sampleRate = spec.sampleRate;
     scaledPhase = 0.0;
+    random.reset(initialRandomSeed);
     prepared = true;
     return true;
 }
@@ -44,6 +52,7 @@ bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
 void GrainScheduler::reset() noexcept
 {
     scaledPhase = 0.0;
+    random.reset(initialRandomSeed);
 }
 
 GrainSchedulerStepResult GrainScheduler::processSample(
@@ -83,7 +92,9 @@ GrainSchedulerStepResult GrainScheduler::processSample(
 
     if (!std::isfinite(parameters.grainSizeMilliseconds)
         || !std::isfinite(parameters.positionNormalized)
-        || !std::isfinite(parameters.pitchSemitones))
+        || !std::isfinite(parameters.pitchSemitones)
+        || !std::isfinite(parameters.pitchRandomAmount)
+        || !std::isfinite(parameters.positionRandomAmount))
     {
         return GrainSchedulerStepResult::invalidParameters;
     }
@@ -93,12 +104,12 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         minimumGrainSizeMilliseconds,
         maximumGrainSizeMilliseconds
     );
-    const auto positionNormalized = std::clamp(
+    const auto basePositionNormalized = std::clamp(
         parameters.positionNormalized,
         0.0,
         1.0
     );
-    const auto pitchSemitones = std::clamp(
+    const auto basePitchSemitones = std::clamp(
         parameters.pitchSemitones,
         minimumPitchSemitones,
         maximumPitchSemitones
@@ -109,12 +120,6 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     if (!calculateDurationFrames(grainSizeMilliseconds, durationFrames))
         return GrainSchedulerStepResult::invalidParameters;
 
-    const auto magnitude = std::exp2(pitchSemitones / 12.0);
-    const auto playbackRate = parameters.reverse ? -magnitude : magnitude;
-
-    if (!std::isfinite(playbackRate))
-        return GrainSchedulerStepResult::invalidParameters;
-
     const auto sourceRegion = source.captureSourceRegion();
 
     if (!source.isSourceRegionCurrent(sourceRegion))
@@ -123,13 +128,57 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     if (sourceRegion.isEmpty())
         return GrainSchedulerStepResult::insufficientHistory;
 
+    const auto& characterProfile = getGranularCharacterProfile(
+        parameters.character
+    );
+    const auto pitchRandomAmount = std::clamp(
+        parameters.pitchRandomAmount,
+        0.0,
+        1.0
+    );
+    const auto positionRandomAmount = std::clamp(
+        parameters.positionRandomAmount,
+        0.0,
+        1.0
+    );
+
+    // Every viable start attempt consumes exactly two values in a documented
+    // order, even when an amount is zero. This keeps later variations stable
+    // when only their depths change.
+    const auto pitchRandomSigned = random.nextSignedNormalized();
+    const auto positionRandomSigned = random.nextSignedNormalized();
+    const auto pitchOffset = pitchRandomSigned
+        * maximumPitchRandomDeviationSemitones
+        * pitchRandomAmount
+        * static_cast<double>(characterProfile.pitchRandomScale);
+    const auto positionOffset = positionRandomSigned
+        * maximumPositionRandomDeviation
+        * positionRandomAmount
+        * static_cast<double>(characterProfile.positionRandomScale);
+    const auto effectivePitchSemitones = std::clamp(
+        basePitchSemitones + pitchOffset,
+        minimumPitchSemitones,
+        maximumPitchSemitones
+    );
+    const auto effectivePositionNormalized = std::clamp(
+        basePositionNormalized + positionOffset,
+        0.0,
+        1.0
+    );
+
+    const auto magnitude = std::exp2(effectivePitchSemitones / 12.0);
+    const auto playbackRate = parameters.reverse ? -magnitude : magnitude;
+
+    if (!std::isfinite(playbackRate))
+        return GrainSchedulerStepResult::invalidParameters;
+
     double startPosition = 0.0;
 
     const auto positionResult = calculateStartPosition(
         sourceRegion,
         durationFrames,
         playbackRate,
-        positionNormalized,
+        effectivePositionNormalized,
         startPosition
     );
 

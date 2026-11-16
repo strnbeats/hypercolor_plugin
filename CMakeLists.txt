@@ -216,7 +216,9 @@ if(BUILD_TESTING)
 
     add_executable(HYPERCOLORGranularEngineTests
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
+        src/dsp/granular/GranularRandom.cpp
         src/dsp/granular/Grain.cpp
         src/dsp/granular/GrainPool.cpp
         src/dsp/granular/GrainRenderer.cpp
@@ -244,6 +246,8 @@ if(BUILD_TESTING)
 
     add_executable(HYPERCOLORGrainSchedulerTests
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/GranularCharacter.cpp
+        src/dsp/granular/GranularRandom.cpp
         src/dsp/granular/Grain.cpp
         src/dsp/granular/GrainPool.cpp
         src/dsp/granular/GrainScheduler.cpp

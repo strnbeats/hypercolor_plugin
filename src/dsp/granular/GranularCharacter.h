@@ -6,9 +6,11 @@ namespace hypercolor::dsp::granular
 {
 enum class GranularCharacter : std::uint8_t
 {
-    ControlledChaos,
-    Musical,
-    Atmospheric
+    // Numeric values are persisted by the APVTS Choice parameter. Append new
+    // characters rather than reordering these entries.
+    ControlledChaos = 0,
+    Musical = 1,
+    Atmospheric = 2
 };
 
 struct GranularCharacterProfile

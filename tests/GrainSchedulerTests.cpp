@@ -25,6 +25,7 @@ using hypercolor::dsp::granular::GrainSchedulerParameters;
 using hypercolor::dsp::granular::GrainSchedulerStepResult;
 using hypercolor::dsp::granular::GrainStartResult;
 using hypercolor::dsp::granular::GrainWindow;
+using hypercolor::dsp::granular::GranularCharacter;
 
 constexpr double defaultSampleRate = 44100.0;
 
@@ -187,6 +188,15 @@ void testPreparationAndDefaults(TestContext& context)
     context.expect(parameters.positionNormalized == 0.0, "default Position");
     context.expect(parameters.pitchSemitones == 0.0, "default Pitch");
     context.expect(!parameters.reverse, "default Reverse should be false");
+    context.expect(
+        parameters.character == GranularCharacter::Musical,
+        "default Character should be Musical"
+    );
+    context.expect(parameters.pitchRandomAmount == 0.0, "default Pitch Random");
+    context.expect(
+        parameters.positionRandomAmount == 0.0,
+        "default Position Random"
+    );
 
     GrainScheduler scheduler;
     context.expect(!scheduler.isPrepared(), "scheduler should start unprepared");
@@ -474,12 +484,13 @@ GrainSnapshot startAndCapture(
     TestContext& context,
     const GrainSchedulerParameters& parameters,
     double sampleRate = defaultSampleRate,
-    double historySeconds = 3.0
+    double historySeconds = 3.0,
+    std::uint64_t randomSeed = GrainScheduler::defaultRandomSeed
 )
 {
     const auto spec = makeSpec(sampleRate);
     CircularAudioBuffer source;
-    GrainScheduler scheduler;
+    GrainScheduler scheduler { randomSeed };
     GrainPool pool;
     context.expect(
         prepareSource(
@@ -506,6 +517,212 @@ GrainSnapshot startAndCapture(
         "parameter grain should start"
     );
     return captureFirstActive(pool);
+}
+
+double inferNormalizedPosition(const GrainSnapshot& snapshot)
+{
+    const auto travel = std::abs(snapshot.playbackRate)
+        * static_cast<double>(snapshot.durationFrames - 1);
+    const auto selectedEndpoint = snapshot.playbackRate < 0.0
+        ? snapshot.readPosition
+        : snapshot.readPosition + travel;
+    const auto oldestFreshEndpoint
+        = static_cast<double>(snapshot.sourceRegion.oldest) + travel;
+    const auto upperExclusive = static_cast<double>(
+        snapshot.sourceRegion.newestExclusive - 1
+    );
+    const auto freshestEndpoint = std::nextafter(
+        upperExclusive,
+        -std::numeric_limits<double>::infinity()
+    );
+
+    return (freshestEndpoint - selectedEndpoint)
+        / (freshestEndpoint - oldestFreshEndpoint);
+}
+
+double inferPitchSemitones(const GrainSnapshot& snapshot)
+{
+    return 12.0 * std::log2(std::abs(snapshot.playbackRate));
+}
+
+void testPitchAndPositionRandomVariation(TestContext& context)
+{
+    GrainSchedulerParameters parameters;
+    parameters.grainSizeMilliseconds = 100.0;
+    parameters.positionNormalized = 0.5;
+    parameters.pitchSemitones = 0.0;
+    parameters.character = GranularCharacter::ControlledChaos;
+
+    const auto baseline = startAndCapture(context, parameters);
+    context.expectNear(
+        inferPitchSemitones(baseline),
+        0.0,
+        1.0e-12,
+        "zero Pitch Random should preserve base pitch"
+    );
+    context.expectNear(
+        inferNormalizedPosition(baseline),
+        0.5,
+        1.0e-10,
+        "zero Position Random should preserve base position"
+    );
+
+    parameters.pitchRandomAmount = 0.5;
+    parameters.positionRandomAmount = 0.5;
+    const auto half = startAndCapture(context, parameters);
+    parameters.pitchRandomAmount = 1.0;
+    parameters.positionRandomAmount = 1.0;
+    const auto full = startAndCapture(context, parameters);
+
+    context.expectNear(
+        std::abs(inferPitchSemitones(full)),
+        2.0 * std::abs(inferPitchSemitones(half)),
+        1.0e-10,
+        "doubling Pitch Random should double an unclamped seeded deviation"
+    );
+    context.expectNear(
+        std::abs(inferNormalizedPosition(full) - 0.5),
+        2.0 * std::abs(inferNormalizedPosition(half) - 0.5),
+        1.0e-10,
+        "doubling Position Random should double an unclamped seeded deviation"
+    );
+    context.expect(
+        std::abs(inferPitchSemitones(full))
+            <= GrainScheduler::maximumPitchRandomDeviationSemitones + 1.0e-10,
+        "Pitch Random should stay within the global deviation limit"
+    );
+    context.expect(
+        std::abs(inferNormalizedPosition(full) - 0.5)
+            <= GrainScheduler::maximumPositionRandomDeviation + 1.0e-10,
+        "Position Random should stay within the global deviation limit"
+    );
+}
+
+void testCharacterScalingAndSeedDeterminism(TestContext& context)
+{
+    GrainSchedulerParameters parameters;
+    parameters.grainSizeMilliseconds = 100.0;
+    parameters.positionNormalized = 0.5;
+    parameters.pitchRandomAmount = 1.0;
+    parameters.positionRandomAmount = 1.0;
+
+    parameters.character = GranularCharacter::ControlledChaos;
+    const auto chaos = startAndCapture(context, parameters, defaultSampleRate, 3.0, 42);
+    const auto chaosRepeat = startAndCapture(
+        context,
+        parameters,
+        defaultSampleRate,
+        3.0,
+        42
+    );
+    const auto differentSeed = startAndCapture(
+        context,
+        parameters,
+        defaultSampleRate,
+        3.0,
+        43
+    );
+
+    context.expectNear(
+        chaos.playbackRate,
+        chaosRepeat.playbackRate,
+        0.0,
+        "equal Scheduler seeds should reproduce Pitch Random"
+    );
+    context.expectNear(
+        chaos.readPosition,
+        chaosRepeat.readPosition,
+        0.0,
+        "equal Scheduler seeds should reproduce Position Random"
+    );
+    context.expect(
+        std::bit_cast<std::uint64_t>(chaos.playbackRate)
+                != std::bit_cast<std::uint64_t>(differentSeed.playbackRate)
+            || std::bit_cast<std::uint64_t>(chaos.readPosition)
+                != std::bit_cast<std::uint64_t>(differentSeed.readPosition),
+        "different Scheduler seeds should alter the variation sequence"
+    );
+
+    parameters.character = GranularCharacter::Musical;
+    const auto musical = startAndCapture(context, parameters, defaultSampleRate, 3.0, 42);
+    parameters.character = GranularCharacter::Atmospheric;
+    const auto atmospheric = startAndCapture(
+        context,
+        parameters,
+        defaultSampleRate,
+        3.0,
+        42
+    );
+
+    context.expect(
+        std::abs(inferPitchSemitones(chaos))
+            > std::abs(inferPitchSemitones(musical)),
+        "ControlledChaos should scale Pitch Random above Musical"
+    );
+    context.expect(
+        std::abs(inferPitchSemitones(chaos))
+            > std::abs(inferPitchSemitones(atmospheric)),
+        "ControlledChaos should scale Pitch Random above Atmospheric"
+    );
+    context.expect(
+        std::abs(inferNormalizedPosition(chaos) - 0.5)
+            > std::abs(inferNormalizedPosition(musical) - 0.5),
+        "ControlledChaos should scale Position Random above Musical"
+    );
+    context.expect(
+        std::abs(inferNormalizedPosition(chaos) - 0.5)
+            > std::abs(inferNormalizedPosition(atmospheric) - 0.5),
+        "ControlledChaos should scale Position Random above Atmospheric"
+    );
+}
+
+void testSchedulerResetRestoresRandomSequence(TestContext& context)
+{
+    const auto spec = makeSpec();
+    CircularAudioBuffer source;
+    context.expect(
+        prepareSource(source, spec, 4.0, 4.0, 132300),
+        "random-reset source should prepare"
+    );
+    GrainScheduler scheduler { 99 };
+    GrainPool pool;
+    context.expect(scheduler.prepare(spec), "random-reset scheduler should prepare");
+
+    GrainSchedulerParameters parameters;
+    parameters.densityGrainsPerSecond = 120.0;
+    parameters.grainSizeMilliseconds = 100.0;
+    parameters.positionNormalized = 0.5;
+    parameters.character = GranularCharacter::ControlledChaos;
+    parameters.pitchRandomAmount = 1.0;
+    parameters.positionRandomAmount = 1.0;
+
+    context.expect(
+        runUntilEvent(scheduler, source, pool, parameters, 400)
+            == GrainSchedulerStepResult::started,
+        "first randomized grain should start"
+    );
+    const auto first = captureFirstActive(pool);
+    pool.reset();
+    scheduler.reset();
+
+    context.expect(
+        runUntilEvent(scheduler, source, pool, parameters, 400)
+            == GrainSchedulerStepResult::started,
+        "randomized grain should restart after reset"
+    );
+    const auto second = captureFirstActive(pool);
+    context.expectNear(
+        second.playbackRate,
+        first.playbackRate,
+        0.0,
+        "Scheduler reset should restore the Pitch Random sequence"
+    );
+    context.expectNear(
+        inferNormalizedPosition(second),
+        inferNormalizedPosition(first),
+        1.0e-10,
+        "Scheduler reset should restore the Position Random sequence"
+    );
 }
 
 struct RenderedSchedulerTrajectory
@@ -615,6 +832,39 @@ RenderedSchedulerTrajectory renderScheduledTrajectory(
         "finished scheduled grain should be reclaimable"
     );
     return result;
+}
+
+void testRandomBoundsAndSafeTrajectories(TestContext& context)
+{
+    for (const auto character : {
+             GranularCharacter::ControlledChaos,
+             GranularCharacter::Musical,
+             GranularCharacter::Atmospheric })
+    {
+        for (const auto reverse : { false, true })
+        {
+            GrainSchedulerParameters parameters;
+            parameters.grainSizeMilliseconds = 500.0;
+            parameters.positionNormalized = reverse ? 1.0 : 0.0;
+            parameters.pitchSemitones = reverse ? -24.0 : 24.0;
+            parameters.reverse = reverse;
+            parameters.character = character;
+            parameters.pitchRandomAmount = 1.0;
+            parameters.positionRandomAmount = 1.0;
+
+            const auto rendered = renderScheduledTrajectory(context, parameters);
+            context.expect(rendered.started, "randomized boundary grain should start");
+            context.expect(
+                rendered.allPositionsMatched && rendered.allReadsValid,
+                "randomized trajectories should keep every fractional read valid"
+            );
+            context.expect(
+                std::abs(rendered.initial.playbackRate) >= 0.25
+                    && std::abs(rendered.initial.playbackRate) <= 4.0,
+                "randomized playback rate should remain inside supported bounds"
+            );
+        }
+    }
 }
 
 void testActualScheduledTrajectories(TestContext& context)
@@ -1171,6 +1421,22 @@ void testInvalidInputsAndUnpreparedObjects(TestContext& context)
         },
         "infinite Pitch should be rejected"
     );
+    testInvalidEventParameter(
+        [](GrainSchedulerParameters& value)
+        {
+            value.pitchRandomAmount
+                = std::numeric_limits<double>::quiet_NaN();
+        },
+        "NaN Pitch Random should be rejected"
+    );
+    testInvalidEventParameter(
+        [](GrainSchedulerParameters& value)
+        {
+            value.positionRandomAmount
+                = std::numeric_limits<double>::infinity();
+        },
+        "infinite Position Random should be rejected"
+    );
 }
 }
 
@@ -1183,6 +1449,10 @@ int main()
     testFirstEventZeroDensityAndReset(context);
     testDensityChangesAndInvalidDensity(context);
     testBlockIndependence(context);
+    testPitchAndPositionRandomVariation(context);
+    testCharacterScalingAndSeedDeterminism(context);
+    testSchedulerResetRestoresRandomSequence(context);
+    testRandomBoundsAndSafeTrajectories(context);
     testGrainSizePitchPositionAndDirection(context);
     testActualScheduledTrajectories(context);
     testParameterLatchingAndClamping(context);

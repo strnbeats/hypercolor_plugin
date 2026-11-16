@@ -66,6 +66,7 @@ using hypercolor::dsp::granular::GranularEngine;
 using hypercolor::dsp::granular::GranularEngineParameters;
 using hypercolor::dsp::granular::GranularEngineProcessResult;
 using hypercolor::dsp::granular::GranularTelemetrySnapshot;
+using hypercolor::dsp::granular::GranularCharacter;
 
 constexpr double defaultSampleRate = 44100.0;
 
@@ -348,7 +349,10 @@ StereoRender renderStereo(bool inPlace)
     if (!engine.prepare(makeSpec(defaultSampleRate, 17, 2)))
         return {};
 
-    const auto parameters = makeParameters(120.0, 10.0, 0.5, 7.0, false);
+    auto parameters = makeParameters(120.0, 10.0, 0.5, 7.0, false);
+    parameters.character = GranularCharacter::Atmospheric;
+    parameters.pitchRandomAmount = 1.0;
+    parameters.positionRandomAmount = 1.0;
     StereoRender rendered;
 
     if (inPlace)
@@ -600,7 +604,10 @@ std::vector<float> renderPartitioned(std::size_t blockSize)
     if (!engine.prepare(makeSpec(48000.0, 64, 1)))
         return {};
 
-    const auto parameters = makeParameters(120.0, 10.0, 0.35, -7.0, false);
+    auto parameters = makeParameters(120.0, 10.0, 0.35, -7.0, false);
+    parameters.character = GranularCharacter::ControlledChaos;
+    parameters.pitchRandomAmount = 1.0;
+    parameters.positionRandomAmount = 1.0;
 
     for (std::size_t start = 0; start < totalSamples; start += blockSize)
     {
@@ -747,6 +754,9 @@ void testParameterSnapshot(TestContext& context)
     (void) processMono(referenceEngine, launchInput, launchB, original);
 
     auto changed = makeParameters(0.0, 20.0, 0.9, 12.0, true);
+    changed.character = GranularCharacter::ControlledChaos;
+    changed.pitchRandomAmount = 1.0;
+    changed.positionRandomAmount = 1.0;
     auto stoppedOriginal = original;
     stoppedOriginal.densityGrainsPerSecond = 0.0;
     std::vector<float> activeInput(100, 1.0f);
@@ -829,6 +839,18 @@ void testNonFiniteInputsAndParameters(TestContext& context)
         "non-finite event parameter should safely drop the event"
     );
     context.expect(allFinite(eventOutput), "invalid event output should stay finite");
+
+    invalidEventEngine.reset();
+    (void) processMono(invalidEventEngine, history, historyOutput, makeParameters());
+    auto invalidRandom = makeParameters(120.0);
+    invalidRandom.pitchRandomAmount
+        = std::numeric_limits<double>::quiet_NaN();
+    context.expect(
+        processMono(invalidEventEngine, eventInput, eventOutput, invalidRandom)
+            == GranularEngineProcessResult::degraded,
+        "non-finite random amount should safely drop the event"
+    );
+    context.expect(allFinite(eventOutput), "invalid random output should stay finite");
 }
 
 void testRendererDegradedAndFiniteOutput(TestContext& context)
@@ -867,7 +889,10 @@ void testNoAllocationsAfterPrepare(TestContext& context)
     std::array<float, 1024> input {};
     std::array<float, 1024> output {};
     const auto block = makeMonoBlock(input, output);
-    const auto parameters = makeParameters(120.0, 10.0, 0.5, 7.0, false);
+    auto parameters = makeParameters(120.0, 10.0, 0.5, 7.0, false);
+    parameters.character = GranularCharacter::ControlledChaos;
+    parameters.pitchRandomAmount = 1.0;
+    parameters.positionRandomAmount = 1.0;
 
     allocationProbe::count.store(0, std::memory_order_relaxed);
     allocationProbe::enabled.store(true, std::memory_order_relaxed);

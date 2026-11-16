@@ -2,6 +2,8 @@
 
 #include "core/ProcessSpec.h"
 #include "dsp/granular/GrainPool.h"
+#include "dsp/granular/GranularCharacter.h"
+#include "dsp/granular/GranularRandom.h"
 
 #include <cstdint>
 
@@ -14,6 +16,9 @@ struct GrainSchedulerParameters
     double positionNormalized = 0.0;
     double pitchSemitones = 0.0;
     bool reverse = false;
+    GranularCharacter character = GranularCharacter::Musical;
+    double pitchRandomAmount = 0.0;
+    double positionRandomAmount = 0.0;
 };
 
 enum class GrainSchedulerStepResult : std::uint8_t
@@ -38,8 +43,14 @@ public:
     static constexpr double maximumGrainSizeMilliseconds = 500.0;
     static constexpr double minimumPitchSemitones = -24.0;
     static constexpr double maximumPitchSemitones = 24.0;
+    static constexpr double maximumPitchRandomDeviationSemitones = 12.0;
+    static constexpr double maximumPositionRandomDeviation = 0.25;
+    static constexpr std::uint64_t defaultRandomSeed
+        = 0x4859504552434F4CULL;
 
-    GrainScheduler() = default;
+    explicit GrainScheduler(
+        std::uint64_t randomSeed = defaultRandomSeed
+    ) noexcept;
     ~GrainScheduler() = default;
 
     GrainScheduler(const GrainScheduler&) = delete;
@@ -84,6 +95,8 @@ private:
     // algebraically equivalent to adding density / sampleRate per sample and
     // avoids avoidable rounding at exact event boundaries.
     double scaledPhase = 0.0;
+    std::uint64_t initialRandomSeed = defaultRandomSeed;
+    GranularRandom random;
     bool prepared = false;
 };
 }

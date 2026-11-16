@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <string_view>
 #include <utility>
 
 namespace allocationProbe
@@ -276,6 +277,78 @@ void testGranularParameterContracts(TestContext& context)
         1.0f,
         0.0f
     );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainCharacter,
+        0.0f,
+        2.0f,
+        1.0f
+    );
+    auto* characterParameter = dynamic_cast<juce::AudioParameterChoice*>(
+        processor.getValueTreeState().getParameter(
+            hypercolor::ParameterIDs::grainCharacter
+        )
+    );
+    context.expect(
+        characterParameter != nullptr,
+        "Grain Character should be an AudioParameterChoice"
+    );
+
+    if (characterParameter != nullptr)
+    {
+        context.expect(
+            characterParameter->choices
+                == juce::StringArray {
+                    "Controlled Chaos",
+                    "Musical",
+                    "Atmospheric"
+                },
+            "Grain Character choice order should remain stable"
+        );
+    }
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainPitchRandom,
+        0.0f,
+        100.0f,
+        0.0f
+    );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainPositionRandom,
+        0.0f,
+        100.0f,
+        0.0f
+    );
+
+    constexpr std::array<std::string_view, 10> parameterIDs {
+        hypercolor::ParameterIDs::dryWet,
+        hypercolor::ParameterIDs::outputGain,
+        hypercolor::ParameterIDs::grainDensity,
+        hypercolor::ParameterIDs::grainSize,
+        hypercolor::ParameterIDs::grainPosition,
+        hypercolor::ParameterIDs::grainPitch,
+        hypercolor::ParameterIDs::grainReverse,
+        hypercolor::ParameterIDs::grainCharacter,
+        hypercolor::ParameterIDs::grainPitchRandom,
+        hypercolor::ParameterIDs::grainPositionRandom
+    };
+
+    for (std::size_t first = 0; first < parameterIDs.size(); ++first)
+    {
+        for (std::size_t second = first + 1;
+             second < parameterIDs.size();
+             ++second)
+        {
+            context.expect(
+                parameterIDs[first] != parameterIDs[second],
+                "APVTS parameter IDs should remain unique"
+            );
+        }
+    }
 }
 
 void testLayoutsAndBlockSizes(TestContext& context)
@@ -399,7 +472,10 @@ juce::AudioBuffer<float> renderGranularParameters(
     float position,
     float pitch,
     bool reverse,
-    int samples = 36000
+    int samples = 36000,
+    float character = 1.0f,
+    float pitchRandom = 0.0f,
+    float positionRandom = 0.0f
 )
 {
     HypercolorAudioProcessor processor;
@@ -415,6 +491,21 @@ juce::AudioBuffer<float> renderGranularParameters(
         processor,
         hypercolor::ParameterIDs::grainReverse,
         reverse ? 1.0f : 0.0f
+    );
+    setParameter(
+        processor,
+        hypercolor::ParameterIDs::grainCharacter,
+        character
+    );
+    setParameter(
+        processor,
+        hypercolor::ParameterIDs::grainPitchRandom,
+        pitchRandom
+    );
+    setParameter(
+        processor,
+        hypercolor::ParameterIDs::grainPositionRandom,
+        positionRandom
     );
     processor.prepareToPlay(sampleRate, 64);
 
@@ -494,6 +585,28 @@ void testGranularParametersReachEngine(TestContext& context)
         0.0f,
         true
     );
+    const auto randomizedMusical = renderGranularParameters(
+        20.0f,
+        100.0f,
+        0.5f,
+        0.0f,
+        false,
+        36000,
+        1.0f,
+        100.0f,
+        100.0f
+    );
+    const auto randomizedChaos = renderGranularParameters(
+        20.0f,
+        100.0f,
+        0.5f,
+        0.0f,
+        false,
+        36000,
+        0.0f,
+        100.0f,
+        100.0f
+    );
 
     context.expect(
         isSilent(noDensity),
@@ -518,6 +631,10 @@ void testGranularParametersReachEngine(TestContext& context)
     context.expect(
         buffersDiffer(defaultRender, reversed),
         "Reverse changes should alter the real granular output"
+    );
+    context.expect(
+        buffersDiffer(randomizedMusical, randomizedChaos),
+        "Character should scale random variation reaching GranularEngine"
     );
 
     for (const auto* rendered : {
@@ -1428,6 +1545,9 @@ void testStateRoundTrip(TestContext& context)
     setParameter(source, hypercolor::ParameterIDs::grainPosition, 0.731f);
     setParameter(source, hypercolor::ParameterIDs::grainPitch, -7.25f);
     setParameter(source, hypercolor::ParameterIDs::grainReverse, 1.0f);
+    setParameter(source, hypercolor::ParameterIDs::grainCharacter, 2.0f);
+    setParameter(source, hypercolor::ParameterIDs::grainPitchRandom, 67.5f);
+    setParameter(source, hypercolor::ParameterIDs::grainPositionRandom, 42.5f);
 
     juce::MemoryBlock state;
     source.getStateInformation(state);
@@ -1483,6 +1603,25 @@ void testStateRoundTrip(TestContext& context)
             == 1.0f,
         "Grain Reverse should survive state round-trip"
     );
+    context.expect(
+        getParameterValue(restored, hypercolor::ParameterIDs::grainCharacter)
+            == 2.0f,
+        "Grain Character should survive state round-trip"
+    );
+    context.expect(
+        std::abs(getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::grainPitchRandom
+        ) - 67.5f) < 0.01f,
+        "Grain Pitch Random should survive state round-trip"
+    );
+    context.expect(
+        std::abs(getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::grainPositionRandom
+        ) - 42.5f) < 0.01f,
+        "Grain Position Random should survive state round-trip"
+    );
 
     auto oldStateXml = juce::AudioProcessor::getXmlFromBinary(
         state.getData(),
@@ -1497,7 +1636,10 @@ void testStateRoundTrip(TestContext& context)
                  hypercolor::ParameterIDs::grainSize,
                  hypercolor::ParameterIDs::grainPosition,
                  hypercolor::ParameterIDs::grainPitch,
-                 hypercolor::ParameterIDs::grainReverse })
+                 hypercolor::ParameterIDs::grainReverse,
+                 hypercolor::ParameterIDs::grainCharacter,
+                 hypercolor::ParameterIDs::grainPitchRandom,
+                 hypercolor::ParameterIDs::grainPositionRandom })
         {
             context.expect(
                 removeParameterFromXml(*oldStateXml, parameterID),
@@ -1512,6 +1654,13 @@ void testStateRoundTrip(TestContext& context)
         setParameter(restored, hypercolor::ParameterIDs::grainPosition, 0.9f);
         setParameter(restored, hypercolor::ParameterIDs::grainPitch, 17.0f);
         setParameter(restored, hypercolor::ParameterIDs::grainReverse, 1.0f);
+        setParameter(restored, hypercolor::ParameterIDs::grainCharacter, 0.0f);
+        setParameter(restored, hypercolor::ParameterIDs::grainPitchRandom, 88.0f);
+        setParameter(
+            restored,
+            hypercolor::ParameterIDs::grainPositionRandom,
+            77.0f
+        );
         restored.setStateInformation(
             oldState.getData(),
             static_cast<int>(oldState.getSize())
@@ -1549,6 +1698,27 @@ void testStateRoundTrip(TestContext& context)
             getParameterValue(restored, hypercolor::ParameterIDs::grainReverse)
                 == 0.0f,
             "legacy state should restore default Grain Reverse"
+        );
+        context.expect(
+            getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainCharacter
+            ) == 1.0f,
+            "legacy state should restore default Musical Character"
+        );
+        context.expect(
+            getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainPitchRandom
+            ) == 0.0f,
+            "legacy state should restore default Grain Pitch Random"
+        );
+        context.expect(
+            getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainPositionRandom
+            ) == 0.0f,
+            "legacy state should restore default Grain Position Random"
         );
         context.expect(
             std::abs(getParameterValue(

@@ -26,6 +26,19 @@ constexpr float outputGainMinimumDb = -24.0f;
 constexpr float outputGainMaximumDb = 12.0f;
 constexpr float outputGainDefaultDb = 0.0f;
 
+constexpr float granularRandomMinimumPercent = 0.0f;
+constexpr float granularRandomMaximumPercent = 100.0f;
+constexpr float granularRandomDefaultPercent = 0.0f;
+constexpr int granularCharacterMinimumIndex = static_cast<int>(
+    hypercolor::dsp::granular::GranularCharacter::ControlledChaos
+);
+constexpr int granularCharacterMaximumIndex = static_cast<int>(
+    hypercolor::dsp::granular::GranularCharacter::Atmospheric
+);
+constexpr int granularCharacterDefaultIndex = static_cast<int>(
+    hypercolor::dsp::granular::GranularCharacter::Musical
+);
+
 constexpr hypercolor::dsp::granular::GranularEngineParameters
     defaultGranularParameters;
 
@@ -105,6 +118,40 @@ bool hasValidBooleanParameterValue(
         && (numericValue == 0.0 || numericValue == 1.0);
 }
 
+bool hasValidChoiceParameterValue(
+    const juce::ValueTree& state,
+    const juce::String& parameterID,
+    int minimum,
+    int maximum
+)
+{
+    const auto child = state.getChildWithProperty("id", parameterID);
+
+    if (!child.isValid() || !child.hasProperty("value"))
+        return false;
+
+    double numericValue = 0.0;
+    return readFiniteNumber(child.getProperty("value"), numericValue)
+        && numericValue == std::floor(numericValue)
+        && numericValue >= static_cast<double>(minimum)
+        && numericValue <= static_cast<double>(maximum);
+}
+
+hypercolor::dsp::granular::GranularCharacter readGranularCharacter(
+    float value
+) noexcept
+{
+    if (!std::isfinite(value))
+        return hypercolor::dsp::granular::GranularCharacter::Musical;
+
+    const auto index = static_cast<int>(std::round(std::clamp(
+        value,
+        static_cast<float>(granularCharacterMinimumIndex),
+        static_cast<float>(granularCharacterMaximumIndex)
+    )));
+    return static_cast<hypercolor::dsp::granular::GranularCharacter>(index);
+}
+
 bool addDefaultParameterIfMissing(
     juce::ValueTree& state,
     const juce::ValueTree& parameterTemplateState,
@@ -178,6 +225,15 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     grainReverseParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainReverse
     );
+    grainCharacterParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainCharacter
+    );
+    grainPitchRandomParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainPitchRandom
+    );
+    grainPositionRandomParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainPositionRandom
+    );
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -186,6 +242,9 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(grainPositionParameter != nullptr);
     jassert(grainPitchParameter != nullptr);
     jassert(grainReverseParameter != nullptr);
+    jassert(grainCharacterParameter != nullptr);
+    jassert(grainPitchRandomParameter != nullptr);
+    jassert(grainPositionRandomParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -297,6 +356,41 @@ HypercolorAudioProcessor::createParameterLayout()
         juce::ParameterID { hypercolor::ParameterIDs::grainReverse, 1 },
         "Grain Reverse",
         defaultGranularParameters.reverse
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainCharacter, 1 },
+        "Grain Character",
+        juce::StringArray {
+            "Controlled Chaos",
+            "Musical",
+            "Atmospheric"
+        },
+        granularCharacterDefaultIndex
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainPitchRandom, 1 },
+        "Grain Pitch Random",
+        juce::NormalisableRange<float> {
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent,
+            0.1f
+        },
+        granularRandomDefaultPercent,
+        percentAttributes
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainPositionRandom, 1 },
+        "Grain Position Random",
+        juce::NormalisableRange<float> {
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent,
+            0.1f
+        },
+        granularRandomDefaultPercent,
+        percentAttributes
     ));
 
     return layout;
@@ -479,7 +573,16 @@ HypercolorAudioProcessor::readGranularParameters() const noexcept
         static_cast<double>(
             grainPitchParameter->load(std::memory_order_relaxed)
         ),
-        grainReverseParameter->load(std::memory_order_relaxed) >= 0.5f
+        grainReverseParameter->load(std::memory_order_relaxed) >= 0.5f,
+        readGranularCharacter(
+            grainCharacterParameter->load(std::memory_order_relaxed)
+        ),
+        static_cast<double>(
+            grainPitchRandomParameter->load(std::memory_order_relaxed)
+        ) / 100.0,
+        static_cast<double>(
+            grainPositionRandomParameter->load(std::memory_order_relaxed)
+        ) / 100.0
     };
 }
 
@@ -754,6 +857,24 @@ void HypercolorAudioProcessor::setStateInformation(
             parameterTemplateState,
             hypercolor::ParameterIDs::grainReverse,
             static_cast<double>(defaultGranularParameters.reverse)
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainCharacter,
+            granularCharacterDefaultIndex
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainPitchRandom,
+            granularRandomDefaultPercent
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainPositionRandom,
+            granularRandomDefaultPercent
         ))
     {
         return;
@@ -812,6 +933,24 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidBooleanParameterValue(
             restoredState,
             hypercolor::ParameterIDs::grainReverse
+        )
+        || !hasValidChoiceParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainCharacter,
+            granularCharacterMinimumIndex,
+            granularCharacterMaximumIndex
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainPitchRandom,
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainPositionRandom,
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent
         ))
     {
         return;
