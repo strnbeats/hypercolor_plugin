@@ -56,4 +56,10 @@ inline constexpr auto bitcrushRate = "bitcrushRate";
 inline constexpr auto bitcrushMode = "bitcrushMode";
 inline constexpr auto bitcrushMix = "bitcrushMix";
 inline constexpr auto bitcrushOutput = "bitcrushOutput";
+inline constexpr auto filterMode = "filterMode";
+inline constexpr auto filterCutoff = "filterCutoff";
+inline constexpr auto filterResonance = "filterResonance";
+inline constexpr auto filterDrive = "filterDrive";
+inline constexpr auto filterMix = "filterMix";
+inline constexpr auto filterOutput = "filterOutput";
 }

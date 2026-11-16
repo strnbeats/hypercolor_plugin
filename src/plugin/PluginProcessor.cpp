@@ -219,6 +219,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     (void) effectChain.addModule(&driveEffect);
     (void) effectChain.addModule(&tapeEffect);
     (void) effectChain.addModule(&bitcrushEffect);
+    (void) effectChain.addModule(&filterEffect);
     (void) effectChain.addModule(&delayEffect);
     parameters.state.setProperty(
         stateSchemaProperty,
@@ -306,6 +307,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     bitcrushModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushMode);
     bitcrushMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushMix);
     bitcrushOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushOutput);
+    filterModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterMode);
+    filterCutoffParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterCutoff);
+    filterResonanceParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterResonance);
+    filterDriveParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterDrive);
+    filterMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterMix);
+    filterOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterOutput);
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -359,6 +366,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(bitcrushModeParameter != nullptr);
     jassert(bitcrushMixParameter != nullptr);
     jassert(bitcrushOutputParameter != nullptr);
+    jassert(filterModeParameter != nullptr);
+    jassert(filterCutoffParameter != nullptr);
+    jassert(filterResonanceParameter != nullptr);
+    jassert(filterDriveParameter != nullptr);
+    jassert(filterMixParameter != nullptr);
+    jassert(filterOutputParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -444,6 +457,12 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::ParameterIDs::bitcrushMode, 1 }, "Bitcrush Mode", juce::StringArray { "Round", "Truncate" }, 0));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::bitcrushMix, 1 }, "Bitcrush Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::bitcrushOutput, 1 }, "Bitcrush Output", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::ParameterIDs::filterMode, 1 }, "Filter Mode", juce::StringArray { "Low-Pass", "High-Pass", "Band-Pass", "Notch" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::filterCutoff, 1 }, "Filter Cutoff", juce::NormalisableRange<float> { 20.0f, 20000.0f, 1.0f, 0.35f }, 10000.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::filterResonance, 1 }, "Filter Resonance", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 20.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::filterDrive, 1 }, "Filter Drive", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 0.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::filterMix, 1 }, "Filter Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::filterOutput, 1 }, "Filter Output", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::outputGain, 1 },
@@ -739,6 +758,14 @@ void HypercolorAudioProcessor::processBlock(
         bitcrushModeParameter->load(std::memory_order_relaxed) >= 0.5f ? hypercolor::dsp::fx::BitcrushMode::truncate : hypercolor::dsp::fx::BitcrushMode::round,
         bitcrushMixParameter->load(std::memory_order_relaxed) / 100.0f,
         bitcrushOutputParameter->load(std::memory_order_relaxed)
+    });
+    filterEffect.setParameters({
+        static_cast<hypercolor::dsp::fx::FilterMode>(std::clamp(filterModeParameter->load(std::memory_order_relaxed), 0.0f, 3.0f)),
+        filterCutoffParameter->load(std::memory_order_relaxed),
+        filterResonanceParameter->load(std::memory_order_relaxed) / 100.0f,
+        filterDriveParameter->load(std::memory_order_relaxed) / 100.0f,
+        filterMixParameter->load(std::memory_order_relaxed) / 100.0f,
+        filterOutputParameter->load(std::memory_order_relaxed)
     });
 
     const auto numChannels = juce::jmin(
@@ -1265,6 +1292,13 @@ void HypercolorAudioProcessor::setStateInformation(
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::bitcrushMode, 0.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::bitcrushMix, 100.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::bitcrushOutput, 0.0
+        )
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterMode, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterCutoff, 10000.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterResonance, 20.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterDrive, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterMix, 100.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterOutput, 0.0
         ))
     {
         return;
@@ -1404,6 +1438,12 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidChoiceParameterValue(restoredState, hypercolor::ParameterIDs::bitcrushMode, 0, 1)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::bitcrushMix, 0.0f, 100.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::bitcrushOutput, -24.0f, 12.0f)
+        || !hasValidChoiceParameterValue(restoredState, hypercolor::ParameterIDs::filterMode, 0, 3)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::filterCutoff, 20.0f, 20000.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::filterResonance, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::filterDrive, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::filterMix, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::filterOutput, -24.0f, 12.0f)
         )
     {
         return;

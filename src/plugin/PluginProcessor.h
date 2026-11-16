@@ -11,6 +11,7 @@
 #include "dsp/fx/DelayEffect.h"
 #include "dsp/fx/TapeEffect.h"
 #include "dsp/fx/BitcrushEffect.h"
+#include "dsp/fx/FilterEffect.h"
 
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
@@ -131,6 +132,12 @@ private:
     std::atomic<float>* bitcrushModeParameter = nullptr;
     std::atomic<float>* bitcrushMixParameter = nullptr;
     std::atomic<float>* bitcrushOutputParameter = nullptr;
+    std::atomic<float>* filterModeParameter = nullptr;
+    std::atomic<float>* filterCutoffParameter = nullptr;
+    std::atomic<float>* filterResonanceParameter = nullptr;
+    std::atomic<float>* filterDriveParameter = nullptr;
+    std::atomic<float>* filterMixParameter = nullptr;
+    std::atomic<float>* filterOutputParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
@@ -140,6 +147,7 @@ private:
     hypercolor::dsp::fx::DelayEffect delayEffect;
     hypercolor::dsp::fx::TapeEffect tapeEffect;
     hypercolor::dsp::fx::BitcrushEffect bitcrushEffect;
+    hypercolor::dsp::fx::FilterEffect filterEffect;
     hypercolor::dsp::fx::EffectChain effectChain;
     hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
     std::uint64_t telemetryPublishIntervalSamples = 0;

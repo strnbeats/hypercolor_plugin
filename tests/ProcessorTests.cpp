@@ -419,8 +419,14 @@ void testGranularParameterContracts(TestContext& context)
     );
     expectParameterContract(context, processor, hypercolor::ParameterIDs::bitcrushMix, 0.0f, 100.0f, 100.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::bitcrushOutput, -24.0f, 12.0f, 0.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::filterCutoff, 20.0f, 20000.0f, 10000.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::filterResonance, 0.0f, 100.0f, 20.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::filterDrive, 0.0f, 100.0f, 0.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::filterMix, 0.0f, 100.0f, 100.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::filterOutput, -24.0f, 12.0f, 0.0f);
+    context.expect(dynamic_cast<juce::AudioParameterChoice*>(processor.getValueTreeState().getParameter(hypercolor::ParameterIDs::filterMode)) != nullptr, "Filter Mode should be an AudioParameterChoice");
 
-    constexpr std::array<std::string_view, 52> parameterIDs {
+    constexpr std::array<std::string_view, 58> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -472,7 +478,13 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::bitcrushRate,
         hypercolor::ParameterIDs::bitcrushMode,
         hypercolor::ParameterIDs::bitcrushMix,
-        hypercolor::ParameterIDs::bitcrushOutput
+        hypercolor::ParameterIDs::bitcrushOutput,
+        hypercolor::ParameterIDs::filterMode,
+        hypercolor::ParameterIDs::filterCutoff,
+        hypercolor::ParameterIDs::filterResonance,
+        hypercolor::ParameterIDs::filterDrive,
+        hypercolor::ParameterIDs::filterMix,
+        hypercolor::ParameterIDs::filterOutput
     };
 
     for (std::size_t first = 0; first < parameterIDs.size(); ++first)
@@ -864,6 +876,7 @@ void testStereoGranularProcessing(TestContext& context)
     setParameter(processor, hypercolor::ParameterIDs::reverbMix, 0.0f);
     setParameter(processor, hypercolor::ParameterIDs::modulationMix, 0.0f);
     setParameter(processor, hypercolor::ParameterIDs::tapeMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::filterMix, 0.0f);
     processor.prepareToPlay(sampleRate, 17);
 
     juce::AudioBuffer<float> buffer(2, 12000);
