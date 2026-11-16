@@ -1,5 +1,6 @@
 #include "core/ProcessSpec.h"
 #include "dsp/granular/GranularEngine.h"
+#include "dsp/granular/GranularTelemetry.h"
 
 #include <algorithm>
 #include <array>
@@ -64,11 +65,25 @@ using hypercolor::dsp::granular::GranularAudioBlockView;
 using hypercolor::dsp::granular::GranularEngine;
 using hypercolor::dsp::granular::GranularEngineParameters;
 using hypercolor::dsp::granular::GranularEngineProcessResult;
+using hypercolor::dsp::granular::GranularTelemetrySnapshot;
 
 constexpr double defaultSampleRate = 44100.0;
 
 static_assert(noexcept(std::declval<GranularEngine&>().reset()));
 static_assert(noexcept(std::declval<const GranularEngine&>().isPrepared()));
+static_assert(noexcept(
+    std::declval<GranularEngine&>().setLogicalDurationSeconds(4.0)
+));
+static_assert(noexcept(
+    std::declval<const GranularEngine&>().copyWaveformTelemetry(
+        std::declval<GranularTelemetrySnapshot&>()
+    )
+));
+static_assert(noexcept(
+    std::declval<const GranularEngine&>().copyTelemetrySnapshot(
+        std::declval<GranularTelemetrySnapshot&>()
+    )
+));
 static_assert(noexcept(
     std::declval<GranularEngine&>().processBlock(
         std::declval<const GranularAudioBlockView&>(),
@@ -857,6 +872,8 @@ void testNoAllocationsAfterPrepare(TestContext& context)
     allocationProbe::count.store(0, std::memory_order_relaxed);
     allocationProbe::enabled.store(true, std::memory_order_relaxed);
     const auto result = engine.processBlock(block, parameters);
+    GranularTelemetrySnapshot snapshot;
+    const auto telemetryCopied = engine.copyTelemetrySnapshot(snapshot);
     allocationProbe::enabled.store(false, std::memory_order_relaxed);
     const auto allocations = allocationProbe::count.load(std::memory_order_relaxed);
 
@@ -864,7 +881,491 @@ void testNoAllocationsAfterPrepare(TestContext& context)
         result == GranularEngineProcessResult::success,
         "allocation-instrumented block should process"
     );
+    context.expect(telemetryCopied, "allocation-instrumented telemetry should copy");
     context.expect(allocations == 0, "processBlock should perform no heap allocations");
+}
+
+std::size_t configureWaveformResolution(
+    TestContext& context,
+    GranularEngine& engine,
+    double requestedFrames
+)
+{
+    context.expect(
+        engine.setLogicalDurationSeconds(requestedFrames / defaultSampleRate),
+        "logical duration should be configurable"
+    );
+
+    GranularTelemetrySnapshot snapshot;
+    context.expect(
+        engine.copyWaveformTelemetry(snapshot),
+        "configured waveform metadata should copy"
+    );
+    const auto logicalFrames = static_cast<std::size_t>(std::llround(
+        snapshot.logicalDurationSeconds * snapshot.sampleRate
+    ));
+    return std::max<std::size_t>(1, logicalFrames / 256);
+}
+
+void testWaveformMonoAndStereoMinMax(TestContext& context)
+{
+    GranularEngine mono;
+    context.expect(mono.prepare(makeSpec()), "mono waveform engine should prepare");
+    const auto framesPerPoint = configureWaveformResolution(context, mono, 512.0);
+    context.expect(framesPerPoint >= 2, "mono waveform point should span samples");
+
+    std::vector<float> monoInput(framesPerPoint * 2, 1.0f);
+    monoInput.front() = -2.0f;
+    monoInput[framesPerPoint - 1] = 3.0f;
+    monoInput[framesPerPoint] = -5.0f;
+    monoInput.back() = 4.0f;
+    std::vector<float> monoOutput(monoInput.size());
+    context.expect(
+        processMono(mono, monoInput, monoOutput, makeParameters())
+            == GranularEngineProcessResult::success,
+        "mono waveform input should process"
+    );
+
+    GranularTelemetrySnapshot monoSnapshot;
+    context.expect(mono.copyWaveformTelemetry(monoSnapshot), "mono envelope copy");
+    context.expect(monoSnapshot.numChannels == 1, "mono metadata channel count");
+    context.expect(monoSnapshot.waveformPointCount == 2, "two mono points expected");
+    context.expectNear(
+        monoSnapshot.waveformPoints[0].minimum[0], -2.0, 0.0,
+        "first mono minimum"
+    );
+    context.expectNear(
+        monoSnapshot.waveformPoints[0].maximum[0], 3.0, 0.0,
+        "first mono maximum"
+    );
+    context.expectNear(
+        monoSnapshot.waveformPoints[1].minimum[0], -5.0, 0.0,
+        "second mono minimum"
+    );
+    context.expectNear(
+        monoSnapshot.waveformPoints[1].maximum[0], 4.0, 0.0,
+        "second mono maximum"
+    );
+    context.expect(
+        monoSnapshot.waveformPoints[0].minimum[1] == 0.0f
+            && monoSnapshot.waveformPoints[0].maximum[1] == 0.0f,
+        "unused mono telemetry channel should remain zero"
+    );
+
+    GranularEngine stereo;
+    context.expect(
+        stereo.prepare(makeSpec(defaultSampleRate, 64, 2)),
+        "stereo waveform engine should prepare"
+    );
+    const auto stereoFramesPerPoint
+        = configureWaveformResolution(context, stereo, 512.0);
+    std::vector<float> left(stereoFramesPerPoint, 2.0f);
+    std::vector<float> right(stereoFramesPerPoint, -1.0f);
+    left.front() = -4.0f;
+    left.back() = 6.0f;
+    right.front() = -7.0f;
+    right.back() = 5.0f;
+    std::vector<float> leftOutput(left.size());
+    std::vector<float> rightOutput(right.size());
+    context.expect(
+        stereo.processBlock(
+            makeStereoBlock(left, right, leftOutput, rightOutput),
+            makeParameters()
+        ) == GranularEngineProcessResult::success,
+        "stereo waveform input should process"
+    );
+
+    GranularTelemetrySnapshot stereoSnapshot;
+    context.expect(stereo.copyWaveformTelemetry(stereoSnapshot), "stereo envelope copy");
+    context.expect(stereoSnapshot.waveformPointCount == 1, "one stereo point expected");
+    context.expectNear(stereoSnapshot.waveformPoints[0].minimum[0], -4.0, 0.0, "left minimum");
+    context.expectNear(stereoSnapshot.waveformPoints[0].maximum[0], 6.0, 0.0, "left maximum");
+    context.expectNear(stereoSnapshot.waveformPoints[0].minimum[1], -7.0, 0.0, "right minimum");
+    context.expectNear(stereoSnapshot.waveformPoints[0].maximum[1], 5.0, 0.0, "right maximum");
+}
+
+void testWaveformChronologyAndRingReuse(TestContext& context)
+{
+    GranularEngine engine;
+    context.expect(engine.prepare(makeSpec()), "ring waveform engine should prepare");
+    const auto framesPerPoint = configureWaveformResolution(context, engine, 256.0);
+
+    constexpr std::size_t extraPoints = 17;
+    const auto pointCount = std::size_t { 256 } + extraPoints;
+    std::vector<float> input(pointCount * framesPerPoint);
+
+    for (std::size_t point = 0; point < pointCount; ++point)
+    {
+        std::fill_n(
+            input.begin() + static_cast<std::ptrdiff_t>(point * framesPerPoint),
+            framesPerPoint,
+            static_cast<float>(point)
+        );
+    }
+
+    std::vector<float> output(input.size());
+    (void) processMono(engine, input, output, makeParameters());
+
+    GranularTelemetrySnapshot snapshot;
+    context.expect(engine.copyWaveformTelemetry(snapshot), "ring envelope copy");
+    context.expect(snapshot.waveformPointCount == 256, "ring should retain 256 points");
+
+    for (std::size_t point = 0; point < 256; ++point)
+    {
+        const auto expected = static_cast<double>(point + extraPoints);
+        context.expectNear(
+            snapshot.waveformPoints[point].minimum[0], expected, 0.0,
+            "ring minimum should be chronological"
+        );
+        context.expectNear(
+            snapshot.waveformPoints[point].maximum[0], expected, 0.0,
+            "ring maximum should be chronological"
+        );
+    }
+}
+
+void testWaveformResetDurationAndIncompletePoint(TestContext& context)
+{
+    GranularEngine engine;
+    context.expect(engine.prepare(makeSpec()), "reset waveform engine should prepare");
+    const auto framesPerPoint = configureWaveformResolution(context, engine, 512.0);
+
+    std::vector<float> incompleteInput(framesPerPoint - 1, 1.0f);
+    std::vector<float> incompleteOutput(incompleteInput.size());
+    (void) processMono(engine, incompleteInput, incompleteOutput, makeParameters());
+    GranularTelemetrySnapshot snapshot;
+    context.expect(engine.copyWaveformTelemetry(snapshot), "incomplete envelope copy");
+    context.expect(snapshot.waveformPointCount == 0, "incomplete point should not publish");
+
+    std::array finalInput { 2.0f };
+    std::array finalOutput { 0.0f };
+    (void) processMono(engine, finalInput, finalOutput, makeParameters());
+    context.expect(engine.copyWaveformTelemetry(snapshot), "completed envelope copy");
+    context.expect(snapshot.waveformPointCount == 1, "completed point should publish");
+    const auto generationBeforeDurationChange = snapshot.generation;
+
+    context.expect(
+        engine.setLogicalDurationSeconds(2.0),
+        "logical duration change should succeed"
+    );
+    context.expect(engine.copyWaveformTelemetry(snapshot), "duration-change envelope copy");
+    context.expect(snapshot.waveformPointCount == 0, "duration change should rebuild envelope");
+    context.expect(
+        snapshot.generation == generationBeforeDurationChange,
+        "duration change should preserve DSP history generation"
+    );
+    context.expectNear(snapshot.logicalDurationSeconds, 2.0, 1.0 / defaultSampleRate, "new logical duration");
+
+    engine.reset();
+    context.expect(engine.copyWaveformTelemetry(snapshot), "reset envelope copy");
+    context.expect(snapshot.waveformPointCount == 0, "reset should clear envelope");
+    context.expect(
+        snapshot.generation != generationBeforeDurationChange,
+        "reset should advance history generation"
+    );
+}
+
+GranularTelemetrySnapshot renderWaveformPartitioned(std::size_t blockSize)
+{
+    GranularEngine engine;
+    GranularTelemetrySnapshot snapshot;
+
+    if (!engine.prepare(makeSpec())
+        || !engine.setLogicalDurationSeconds(512.0 / defaultSampleRate))
+    {
+        return snapshot;
+    }
+
+    constexpr std::size_t totalSamples = 2000;
+    std::vector<float> input(totalSamples);
+    std::vector<float> output(totalSamples);
+
+    for (std::size_t sample = 0; sample < totalSamples; ++sample)
+        input[sample] = static_cast<float>(
+            static_cast<int>(sample % 31) - 15
+        );
+
+    for (std::size_t start = 0; start < totalSamples; start += blockSize)
+    {
+        const auto length = std::min(blockSize, totalSamples - start);
+        if (processMono(
+                engine,
+                std::span<const float> { input }.subspan(start, length),
+                std::span<float> { output }.subspan(start, length),
+                makeParameters()
+            ) != GranularEngineProcessResult::success)
+        {
+            return {};
+        }
+    }
+
+    (void) engine.copyWaveformTelemetry(snapshot);
+    return snapshot;
+}
+
+void testWaveformBlockIndependenceAndNonFiniteInput(TestContext& context)
+{
+    const auto reference = renderWaveformPartitioned(1);
+
+    for (const auto blockSize : { 7u, 64u, 511u, 4097u })
+    {
+        const auto candidate = renderWaveformPartitioned(blockSize);
+        context.expect(
+            candidate.waveformPointCount == reference.waveformPointCount,
+            "waveform point count should be block-independent"
+        );
+
+        for (std::size_t point = 0; point < reference.waveformPointCount; ++point)
+        {
+            context.expect(
+                candidate.waveformPoints[point].minimum
+                        == reference.waveformPoints[point].minimum
+                    && candidate.waveformPoints[point].maximum
+                        == reference.waveformPoints[point].maximum,
+                "waveform envelope should be block-independent"
+            );
+        }
+    }
+
+    GranularEngine engine;
+    context.expect(engine.prepare(makeSpec()), "non-finite waveform engine prepare");
+    const auto framesPerPoint = configureWaveformResolution(context, engine, 768.0);
+    context.expect(framesPerPoint >= 3, "sanitised point should include finite sample");
+    std::vector<float> input(framesPerPoint, 1.0f);
+    input.front() = std::numeric_limits<float>::quiet_NaN();
+    input.back() = std::numeric_limits<float>::infinity();
+    std::vector<float> output(input.size());
+    context.expect(
+        processMono(engine, input, output, makeParameters())
+            == GranularEngineProcessResult::degraded,
+        "non-finite waveform input should report degraded"
+    );
+    GranularTelemetrySnapshot snapshot;
+    context.expect(engine.copyWaveformTelemetry(snapshot), "sanitised envelope copy");
+    context.expect(snapshot.waveformPointCount == 1, "sanitised point should publish");
+    context.expectNear(snapshot.waveformPoints[0].minimum[0], 0.0, 0.0, "sanitised minimum");
+    context.expectNear(snapshot.waveformPoints[0].maximum[0], 1.0, 0.0, "sanitised maximum");
+}
+
+void testTelemetryCopyDoesNotChangeAudio(TestContext& context)
+{
+    GranularEngine reference;
+    GranularEngine observed;
+    context.expect(reference.prepare(makeSpec()), "reference audio engine prepare");
+    context.expect(observed.prepare(makeSpec()), "observed audio engine prepare");
+
+    std::vector<float> input(6000, 1.0f);
+    std::vector<float> referenceOutput(input.size());
+    std::vector<float> observedOutput(input.size());
+    const auto parameters = makeParameters(120.0, 10.0, 0.5, 7.0, false);
+    constexpr std::size_t split = 3000;
+
+    (void) processMono(
+        reference,
+        input,
+        referenceOutput,
+        parameters
+    );
+    (void) processMono(
+        observed,
+        std::span<const float> { input }.first(split),
+        std::span<float> { observedOutput }.first(split),
+        parameters
+    );
+    GranularTelemetrySnapshot snapshot;
+    context.expect(observed.copyTelemetrySnapshot(snapshot), "mid-render telemetry copy");
+    (void) processMono(
+        observed,
+        std::span<const float> { input }.subspan(split),
+        std::span<float> { observedOutput }.subspan(split),
+        parameters
+    );
+
+    context.expect(
+        observedOutput == referenceOutput,
+        "copying waveform telemetry must not change granular audio output"
+    );
+}
+
+void fillGranularHistory(GranularEngine& engine, std::size_t frames)
+{
+    std::vector<float> input(frames, 1.0f);
+    std::vector<float> output(frames);
+    (void) processMono(engine, input, output, makeParameters());
+}
+
+void testActiveGrainTelemetryEmptyAndSingle(TestContext& context)
+{
+    GranularEngine unprepared;
+    GranularTelemetrySnapshot unchanged;
+    unchanged.sequence = 999;
+    unchanged.activeGrainCount = 42;
+    context.expect(
+        !unprepared.copyTelemetrySnapshot(unchanged),
+        "unprepared telemetry copy should fail"
+    );
+    context.expect(
+        unchanged.sequence == 999 && unchanged.activeGrainCount == 42,
+        "failed telemetry copy should leave destination unchanged"
+    );
+
+    GranularEngine engine;
+    context.expect(engine.prepare(makeSpec()), "grain telemetry engine prepare");
+    GranularTelemetrySnapshot snapshot;
+    context.expect(engine.copyTelemetrySnapshot(snapshot), "empty telemetry copy");
+    context.expect(snapshot.activeGrainCount == 0, "empty pool should report no grains");
+
+    fillGranularHistory(engine, 23000);
+    std::vector<float> eventInput(368, 0.0f);
+    std::vector<float> eventOutput(eventInput.size());
+    const auto pitch = 7.0;
+    const auto parameters = makeParameters(120.0, 10.0, 1.0, pitch, false);
+    context.expect(
+        processMono(engine, eventInput, eventOutput, parameters)
+            == GranularEngineProcessResult::success,
+        "single telemetry grain should launch"
+    );
+    context.expect(engine.copyTelemetrySnapshot(snapshot), "single grain telemetry copy");
+    context.expect(snapshot.activeGrainCount == 1, "one active grain expected");
+    context.expect(snapshot.waveformPointCount > 0, "waveform and grain telemetry should coexist");
+
+    const auto& grain = snapshot.grains[0];
+    const auto expectedRate = std::pow(2.0, pitch / 12.0);
+    context.expectNear(grain.playbackRate, expectedRate, 1.0e-12, "grain playback rate");
+    context.expectNear(grain.readPosition, expectedRate, 1.0e-12, "post-render read position");
+    context.expect(grain.sourceOldest == 0, "single grain source oldest boundary");
+    context.expect(
+        grain.sourceNewestExclusive == 23368,
+        "single grain source newest boundary"
+    );
+    context.expect(grain.durationFrames == 441, "10 ms grain duration at 44.1 kHz");
+    context.expect(grain.renderedFrames == 1, "launch sample should already be rendered");
+    context.expectNear(
+        snapshot.appliedParameters.pitchSemitones,
+        pitch,
+        0.0,
+        "snapshot should include captured pitch"
+    );
+    context.expect(
+        !snapshot.appliedParameters.reverse,
+        "snapshot should include captured direction"
+    );
+}
+
+void testMultipleAndMaximumReachableGrainTelemetry(TestContext& context)
+{
+    GranularEngine engine;
+    context.expect(engine.prepare(makeSpec()), "multiple telemetry engine prepare");
+    fillGranularHistory(engine, 23000);
+
+    std::vector<float> input(735, 0.0f);
+    std::vector<float> output(input.size());
+    const auto parameters = makeParameters(120.0, 500.0, 1.0, 0.0, false);
+    (void) processMono(engine, input, output, parameters);
+
+    GranularTelemetrySnapshot snapshot;
+    context.expect(engine.copyTelemetrySnapshot(snapshot), "multiple grain telemetry copy");
+    context.expect(snapshot.activeGrainCount == 2, "two overlapping grains expected");
+    context.expect(snapshot.grains[0].renderedFrames == 368, "older grain render count");
+    context.expect(snapshot.grains[1].renderedFrames == 1, "newer grain render count");
+    context.expectNear(snapshot.grains[0].readPosition, 368.0, 0.0, "older grain position");
+    context.expectNear(snapshot.grains[1].readPosition, 1.0, 0.0, "newer grain position");
+    context.expect(
+        snapshot.grains[0].sourceNewestExclusive == 23368
+            && snapshot.grains[1].sourceNewestExclusive == 23735,
+        "each grain should preserve its launch-time SourceRegion"
+    );
+
+    GranularEngine maximumEngine;
+    context.expect(maximumEngine.prepare(makeSpec()), "maximum telemetry engine prepare");
+    fillGranularHistory(maximumEngine, 23000);
+    std::vector<float> maximumInput(22050, 0.0f);
+    std::vector<float> maximumOutput(maximumInput.size());
+    (void) processMono(maximumEngine, maximumInput, maximumOutput, parameters);
+    context.expect(
+        maximumEngine.copyTelemetrySnapshot(snapshot),
+        "maximum reachable grain telemetry copy"
+    );
+    context.expect(
+        snapshot.activeGrainCount == 60,
+        "current Density and Size ranges should reach 60 simultaneous grains"
+    );
+    context.expect(
+        snapshot.activeGrainCount <= snapshot.grains.size(),
+        "active grain telemetry must remain within its 64-entry capacity"
+    );
+}
+
+void testFinishedGrainTelemetryLifecycle(TestContext& context)
+{
+    GranularEngine engine;
+    context.expect(engine.prepare(makeSpec()), "finished telemetry engine prepare");
+    fillGranularHistory(engine, 23000);
+
+    std::vector<float> launchInput(368, 0.0f);
+    std::vector<float> launchOutput(launchInput.size());
+    const auto parameters = makeParameters(120.0, 10.0, 1.0, 0.0, false);
+    (void) processMono(engine, launchInput, launchOutput, parameters);
+
+    std::vector<float> beforeFinishInput(439, 0.0f);
+    std::vector<float> beforeFinishOutput(beforeFinishInput.size());
+    (void) processMono(
+        engine,
+        beforeFinishInput,
+        beforeFinishOutput,
+        makeParameters()
+    );
+
+    GranularTelemetrySnapshot snapshot;
+    context.expect(engine.copyTelemetrySnapshot(snapshot), "pre-finish telemetry copy");
+    context.expect(snapshot.activeGrainCount == 1, "grain should remain active before last frame");
+    context.expect(snapshot.grains[0].renderedFrames == 440, "pre-finish render count");
+
+    std::array finalInput { 0.0f };
+    std::array finalOutput { 0.0f };
+    (void) processMono(engine, finalInput, finalOutput, makeParameters());
+    context.expect(engine.copyTelemetrySnapshot(snapshot), "post-finish telemetry copy");
+    context.expect(
+        snapshot.activeGrainCount == 0,
+        "finished grain should be excluded by pre-reclaim active traversal"
+    );
+
+    std::array followingInput { 0.0f };
+    std::array followingOutput { 0.0f };
+    (void) processMono(engine, followingInput, followingOutput, makeParameters());
+    context.expect(engine.copyTelemetrySnapshot(snapshot), "post-reclaim telemetry copy");
+    context.expect(snapshot.activeGrainCount == 0, "reclaim should keep active telemetry empty");
+}
+
+void testShortLogicalHistoryWaveformCoverage(TestContext& context)
+{
+    GranularEngine engine;
+    context.expect(engine.prepare(makeSpec()), "short logical history engine prepare");
+    context.expect(
+        engine.setLogicalDurationSeconds(100.0 / defaultSampleRate),
+        "logical history shorter than 256 frames should be supported"
+    );
+
+    GranularTelemetrySnapshot snapshot;
+    context.expect(engine.copyTelemetrySnapshot(snapshot), "short history metadata copy");
+    const auto logicalFrames = static_cast<std::size_t>(std::llround(
+        snapshot.logicalDurationSeconds * snapshot.sampleRate
+    ));
+    context.expect(logicalFrames < 256, "test must exercise sub-256-frame history");
+
+    std::vector<float> input(logicalFrames + 20, 1.0f);
+    std::vector<float> output(input.size());
+    (void) processMono(engine, input, output, makeParameters());
+    context.expect(engine.copyTelemetrySnapshot(snapshot), "short history envelope copy");
+    context.expect(
+        snapshot.waveformPointCount == logicalFrames,
+        "sub-256 history should publish one point per valid logical frame"
+    );
+    context.expect(
+        snapshot.waveformNewestExclusive - snapshot.waveformOldest
+            == logicalFrames,
+        "short envelope range should match logical history length"
+    );
 }
 }
 
@@ -884,6 +1385,15 @@ int main()
     testNonFiniteInputsAndParameters(context);
     testRendererDegradedAndFiniteOutput(context);
     testNoAllocationsAfterPrepare(context);
+    testWaveformMonoAndStereoMinMax(context);
+    testWaveformChronologyAndRingReuse(context);
+    testWaveformResetDurationAndIncompletePoint(context);
+    testWaveformBlockIndependenceAndNonFiniteInput(context);
+    testTelemetryCopyDoesNotChangeAudio(context);
+    testActiveGrainTelemetryEmptyAndSingle(context);
+    testMultipleAndMaximumReachableGrainTelemetry(context);
+    testFinishedGrainTelemetryLifecycle(context);
+    testShortLogicalHistoryWaveformCoverage(context);
 
     if (context.getFailures() == 0)
     {

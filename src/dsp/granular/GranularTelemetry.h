@@ -1,6 +1,6 @@
 #pragma once
 
-#include "dsp/granular/GranularEngine.h"
+#include "dsp/granular/GrainScheduler.h"
 
 #include <array>
 #include <atomic>
@@ -10,6 +10,8 @@
 
 namespace hypercolor::dsp::granular
 {
+using GranularEngineParameters = GrainSchedulerParameters;
+
 inline constexpr std::size_t granularTelemetryWaveformCapacity = 256;
 inline constexpr std::size_t granularTelemetryGrainCapacity = 64;
 inline constexpr std::size_t granularTelemetryQueueCapacity = 8;
