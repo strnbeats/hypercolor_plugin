@@ -61,6 +61,7 @@ target_sources(HYPERCOLOR
         src/dsp/fx/TapeEffect.cpp
         src/dsp/fx/BitcrushEffect.cpp
         src/dsp/fx/FilterEffect.cpp
+        src/dsp/fx/CompressorEffect.cpp
         src/dsp/granular/CircularAudioBuffer.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
@@ -436,4 +437,16 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags
     )
     add_test(NAME HYPERCOLOR.FilterEffect COMMAND HYPERCOLORFilterEffectTests)
+
+    add_executable(HYPERCOLORCompressorEffectTests
+        src/dsp/fx/CompressorEffect.cpp
+        tests/CompressorEffectTests.cpp
+    )
+    target_include_directories(HYPERCOLORCompressorEffectTests PRIVATE src)
+    target_compile_features(HYPERCOLORCompressorEffectTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORCompressorEffectTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+    add_test(NAME HYPERCOLOR.CompressorEffect COMMAND HYPERCOLORCompressorEffectTests)
 endif()

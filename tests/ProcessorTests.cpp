@@ -425,8 +425,16 @@ void testGranularParameterContracts(TestContext& context)
     expectParameterContract(context, processor, hypercolor::ParameterIDs::filterMix, 0.0f, 100.0f, 100.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::filterOutput, -24.0f, 12.0f, 0.0f);
     context.expect(dynamic_cast<juce::AudioParameterChoice*>(processor.getValueTreeState().getParameter(hypercolor::ParameterIDs::filterMode)) != nullptr, "Filter Mode should be an AudioParameterChoice");
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorThreshold, -60.0f, 0.0f, -18.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorRatio, 1.0f, 20.0f, 4.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorAttack, 0.1f, 100.0f, 10.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorRelease, 10.0f, 1000.0f, 100.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorKnee, 0.0f, 24.0f, 6.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorMakeup, 0.0f, 24.0f, 0.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorMix, 0.0f, 100.0f, 100.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorStereoLink, 0.0f, 100.0f, 100.0f);
 
-    constexpr std::array<std::string_view, 58> parameterIDs {
+    constexpr std::array<std::string_view, 66> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -484,7 +492,15 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::filterResonance,
         hypercolor::ParameterIDs::filterDrive,
         hypercolor::ParameterIDs::filterMix,
-        hypercolor::ParameterIDs::filterOutput
+        hypercolor::ParameterIDs::filterOutput,
+        hypercolor::ParameterIDs::compressorThreshold,
+        hypercolor::ParameterIDs::compressorRatio,
+        hypercolor::ParameterIDs::compressorAttack,
+        hypercolor::ParameterIDs::compressorRelease,
+        hypercolor::ParameterIDs::compressorKnee,
+        hypercolor::ParameterIDs::compressorMakeup,
+        hypercolor::ParameterIDs::compressorMix,
+        hypercolor::ParameterIDs::compressorStereoLink
     };
 
     for (std::size_t first = 0; first < parameterIDs.size(); ++first)

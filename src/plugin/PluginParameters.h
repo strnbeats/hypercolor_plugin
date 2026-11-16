@@ -62,4 +62,12 @@ inline constexpr auto filterResonance = "filterResonance";
 inline constexpr auto filterDrive = "filterDrive";
 inline constexpr auto filterMix = "filterMix";
 inline constexpr auto filterOutput = "filterOutput";
+inline constexpr auto compressorThreshold = "compressorThreshold";
+inline constexpr auto compressorRatio = "compressorRatio";
+inline constexpr auto compressorAttack = "compressorAttack";
+inline constexpr auto compressorRelease = "compressorRelease";
+inline constexpr auto compressorKnee = "compressorKnee";
+inline constexpr auto compressorMakeup = "compressorMakeup";
+inline constexpr auto compressorMix = "compressorMix";
+inline constexpr auto compressorStereoLink = "compressorStereoLink";
 }

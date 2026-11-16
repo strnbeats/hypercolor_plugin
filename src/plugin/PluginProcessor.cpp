@@ -220,6 +220,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     (void) effectChain.addModule(&tapeEffect);
     (void) effectChain.addModule(&bitcrushEffect);
     (void) effectChain.addModule(&filterEffect);
+    (void) effectChain.addModule(&compressorEffect);
     (void) effectChain.addModule(&delayEffect);
     parameters.state.setProperty(
         stateSchemaProperty,
@@ -313,6 +314,14 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     filterDriveParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterDrive);
     filterMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterMix);
     filterOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterOutput);
+    compressorThresholdParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorThreshold);
+    compressorRatioParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorRatio);
+    compressorAttackParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorAttack);
+    compressorReleaseParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorRelease);
+    compressorKneeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorKnee);
+    compressorMakeupParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorMakeup);
+    compressorMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorMix);
+    compressorStereoLinkParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorStereoLink);
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -372,6 +381,14 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(filterDriveParameter != nullptr);
     jassert(filterMixParameter != nullptr);
     jassert(filterOutputParameter != nullptr);
+    jassert(compressorThresholdParameter != nullptr);
+    jassert(compressorRatioParameter != nullptr);
+    jassert(compressorAttackParameter != nullptr);
+    jassert(compressorReleaseParameter != nullptr);
+    jassert(compressorKneeParameter != nullptr);
+    jassert(compressorMakeupParameter != nullptr);
+    jassert(compressorMixParameter != nullptr);
+    jassert(compressorStereoLinkParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -463,6 +480,14 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::filterDrive, 1 }, "Filter Drive", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 0.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::filterMix, 1 }, "Filter Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::filterOutput, 1 }, "Filter Output", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorThreshold, 1 }, "Compressor Threshold", juce::NormalisableRange<float> { -60.0f, 0.0f, 0.1f }, -18.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorRatio, 1 }, "Compressor Ratio", juce::NormalisableRange<float> { 1.0f, 20.0f, 0.1f }, 4.0f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorAttack, 1 }, "Compressor Attack", juce::NormalisableRange<float> { 0.1f, 100.0f, 0.1f }, 10.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorRelease, 1 }, "Compressor Release", juce::NormalisableRange<float> { 10.0f, 1000.0f, 0.1f }, 100.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorKnee, 1 }, "Compressor Knee", juce::NormalisableRange<float> { 0.0f, 24.0f, 0.1f }, 6.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorMakeup, 1 }, "Compressor Makeup", juce::NormalisableRange<float> { 0.0f, 24.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorMix, 1 }, "Compressor Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorStereoLink, 1 }, "Compressor Stereo Link", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::outputGain, 1 },
@@ -766,6 +791,16 @@ void HypercolorAudioProcessor::processBlock(
         filterDriveParameter->load(std::memory_order_relaxed) / 100.0f,
         filterMixParameter->load(std::memory_order_relaxed) / 100.0f,
         filterOutputParameter->load(std::memory_order_relaxed)
+    });
+    compressorEffect.setParameters({
+        compressorThresholdParameter->load(std::memory_order_relaxed),
+        compressorRatioParameter->load(std::memory_order_relaxed),
+        compressorAttackParameter->load(std::memory_order_relaxed),
+        compressorReleaseParameter->load(std::memory_order_relaxed),
+        compressorKneeParameter->load(std::memory_order_relaxed),
+        compressorMakeupParameter->load(std::memory_order_relaxed),
+        compressorMixParameter->load(std::memory_order_relaxed) / 100.0f,
+        compressorStereoLinkParameter->load(std::memory_order_relaxed) / 100.0f
     });
 
     const auto numChannels = juce::jmin(
@@ -1299,6 +1334,15 @@ void HypercolorAudioProcessor::setStateInformation(
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterDrive, 0.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterMix, 100.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::filterOutput, 0.0
+        )
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::compressorThreshold, -18.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::compressorRatio, 4.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::compressorAttack, 10.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::compressorRelease, 100.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::compressorKnee, 6.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::compressorMakeup, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::compressorMix, 100.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::compressorStereoLink, 100.0
         ))
     {
         return;
@@ -1444,6 +1488,14 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::filterDrive, 0.0f, 100.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::filterMix, 0.0f, 100.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::filterOutput, -24.0f, 12.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::compressorThreshold, -60.0f, 0.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::compressorRatio, 1.0f, 20.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::compressorAttack, 0.1f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::compressorRelease, 10.0f, 1000.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::compressorKnee, 0.0f, 24.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::compressorMakeup, 0.0f, 24.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::compressorMix, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::compressorStereoLink, 0.0f, 100.0f)
         )
     {
         return;

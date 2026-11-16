@@ -12,6 +12,7 @@
 #include "dsp/fx/TapeEffect.h"
 #include "dsp/fx/BitcrushEffect.h"
 #include "dsp/fx/FilterEffect.h"
+#include "dsp/fx/CompressorEffect.h"
 
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
@@ -138,6 +139,14 @@ private:
     std::atomic<float>* filterDriveParameter = nullptr;
     std::atomic<float>* filterMixParameter = nullptr;
     std::atomic<float>* filterOutputParameter = nullptr;
+    std::atomic<float>* compressorThresholdParameter = nullptr;
+    std::atomic<float>* compressorRatioParameter = nullptr;
+    std::atomic<float>* compressorAttackParameter = nullptr;
+    std::atomic<float>* compressorReleaseParameter = nullptr;
+    std::atomic<float>* compressorKneeParameter = nullptr;
+    std::atomic<float>* compressorMakeupParameter = nullptr;
+    std::atomic<float>* compressorMixParameter = nullptr;
+    std::atomic<float>* compressorStereoLinkParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
@@ -148,6 +157,7 @@ private:
     hypercolor::dsp::fx::TapeEffect tapeEffect;
     hypercolor::dsp::fx::BitcrushEffect bitcrushEffect;
     hypercolor::dsp::fx::FilterEffect filterEffect;
+    hypercolor::dsp::fx::CompressorEffect compressorEffect;
     hypercolor::dsp::fx::EffectChain effectChain;
     hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
     std::uint64_t telemetryPublishIntervalSamples = 0;
