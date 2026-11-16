@@ -1,6 +1,7 @@
 #include "dsp/fx/SpaceReverb.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 
@@ -14,6 +15,29 @@ constexpr std::array<std::size_t, SpaceReverb::delayCount> delayMultipliers {
 constexpr auto feedbackLimit = 0.9995f;
 constexpr auto smoothingCoefficient = 0.001f;
 constexpr auto inverseSqrtEight = 0.3535533905932738f;
+
+constexpr int hadamardSign(std::size_t line, std::size_t source) noexcept
+{
+    return (std::popcount(static_cast<unsigned int>(line & source)) % 2 == 0)
+        ? 1 : -1;
+}
+
+constexpr bool hasOrthogonalHadamardRows() noexcept
+{
+    for (std::size_t line = 0; line < SpaceReverb::delayCount; ++line)
+        for (std::size_t other = 0; other < SpaceReverb::delayCount; ++other)
+        {
+            auto dot = 0;
+            for (std::size_t source = 0; source < SpaceReverb::delayCount; ++source)
+                dot += hadamardSign(line, source) * hadamardSign(other, source);
+
+            if (dot != (line == other ? static_cast<int>(SpaceReverb::delayCount) : 0))
+                return false;
+        }
+    return true;
+}
+
+static_assert(hasOrthogonalHadamardRows());
 }
 
 SpaceReverbParameters SpaceReverb::sanitise(
@@ -163,7 +187,7 @@ void SpaceReverb::process(EffectAudioBlock& block) noexcept
             float sum = 0.0f;
             for (std::size_t source = 0; source < delayCount; ++source)
             {
-                const auto sign = ((line & source) == 0) ? 1.0f : -1.0f;
+                const auto sign = static_cast<float>(hadamardSign(line, source));
                 sum += sign * delayed[source];
             }
             transformed[line] = sum * inverseSqrtEight;
