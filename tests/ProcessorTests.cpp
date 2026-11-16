@@ -375,8 +375,36 @@ void testGranularParameterContracts(TestContext& context)
     expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationFeedback, -95.0f, 95.0f, 0.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationMix, 0.0f, 100.0f, 30.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationWidth, 0.0f, 200.0f, 100.0f);
+    context.expect(
+        dynamic_cast<juce::AudioParameterChoice*>(
+            processor.getValueTreeState().getParameter(hypercolor::ParameterIDs::driveMode)
+        ) != nullptr,
+        "Drive Mode should be an AudioParameterChoice"
+    );
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::driveAmount, 0.0f, 36.0f, 0.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::driveTone, 0.0f, 100.0f, 50.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::driveMix, 0.0f, 100.0f, 100.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::driveOutput, -24.0f, 12.0f, 0.0f);
+    context.expect(
+        dynamic_cast<juce::AudioParameterChoice*>(
+            processor.getValueTreeState().getParameter(hypercolor::ParameterIDs::delayMode)
+        ) != nullptr,
+        "Delay Mode should be an AudioParameterChoice"
+    );
+    context.expect(
+        dynamic_cast<juce::AudioParameterBool*>(
+            processor.getValueTreeState().getParameter(hypercolor::ParameterIDs::delaySync)
+        ) != nullptr,
+        "Delay Sync should be an AudioParameterBool"
+    );
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::delayTime, 1.0f, 2000.0f, 350.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::delayFeedback, 0.0f, 95.0f, 35.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::delayLowCut, 20.0f, 2000.0f, 100.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::delayHighCut, 1000.0f, 20000.0f, 12000.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::delayMix, 0.0f, 100.0f, 30.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::delayWidth, 0.0f, 200.0f, 100.0f);
 
-    constexpr std::array<std::string_view, 27> parameterIDs {
+    constexpr std::array<std::string_view, 41> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -403,7 +431,21 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::modulationBaseDelay,
         hypercolor::ParameterIDs::modulationFeedback,
         hypercolor::ParameterIDs::modulationMix,
-        hypercolor::ParameterIDs::modulationWidth
+        hypercolor::ParameterIDs::modulationWidth,
+        hypercolor::ParameterIDs::driveMode,
+        hypercolor::ParameterIDs::driveAmount,
+        hypercolor::ParameterIDs::driveTone,
+        hypercolor::ParameterIDs::driveMix,
+        hypercolor::ParameterIDs::driveOutput,
+        hypercolor::ParameterIDs::delayMode,
+        hypercolor::ParameterIDs::delaySync,
+        hypercolor::ParameterIDs::delayTime,
+        hypercolor::ParameterIDs::delayDivision,
+        hypercolor::ParameterIDs::delayFeedback,
+        hypercolor::ParameterIDs::delayLowCut,
+        hypercolor::ParameterIDs::delayHighCut,
+        hypercolor::ParameterIDs::delayMix,
+        hypercolor::ParameterIDs::delayWidth
     };
 
     for (std::size_t first = 0; first < parameterIDs.size(); ++first)

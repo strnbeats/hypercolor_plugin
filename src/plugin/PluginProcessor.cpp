@@ -216,6 +216,8 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
 {
     (void) effectChain.addModule(&spaceReverb);
     (void) effectChain.addModule(&modulationEffect);
+    (void) effectChain.addModule(&driveEffect);
+    (void) effectChain.addModule(&delayEffect);
     parameters.state.setProperty(
         stateSchemaProperty,
         currentStateSchemaVersion,
@@ -277,6 +279,20 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     modulationFeedbackParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationFeedback);
     modulationMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationMix);
     modulationWidthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationWidth);
+    driveModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveMode);
+    driveAmountParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveAmount);
+    driveToneParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveTone);
+    driveMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveMix);
+    driveOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveOutput);
+    delayModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayMode);
+    delaySyncParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delaySync);
+    delayTimeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayTime);
+    delayDivisionParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayDivision);
+    delayFeedbackParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayFeedback);
+    delayLowCutParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayLowCut);
+    delayHighCutParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayHighCut);
+    delayMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayMix);
+    delayWidthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayWidth);
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -305,6 +321,20 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(modulationFeedbackParameter != nullptr);
     jassert(modulationMixParameter != nullptr);
     jassert(modulationWidthParameter != nullptr);
+    jassert(driveModeParameter != nullptr);
+    jassert(driveAmountParameter != nullptr);
+    jassert(driveToneParameter != nullptr);
+    jassert(driveMixParameter != nullptr);
+    jassert(driveOutputParameter != nullptr);
+    jassert(delayModeParameter != nullptr);
+    jassert(delaySyncParameter != nullptr);
+    jassert(delayTimeParameter != nullptr);
+    jassert(delayDivisionParameter != nullptr);
+    jassert(delayFeedbackParameter != nullptr);
+    jassert(delayLowCutParameter != nullptr);
+    jassert(delayHighCutParameter != nullptr);
+    jassert(delayMixParameter != nullptr);
+    jassert(delayWidthParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -365,6 +395,20 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationFeedback, 1 }, "Modulation Feedback", juce::NormalisableRange<float> { -95.0f, 95.0f, 0.1f }, 0.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationMix, 1 }, "Modulation Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationWidth, 1 }, "Modulation Width", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::ParameterIDs::driveMode, 1 }, "Drive Mode", juce::StringArray { "Soft Clip", "Hard Clip", "Tube" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::driveAmount, 1 }, "Drive", juce::NormalisableRange<float> { 0.0f, 36.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::driveTone, 1 }, "Drive Tone", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::driveMix, 1 }, "Drive Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::driveOutput, 1 }, "Drive Output", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::ParameterIDs::delayMode, 1 }, "Delay Mode", juce::StringArray { "Stereo", "Ping-Pong" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::ParameterIDs::delaySync, 1 }, "Delay Sync", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayTime, 1 }, "Delay Time", juce::NormalisableRange<float> { 1.0f, 2000.0f, 0.1f }, 350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::ParameterIDs::delayDivision, 1 }, "Delay Division", juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16", "1/4 dotted", "1/8 dotted", "1/4 triplet", "1/8 triplet" }, 2));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayFeedback, 1 }, "Delay Feedback", juce::NormalisableRange<float> { 0.0f, 95.0f, 0.1f }, 35.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayLowCut, 1 }, "Delay Low Cut", juce::NormalisableRange<float> { 20.0f, 2000.0f, 1.0f }, 100.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayHighCut, 1 }, "Delay High Cut", juce::NormalisableRange<float> { 1000.0f, 20000.0f, 1.0f }, 12000.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayMix, 1 }, "Delay Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::delayWidth, 1 }, "Delay Width", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::outputGain, 1 },
@@ -615,6 +659,36 @@ void HypercolorAudioProcessor::processBlock(
         modulationFeedbackParameter->load(std::memory_order_relaxed) / 100.0f,
         modulationMixParameter->load(std::memory_order_relaxed) / 100.0f,
         modulationWidthParameter->load(std::memory_order_relaxed) / 100.0f
+    });
+    driveEffect.setParameters({
+        driveModeParameter->load(std::memory_order_relaxed) >= 1.5f
+            ? hypercolor::dsp::fx::DriveMode::tube
+            : (driveModeParameter->load(std::memory_order_relaxed) >= 0.5f
+                ? hypercolor::dsp::fx::DriveMode::hardClip
+                : hypercolor::dsp::fx::DriveMode::softClip),
+        driveAmountParameter->load(std::memory_order_relaxed),
+        driveToneParameter->load(std::memory_order_relaxed) / 100.0f,
+        driveMixParameter->load(std::memory_order_relaxed) / 100.0f,
+        driveOutputParameter->load(std::memory_order_relaxed)
+    });
+    double bpm = 120.0;
+    if (const auto* playHead = getPlayHead())
+    {
+        if (const auto position = playHead->getPosition())
+            if (position->getBpm().hasValue())
+                bpm = *position->getBpm();
+    }
+    delayEffect.setParameters({
+        delayModeParameter->load(std::memory_order_relaxed) >= 0.5f ? hypercolor::dsp::fx::DelayMode::pingPong : hypercolor::dsp::fx::DelayMode::stereo,
+        delaySyncParameter->load(std::memory_order_relaxed) >= 0.5f,
+        delayTimeParameter->load(std::memory_order_relaxed),
+        static_cast<hypercolor::dsp::fx::DelayDivision>(std::clamp(delayDivisionParameter->load(std::memory_order_relaxed), 0.0f, 8.0f)),
+        delayFeedbackParameter->load(std::memory_order_relaxed) / 100.0f,
+        delayLowCutParameter->load(std::memory_order_relaxed),
+        delayHighCutParameter->load(std::memory_order_relaxed),
+        delayMixParameter->load(std::memory_order_relaxed) / 100.0f,
+        delayWidthParameter->load(std::memory_order_relaxed) / 100.0f,
+        static_cast<float>(bpm)
     });
 
     const auto numChannels = juce::jmin(
@@ -1112,6 +1186,22 @@ void HypercolorAudioProcessor::setStateInformation(
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationFeedback, 0.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationMix, 30.0)
         || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationWidth, 100.0
+        )
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::driveMode, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::driveAmount, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::driveTone, 50.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::driveMix, 100.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::driveOutput, 0.0
+        )
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayMode, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delaySync, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayTime, 350.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayDivision, 2.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayFeedback, 35.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayLowCut, 100.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayHighCut, 12000.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayMix, 30.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::delayWidth, 100.0
         ))
     {
         return;
@@ -1226,6 +1316,20 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationFeedback, -95.0f, 95.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationMix, 0.0f, 100.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationWidth, 0.0f, 200.0f)
+        || !hasValidChoiceParameterValue(restoredState, hypercolor::ParameterIDs::driveMode, 0, 2)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::driveAmount, 0.0f, 36.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::driveTone, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::driveMix, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::driveOutput, -24.0f, 12.0f)
+        || !hasValidChoiceParameterValue(restoredState, hypercolor::ParameterIDs::delayMode, 0, 1)
+        || !hasValidChoiceParameterValue(restoredState, hypercolor::ParameterIDs::delaySync, 0, 1)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayTime, 1.0f, 2000.0f)
+        || !hasValidChoiceParameterValue(restoredState, hypercolor::ParameterIDs::delayDivision, 0, 8)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayFeedback, 0.0f, 95.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayLowCut, 20.0f, 2000.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayHighCut, 1000.0f, 20000.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayMix, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::delayWidth, 0.0f, 200.0f)
         )
     {
         return;

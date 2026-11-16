@@ -56,6 +56,8 @@ target_sources(HYPERCOLOR
         src/dsp/fx/EffectChain.cpp
         src/dsp/fx/SpaceReverb.cpp
         src/dsp/fx/ModulationEffect.cpp
+        src/dsp/fx/DriveEffect.cpp
+        src/dsp/fx/DelayEffect.cpp
         src/dsp/granular/CircularAudioBuffer.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
@@ -371,4 +373,28 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags
     )
     add_test(NAME HYPERCOLOR.ModulationEffect COMMAND HYPERCOLORModulationEffectTests)
+
+    add_executable(HYPERCOLORDriveEffectTests
+        src/dsp/fx/DriveEffect.cpp
+        tests/DriveEffectTests.cpp
+    )
+    target_include_directories(HYPERCOLORDriveEffectTests PRIVATE src)
+    target_compile_features(HYPERCOLORDriveEffectTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORDriveEffectTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+    add_test(NAME HYPERCOLOR.DriveEffect COMMAND HYPERCOLORDriveEffectTests)
+
+    add_executable(HYPERCOLORDelayEffectTests
+        src/dsp/fx/DelayEffect.cpp
+        tests/DelayEffectTests.cpp
+    )
+    target_include_directories(HYPERCOLORDelayEffectTests PRIVATE src)
+    target_compile_features(HYPERCOLORDelayEffectTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORDelayEffectTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+    add_test(NAME HYPERCOLOR.DelayEffect COMMAND HYPERCOLORDelayEffectTests)
 endif()

@@ -7,6 +7,8 @@
 #include "dsp/fx/EffectChain.h"
 #include "dsp/fx/SpaceReverb.h"
 #include "dsp/fx/ModulationEffect.h"
+#include "dsp/fx/DriveEffect.h"
+#include "dsp/fx/DelayEffect.h"
 
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
@@ -102,11 +104,27 @@ private:
     std::atomic<float>* modulationFeedbackParameter = nullptr;
     std::atomic<float>* modulationMixParameter = nullptr;
     std::atomic<float>* modulationWidthParameter = nullptr;
+    std::atomic<float>* driveModeParameter = nullptr;
+    std::atomic<float>* driveAmountParameter = nullptr;
+    std::atomic<float>* driveToneParameter = nullptr;
+    std::atomic<float>* driveMixParameter = nullptr;
+    std::atomic<float>* driveOutputParameter = nullptr;
+    std::atomic<float>* delayModeParameter = nullptr;
+    std::atomic<float>* delaySyncParameter = nullptr;
+    std::atomic<float>* delayTimeParameter = nullptr;
+    std::atomic<float>* delayDivisionParameter = nullptr;
+    std::atomic<float>* delayFeedbackParameter = nullptr;
+    std::atomic<float>* delayLowCutParameter = nullptr;
+    std::atomic<float>* delayHighCutParameter = nullptr;
+    std::atomic<float>* delayMixParameter = nullptr;
+    std::atomic<float>* delayWidthParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
     hypercolor::dsp::fx::SpaceReverb spaceReverb;
     hypercolor::dsp::fx::ModulationEffect modulationEffect;
+    hypercolor::dsp::fx::DriveEffect driveEffect;
+    hypercolor::dsp::fx::DelayEffect delayEffect;
     hypercolor::dsp::fx::EffectChain effectChain;
     hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
     std::uint64_t telemetryPublishIntervalSamples = 0;
