@@ -54,7 +54,9 @@ juce_generate_juce_header(HYPERCOLOR)
 target_sources(HYPERCOLOR
     PRIVATE
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
+        src/dsp/granular/GranularRandom.cpp
         src/dsp/granular/Grain.cpp
         src/dsp/granular/GrainPool.cpp
         src/dsp/granular/GrainRenderer.cpp
@@ -286,5 +288,41 @@ if(BUILD_TESTING)
     add_test(
         NAME HYPERCOLOR.GranularTelemetry
         COMMAND HYPERCOLORGranularTelemetryTests
+    )
+
+    add_executable(HYPERCOLORGranularCharacterTests
+        src/dsp/granular/GranularCharacter.cpp
+        tests/GranularCharacterTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGranularCharacterTests PRIVATE src)
+    target_compile_features(HYPERCOLORGranularCharacterTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORGranularCharacterTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.GranularCharacter
+        COMMAND HYPERCOLORGranularCharacterTests
+    )
+
+    add_executable(HYPERCOLORGranularRandomTests
+        src/dsp/granular/GranularRandom.cpp
+        tests/GranularRandomTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGranularRandomTests PRIVATE src)
+    target_compile_features(HYPERCOLORGranularRandomTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORGranularRandomTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.GranularRandom
+        COMMAND HYPERCOLORGranularRandomTests
     )
 endif()
