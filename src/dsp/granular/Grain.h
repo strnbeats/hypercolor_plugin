@@ -15,7 +15,10 @@ enum class GrainState : std::uint8_t
 
 enum class GrainWindow : std::uint8_t
 {
-    hann
+    hann,
+    triangle,
+    smooth,
+    exponential
 };
 
 struct GrainInit

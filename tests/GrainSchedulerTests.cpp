@@ -1542,6 +1542,7 @@ void testParameterLatchingAndClamping(TestContext& context)
     parameters.grainSizeMilliseconds = -100.0;
     parameters.positionNormalized = -1.0;
     parameters.pitchSemitones = -100.0;
+    parameters.envelope = GrainWindow::triangle;
     context.expect(
         runUntilEvent(scheduler, source, pool, parameters, 400)
             == GrainSchedulerStepResult::started,
@@ -1549,6 +1550,7 @@ void testParameterLatchingAndClamping(TestContext& context)
     );
     const auto original = captureFirstActive(pool);
     context.expect(original.durationFrames == 441, "Grain Size lower clamp");
+    context.expect(original.window == GrainWindow::triangle, "Envelope should latch at grain start");
     context.expectNear(original.playbackRate, 0.25, 0.0, "Pitch lower clamp");
 
     GrainSchedulerParameters changed;
@@ -1557,6 +1559,7 @@ void testParameterLatchingAndClamping(TestContext& context)
     changed.positionNormalized = 1.0;
     changed.pitchSemitones = 24.0;
     changed.reverse = true;
+    changed.envelope = GrainWindow::exponential;
     context.expect(writeFrame(source), "latching follow-up write");
     context.expect(
         scheduler.processSample(changed, source, pool)
@@ -1579,6 +1582,10 @@ void testParameterLatchingAndClamping(TestContext& context)
         original.playbackRate,
         0.0,
         "active grain rate must remain latched"
+    );
+    context.expect(
+        retained.window == original.window,
+        "changing envelope must not alter an active grain"
     );
 
     pool.reset();

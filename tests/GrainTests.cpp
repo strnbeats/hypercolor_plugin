@@ -578,6 +578,54 @@ void testHannWindow(TestContext& context)
     );
 }
 
+void testEnvelopeWindows(TestContext& context)
+{
+    CircularAudioBuffer buffer;
+    context.expect(prepareAndFill(buffer, 32), "envelope buffer should prepare");
+
+    for (const auto window : {
+             GrainWindow::hann,
+             GrainWindow::triangle,
+             GrainWindow::smooth,
+             GrainWindow::exponential })
+    {
+        auto init = makeInit(buffer, 10.0, 0.0, 5);
+        init.window = window;
+        Grain grain;
+        context.expect(
+            grain.initialise(init, buffer) == GrainInitResult::success,
+            "envelope grain should initialise"
+        );
+        std::array<float, 5> coefficients {};
+        for (auto& coefficient : coefficients)
+        {
+            coefficient = grain.getWindowCoefficient();
+            grain.advanceAfterRender();
+        }
+
+        context.expect(coefficients.front() == 0.0f, "envelope must start at zero");
+        context.expect(coefficients.back() == 0.0f, "envelope must end at zero");
+        for (const auto coefficient : coefficients)
+            context.expect(
+                std::isfinite(coefficient) && coefficient >= 0.0f
+                    && coefficient <= 1.0f,
+                "envelope coefficient must be finite and bounded"
+            );
+        context.expectNear(
+            coefficients[1],
+            coefficients[3],
+            1.0e-6,
+            "envelope must be symmetric"
+        );
+        context.expectNear(
+            coefficients[2],
+            1.0,
+            1.0e-6,
+            "envelope maximum should be one"
+        );
+    }
+}
+
 void testResetLogicalDurationAndSourceInvalidation(TestContext& context)
 {
     CircularAudioBuffer buffer;
@@ -669,6 +717,7 @@ int main()
     testNonBinaryPlaybackRatesAndBoundaryRegressions(context);
     testSharedTrajectoryArithmeticAtLargePositions(context);
     testHannWindow(context);
+    testEnvelopeWindows(context);
     testResetLogicalDurationAndSourceInvalidation(context);
 
     if (context.getFailures() == 0)

@@ -4,6 +4,7 @@
 
 #include "PluginParameters.h"
 #include "dsp/granular/GranularEngine.h"
+#include "dsp/fx/EffectChain.h"
 
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
@@ -83,9 +84,11 @@ private:
     std::atomic<float>* grainTimingJitterParameter = nullptr;
     std::atomic<float>* grainStereoSpreadParameter = nullptr;
     std::atomic<float>* grainPanRandomParameter = nullptr;
+    std::atomic<float>* grainEnvelopeParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
+    hypercolor::dsp::fx::EffectChain effectChain;
     hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
     std::uint64_t telemetryPublishIntervalSamples = 0;
     std::uint64_t telemetrySamplesSincePublication = 0;

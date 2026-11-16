@@ -38,6 +38,9 @@ constexpr int granularCharacterMaximumIndex = static_cast<int>(
 constexpr int granularCharacterDefaultIndex = static_cast<int>(
     hypercolor::dsp::granular::GranularCharacter::Musical
 );
+constexpr int grainEnvelopeMinimumIndex = 0;
+constexpr int grainEnvelopeMaximumIndex = 3;
+constexpr int grainEnvelopeDefaultIndex = 0;
 
 constexpr hypercolor::dsp::granular::GranularEngineParameters
     defaultGranularParameters;
@@ -152,6 +155,19 @@ hypercolor::dsp::granular::GranularCharacter readGranularCharacter(
     return static_cast<hypercolor::dsp::granular::GranularCharacter>(index);
 }
 
+hypercolor::dsp::granular::GrainWindow readGrainEnvelope(float value) noexcept
+{
+    if (!std::isfinite(value))
+        return hypercolor::dsp::granular::GrainWindow::hann;
+
+    const auto index = static_cast<int>(std::round(std::clamp(
+        value,
+        static_cast<float>(grainEnvelopeMinimumIndex),
+        static_cast<float>(grainEnvelopeMaximumIndex)
+    )));
+    return static_cast<hypercolor::dsp::granular::GrainWindow>(index);
+}
+
 bool addDefaultParameterIfMissing(
     juce::ValueTree& state,
     const juce::ValueTree& parameterTemplateState,
@@ -243,6 +259,9 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     grainPanRandomParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainPanRandom
     );
+    grainEnvelopeParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainEnvelope
+    );
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -257,6 +276,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(grainTimingJitterParameter != nullptr);
     jassert(grainStereoSpreadParameter != nullptr);
     jassert(grainPanRandomParameter != nullptr);
+    jassert(grainEnvelopeParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -295,6 +315,13 @@ HypercolorAudioProcessor::createParameterLayout()
         },
         dryWetDefault,
         percentAttributes
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainEnvelope, 1 },
+        "Grain Envelope",
+        juce::StringArray { "Hann", "Triangle", "Smooth", "Exponential" },
+        grainEnvelopeDefaultIndex
     ));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
@@ -465,6 +492,8 @@ void HypercolorAudioProcessor::prepareToPlay(
             : 0u
     };
     granularEnginePrepared = granularEngine.prepare(processSpec);
+    const auto effectChainPrepared = effectChain.prepare(processSpec);
+    granularEnginePrepared = granularEnginePrepared && effectChainPrepared;
     telemetrySamplesSincePublication = 0;
     telemetryPublishIntervalSamples = granularEnginePrepared
         ? static_cast<std::uint64_t>(std::max(
@@ -490,6 +519,7 @@ void HypercolorAudioProcessor::prepareToPlay(
 void HypercolorAudioProcessor::releaseResources()
 {
     granularEngine.reset();
+    effectChain.reset();
     granularEnginePrepared = false;
     telemetrySamplesSincePublication = 0;
     telemetryPublishIntervalSamples = 0;
@@ -639,7 +669,10 @@ HypercolorAudioProcessor::readGranularParameters() const noexcept
         ) / 100.0,
         static_cast<double>(
             grainPanRandomParameter->load(std::memory_order_relaxed)
-        ) / 100.0
+        ) / 100.0,
+        readGrainEnvelope(
+            grainEnvelopeParameter->load(std::memory_order_relaxed)
+        )
     };
 }
 
@@ -685,10 +718,22 @@ void HypercolorAudioProcessor::processChunk(
             granularParameters
         )
         : hypercolor::dsp::granular::GranularEngineProcessResult::engineNotPrepared;
+    hypercolor::dsp::fx::EffectAudioBlock effectBlock;
+    effectBlock.numChannels = static_cast<std::uint32_t>(numChannels);
+    for (int channel = 0; channel < numChannels; ++channel)
+    {
+        effectBlock.channels[static_cast<std::size_t>(channel)] = {
+            buffer.getWritePointer(channel, startSample),
+            static_cast<std::size_t>(numSamples)
+        };
+    }
+    const auto effectResult = effectChain.process(effectBlock);
     const auto useDryFallback = granularResult
             == hypercolor::dsp::granular::GranularEngineProcessResult::engineNotPrepared
         || granularResult
             == hypercolor::dsp::granular::GranularEngineProcessResult::invalidConfiguration;
+    const auto useEffectFallback = effectResult
+        == hypercolor::dsp::fx::EffectChainResult::invalidConfiguration;
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
@@ -701,7 +746,7 @@ void HypercolorAudioProcessor::processChunk(
             const auto drySample = std::isfinite(rawDrySample)
                 ? rawDrySample
                 : 0.0f;
-            const auto rawWetSample = useDryFallback
+            const auto rawWetSample = useDryFallback || useEffectFallback
                 ? drySample
                 : buffer.getSample(channel, startSample + sample);
             const auto wetSample = std::isfinite(rawWetSample)
@@ -950,6 +995,12 @@ void HypercolorAudioProcessor::setStateInformation(
             parameterTemplateState,
             hypercolor::ParameterIDs::grainPanRandom,
             granularRandomDefaultPercent
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainEnvelope,
+            grainEnvelopeDefaultIndex
         ))
     {
         return;
@@ -1044,6 +1095,12 @@ void HypercolorAudioProcessor::setStateInformation(
             hypercolor::ParameterIDs::grainPanRandom,
             granularRandomMinimumPercent,
             granularRandomMaximumPercent
+        )
+        || !hasValidChoiceParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainEnvelope,
+            grainEnvelopeMinimumIndex,
+            grainEnvelopeMaximumIndex
         ))
     {
         return;

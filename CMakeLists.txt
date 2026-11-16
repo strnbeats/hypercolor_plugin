@@ -53,6 +53,7 @@ juce_generate_juce_header(HYPERCOLOR)
 
 target_sources(HYPERCOLOR
     PRIVATE
+        src/dsp/fx/EffectChain.cpp
         src/dsp/granular/CircularAudioBuffer.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
@@ -329,4 +330,17 @@ if(BUILD_TESTING)
         NAME HYPERCOLOR.GranularRandom
         COMMAND HYPERCOLORGranularRandomTests
     )
+
+    add_executable(HYPERCOLOREffectChainTests
+        src/dsp/fx/EffectChain.cpp
+        tests/EffectChainTests.cpp
+    )
+    target_include_directories(HYPERCOLOREffectChainTests PRIVATE src)
+    target_compile_features(HYPERCOLOREffectChainTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLOREffectChainTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+    add_test(NAME HYPERCOLOR.EffectChain COMMAND HYPERCOLOREffectChainTests)
 endif()

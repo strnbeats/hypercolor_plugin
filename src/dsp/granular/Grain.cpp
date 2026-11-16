@@ -12,6 +12,9 @@ bool isKnownWindow(GrainWindow window) noexcept
     switch (window)
     {
         case GrainWindow::hann:
+        case GrainWindow::triangle:
+        case GrainWindow::smooth:
+        case GrainWindow::exponential:
             return true;
     }
 
@@ -177,6 +180,24 @@ float Grain::getWindowCoefficient() const noexcept
                 0.5
                 - 0.5 * std::cos(2.0 * std::numbers::pi * phase)
             );
+        case GrainWindow::triangle:
+            return static_cast<float>(1.0 - std::abs(2.0 * phase - 1.0));
+        case GrainWindow::smooth:
+        {
+            const auto squared = phase * phase
+                * (1.0 - phase) * (1.0 - phase);
+            return static_cast<float>(16.0 * squared);
+        }
+        case GrainWindow::exponential:
+        {
+            constexpr auto curvature = 4.0;
+            const auto distanceFromCentre = std::abs(2.0 * phase - 1.0);
+            const auto numerator = std::expm1(
+                curvature * (1.0 - distanceFromCentre)
+            );
+            const auto denominator = std::expm1(curvature);
+            return static_cast<float>(numerator / denominator);
+        }
     }
 
     return 0.0f;

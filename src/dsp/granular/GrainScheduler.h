@@ -22,6 +22,7 @@ struct GrainSchedulerParameters
     double timingJitterAmount = 0.0;
     double stereoSpreadAmount = 0.0;
     double panRandomAmount = 0.0;
+    GrainWindow envelope = GrainWindow::hann;
 };
 
 enum class GrainSchedulerStepResult : std::uint8_t

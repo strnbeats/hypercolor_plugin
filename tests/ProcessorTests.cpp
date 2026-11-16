@@ -347,8 +347,16 @@ void testGranularParameterContracts(TestContext& context)
         100.0f,
         0.0f
     );
+    context.expect(
+        dynamic_cast<juce::AudioParameterChoice*>(
+            processor.getValueTreeState().getParameter(
+                hypercolor::ParameterIDs::grainEnvelope
+            )
+        ) != nullptr,
+        "Grain Envelope should be an AudioParameterChoice"
+    );
 
-    constexpr std::array<std::string_view, 13> parameterIDs {
+    constexpr std::array<std::string_view, 14> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -361,7 +369,8 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::grainPositionRandom,
         hypercolor::ParameterIDs::grainTimingJitter,
         hypercolor::ParameterIDs::grainStereoSpread,
-        hypercolor::ParameterIDs::grainPanRandom
+        hypercolor::ParameterIDs::grainPanRandom,
+        hypercolor::ParameterIDs::grainEnvelope
     };
 
     for (std::size_t first = 0; first < parameterIDs.size(); ++first)
@@ -1601,6 +1610,7 @@ void testStateRoundTrip(TestContext& context)
     setParameter(source, hypercolor::ParameterIDs::grainTimingJitter, 58.5f);
     setParameter(source, hypercolor::ParameterIDs::grainStereoSpread, 64.5f);
     setParameter(source, hypercolor::ParameterIDs::grainPanRandom, 29.5f);
+    setParameter(source, hypercolor::ParameterIDs::grainEnvelope, 3.0f);
 
     juce::MemoryBlock state;
     source.getStateInformation(state);
@@ -1696,6 +1706,11 @@ void testStateRoundTrip(TestContext& context)
         ) - 29.5f) < 0.01f,
         "Grain Pan Random should survive state round-trip"
     );
+    context.expect(
+        getParameterValue(restored, hypercolor::ParameterIDs::grainEnvelope)
+            == 3.0f,
+        "Grain Envelope should survive state round-trip"
+    );
 
     auto oldStateXml = juce::AudioProcessor::getXmlFromBinary(
         state.getData(),
@@ -1716,7 +1731,8 @@ void testStateRoundTrip(TestContext& context)
                  hypercolor::ParameterIDs::grainPositionRandom,
                  hypercolor::ParameterIDs::grainTimingJitter,
                  hypercolor::ParameterIDs::grainStereoSpread,
-                 hypercolor::ParameterIDs::grainPanRandom })
+                 hypercolor::ParameterIDs::grainPanRandom,
+                 hypercolor::ParameterIDs::grainEnvelope })
         {
             context.expect(
                 removeParameterFromXml(*oldStateXml, parameterID),
@@ -1753,6 +1769,7 @@ void testStateRoundTrip(TestContext& context)
             hypercolor::ParameterIDs::grainPanRandom,
             44.0f
         );
+        setParameter(restored, hypercolor::ParameterIDs::grainEnvelope, 3.0f);
         restored.setStateInformation(
             oldState.getData(),
             static_cast<int>(oldState.getSize())
@@ -1832,6 +1849,13 @@ void testStateRoundTrip(TestContext& context)
                 hypercolor::ParameterIDs::grainPanRandom
             ) == 0.0f,
             "legacy state should restore default Grain Pan Random"
+        );
+        context.expect(
+            getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainEnvelope
+            ) == 0.0f,
+            "legacy state should restore default Hann envelope"
         );
         context.expect(
             std::abs(getParameterValue(

@@ -259,7 +259,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         startPosition,
         playbackRate,
         durationFrames,
-        GrainWindow::hann,
+        parameters.envelope,
         pan
     };
 

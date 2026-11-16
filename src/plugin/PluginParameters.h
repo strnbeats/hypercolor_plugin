@@ -17,4 +17,5 @@ inline constexpr auto grainPositionRandom = "grainPositionRandom";
 inline constexpr auto grainTimingJitter = "grainTimingJitter";
 inline constexpr auto grainStereoSpread = "grainStereoSpread";
 inline constexpr auto grainPanRandom = "grainPanRandom";
+inline constexpr auto grainEnvelope = "grainEnvelope";
 }
