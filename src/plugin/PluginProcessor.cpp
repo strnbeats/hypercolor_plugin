@@ -1,8 +1,10 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 
 namespace
@@ -14,6 +16,7 @@ constexpr int currentStateSchemaVersion = 1;
 // rejecting clearly unreasonable input before parsing it as XML.
 constexpr int maxStateSizeBytes = 64 * 1024 * 1024;
 constexpr double parameterSmoothingSeconds = 0.02;
+constexpr double telemetryUpdatesPerSecond = 30.0;
 
 constexpr float dryWetMinimum = 0.0f;
 constexpr float dryWetMaximum = 100.0f;
@@ -320,6 +323,13 @@ void HypercolorAudioProcessor::prepareToPlay(
             : 0u
     };
     granularEnginePrepared = granularEngine.prepare(processSpec);
+    telemetrySamplesSincePublication = 0;
+    telemetryPublishIntervalSamples = granularEnginePrepared
+        ? static_cast<std::uint64_t>(std::max(
+            1.0,
+            std::round(sampleRate / telemetryUpdatesPerSecond)
+        ))
+        : 0;
 
     dryWetSmoother.reset(safeSampleRate, parameterSmoothingSeconds);
     outputGainSmoother.reset(safeSampleRate, parameterSmoothingSeconds);
@@ -339,6 +349,8 @@ void HypercolorAudioProcessor::releaseResources()
 {
     granularEngine.reset();
     granularEnginePrepared = false;
+    telemetrySamplesSincePublication = 0;
+    telemetryPublishIntervalSamples = 0;
 }
 
 bool HypercolorAudioProcessor::isBusesLayoutSupported(
@@ -393,19 +405,41 @@ void HypercolorAudioProcessor::processBlock(
 
     for (int startSample = 0;
          startSample < buffer.getNumSamples();
-         startSample += scratchBlockSize)
+         )
     {
+        auto chunkSize = juce::jmin(
+            scratchBlockSize,
+            buffer.getNumSamples() - startSample
+        );
+
+        if (telemetryPublishIntervalSamples > 0)
+        {
+            const auto samplesUntilPublication
+                = telemetryPublishIntervalSamples
+                    - telemetrySamplesSincePublication;
+            chunkSize = juce::jmin(
+                chunkSize,
+                static_cast<int>(samplesUntilPublication)
+            );
+        }
+
         processChunk(
             buffer,
             startSample,
-            juce::jmin(
-                scratchBlockSize,
-                buffer.getNumSamples() - startSample
-            ),
+            chunkSize,
             numChannels,
             granularParameters
         );
+        publishGranularTelemetry(chunkSize);
+        startSample += chunkSize;
     }
+}
+
+bool HypercolorAudioProcessor::tryPopGranularTelemetry(
+    hypercolor::dsp::granular::GranularTelemetrySnapshot& destination
+) noexcept
+{
+    return granularTelemetryQueue.tryPop(destination);
 }
 
 void HypercolorAudioProcessor::updateParameterTargets() noexcept
@@ -524,6 +558,41 @@ void HypercolorAudioProcessor::processChunk(
             );
         }
     }
+}
+
+void HypercolorAudioProcessor::publishGranularTelemetry(
+    int processedSamples
+) noexcept
+{
+    if (!granularEnginePrepared
+        || telemetryPublishIntervalSamples == 0
+        || processedSamples <= 0)
+    {
+        return;
+    }
+
+    const auto samples = static_cast<std::uint64_t>(processedSamples);
+
+    // processedSamples is a non-negative int and the retained accumulator is
+    // always smaller than one interval, so this addition cannot approach the
+    // uint64 limit on any supported host block.
+    telemetrySamplesSincePublication += samples;
+
+    if (telemetrySamplesSincePublication
+        < telemetryPublishIntervalSamples)
+    {
+        return;
+    }
+
+    telemetrySamplesSincePublication %= telemetryPublishIntervalSamples;
+
+    hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+
+    if (!granularEngine.copyTelemetrySnapshot(snapshot))
+        return;
+
+    snapshot.sequence = nextTelemetrySequence++;
+    (void) granularTelemetryQueue.tryPush(snapshot);
 }
 
 juce::AudioProcessorEditor*

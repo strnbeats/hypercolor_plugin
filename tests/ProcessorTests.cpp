@@ -1,14 +1,17 @@
 #include "PluginProcessor.h"
+#include "GranularVisualizer.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <new>
+#include <utility>
 
 namespace allocationProbe
 {
@@ -57,6 +60,14 @@ namespace
 constexpr double sampleRate = 48000.0;
 constexpr double sampleRates[] = { 44100.0, 48000.0, 96000.0, 192000.0 };
 
+static_assert(noexcept(
+    std::declval<HypercolorAudioProcessor&>().tryPopGranularTelemetry(
+        std::declval<
+            hypercolor::dsp::granular::GranularTelemetrySnapshot&
+        >()
+    )
+));
+
 class TestContext
 {
 public:
@@ -67,6 +78,16 @@ public:
 
         ++failures;
         std::cerr << "FAIL: " << message << '\n';
+    }
+
+    void expectNear(
+        double actual,
+        double expected,
+        double tolerance,
+        const char* message
+    )
+    {
+        expect(std::abs(actual - expected) <= tolerance, message);
     }
 
     int getFailures() const noexcept
@@ -643,7 +664,10 @@ void testNonFiniteInputAndRealtimeAllocations(TestContext& context)
     juce::MidiBuffer midi;
     processor.processBlock(history, midi);
 
-    juce::AudioBuffer<float> buffer(2, 1024);
+    // 10000 samples leave 400 samples toward the 1600-sample telemetry
+    // interval at 48 kHz. This block crosses the publication boundary while
+    // allocation instrumentation is active.
+    juce::AudioBuffer<float> buffer(2, 1200);
     fillBuffer(buffer, 0.25f);
     buffer.setSample(0, 0, std::numeric_limits<float>::quiet_NaN());
     buffer.setSample(1, 1, std::numeric_limits<float>::infinity());
@@ -657,6 +681,224 @@ void testNonFiniteInputAndRealtimeAllocations(TestContext& context)
     context.expect(
         allocationProbe::count.load(std::memory_order_relaxed) == 0,
         "prepared processBlock should perform no heap allocations"
+    );
+}
+
+void processTelemetryBlock(
+    HypercolorAudioProcessor& processor,
+    int numSamples,
+    float value = 0.25f
+)
+{
+    juce::AudioBuffer<float> buffer(2, numSamples);
+    fillBuffer(buffer, value);
+    juce::MidiBuffer midi;
+    processor.processBlock(buffer, midi);
+}
+
+void testTelemetryPublicationAndSequence(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, 0.0f);
+    processor.prepareToPlay(sampleRate, 64);
+
+    hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+    context.expect(
+        !processor.tryPopGranularTelemetry(snapshot),
+        "telemetry queue should initially be empty"
+    );
+
+    constexpr int interval = 1600;
+    processTelemetryBlock(processor, interval - 1);
+    context.expect(
+        !processor.tryPopGranularTelemetry(snapshot),
+        "telemetry should not publish before its sample interval"
+    );
+
+    processTelemetryBlock(processor, 1);
+    context.expect(
+        processor.tryPopGranularTelemetry(snapshot),
+        "telemetry should publish when the interval is reached"
+    );
+    context.expect(snapshot.sequence == 0, "first publication sequence should be zero");
+    context.expectNear(
+        snapshot.sampleRate,
+        sampleRate,
+        0.0,
+        "published snapshot should contain prepared sample rate"
+    );
+    context.expect(snapshot.waveformPointCount > 0, "published waveform should be present");
+    context.expect(
+        !processor.tryPopGranularTelemetry(snapshot),
+        "one published state must not be readable twice"
+    );
+
+    processTelemetryBlock(processor, interval);
+    context.expect(processor.tryPopGranularTelemetry(snapshot), "second publication");
+    context.expect(snapshot.sequence == 1, "second publication sequence");
+    processTelemetryBlock(processor, interval);
+    context.expect(processor.tryPopGranularTelemetry(snapshot), "third publication");
+    context.expect(snapshot.sequence == 2, "third publication sequence");
+}
+
+void testTelemetryPeriodicityAcrossRatesAndBlocks(TestContext& context)
+{
+    for (const auto testSampleRate : sampleRates)
+    {
+        for (const auto blockSize : { 1, 7, 64, 511, 1024, 4097 })
+        {
+            HypercolorAudioProcessor processor;
+            setParameter(processor, hypercolor::ParameterIDs::dryWet, 0.0f);
+            setParameter(processor, hypercolor::ParameterIDs::grainDensity, 0.0f);
+            processor.prepareToPlay(testSampleRate, juce::jmax(1, blockSize));
+
+            const auto interval = static_cast<std::uint64_t>(std::llround(
+                testSampleRate / 30.0
+            ));
+            std::uint64_t processed = 0;
+            hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+            auto published = false;
+            std::uint64_t publicationCount = 0;
+
+            while (!published)
+            {
+                processTelemetryBlock(processor, blockSize);
+                processed += static_cast<std::uint64_t>(blockSize);
+                while (processor.tryPopGranularTelemetry(snapshot))
+                {
+                    published = true;
+                    ++publicationCount;
+                }
+
+                if (!published)
+                {
+                    context.expect(
+                        processed < interval,
+                        "publication should not be late after crossing interval"
+                    );
+                }
+            }
+
+            context.expect(processed >= interval, "publication must not be early");
+            context.expect(
+                processed < interval + static_cast<std::uint64_t>(blockSize),
+                "publication should occur in the first crossing block"
+            );
+            context.expect(
+                publicationCount == processed / interval,
+                "oversized blocks should publish distinct interval snapshots"
+            );
+        }
+    }
+}
+
+void testTelemetryQueueOverflowAndLifecycle(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, 0.0f);
+    processor.prepareToPlay(sampleRate, 1600);
+
+    for (int publication = 0; publication < 9; ++publication)
+        processTelemetryBlock(processor, 1600);
+
+    hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+
+    for (std::uint64_t sequence = 0; sequence < 8; ++sequence)
+    {
+        context.expect(
+            processor.tryPopGranularTelemetry(snapshot),
+            "all eight queue slots should be readable"
+        );
+        context.expect(snapshot.sequence == sequence, "full queue should remain FIFO");
+    }
+
+    context.expect(
+        !processor.tryPopGranularTelemetry(snapshot),
+        "ninth publication should have been dropped"
+    );
+    processTelemetryBlock(processor, 1600);
+    context.expect(
+        processor.tryPopGranularTelemetry(snapshot),
+        "publication should resume after consumer frees a slot"
+    );
+    context.expect(
+        snapshot.sequence == 9,
+        "dropped full-queue publication should create a sequence gap"
+    );
+
+    processor.releaseResources();
+    processTelemetryBlock(processor, 3200);
+    context.expect(
+        !processor.tryPopGranularTelemetry(snapshot),
+        "released processor should not publish telemetry"
+    );
+
+    processor.prepareToPlay(96000.0, 64);
+    processTelemetryBlock(processor, 3199);
+    context.expect(
+        !processor.tryPopGranularTelemetry(snapshot),
+        "reprepare should reset the periodic sample counter"
+    );
+    processTelemetryBlock(processor, 1);
+    context.expect(
+        processor.tryPopGranularTelemetry(snapshot),
+        "reprepared processor should publish at its new interval"
+    );
+    context.expect(snapshot.sequence == 10, "sequence should remain monotonic across reprepare");
+    context.expectNear(snapshot.sampleRate, 96000.0, 0.0, "reprepared snapshot sample rate");
+
+    HypercolorAudioProcessor queuedAcrossPrepare;
+    setParameter(
+        queuedAcrossPrepare,
+        hypercolor::ParameterIDs::grainDensity,
+        0.0f
+    );
+    queuedAcrossPrepare.prepareToPlay(48000.0, 64);
+    processTelemetryBlock(queuedAcrossPrepare, 1600);
+    queuedAcrossPrepare.prepareToPlay(96000.0, 64);
+    processTelemetryBlock(queuedAcrossPrepare, 3200);
+
+    context.expect(
+        queuedAcrossPrepare.tryPopGranularTelemetry(snapshot),
+        "unread pre-reprepare snapshot should remain queued"
+    );
+    context.expectNear(snapshot.sampleRate, 48000.0, 0.0, "old queued sample rate");
+    context.expect(snapshot.sequence == 0, "old queued sequence");
+    context.expect(
+        queuedAcrossPrepare.tryPopGranularTelemetry(snapshot),
+        "new post-reprepare snapshot should follow in FIFO order"
+    );
+    context.expectNear(snapshot.sampleRate, 96000.0, 0.0, "new queued sample rate");
+    context.expect(snapshot.sequence == 1, "new queued sequence");
+}
+
+void testTelemetryConsumerDoesNotChangeAudio(TestContext& context)
+{
+    HypercolorAudioProcessor reference;
+    HypercolorAudioProcessor observed;
+    setParameter(reference, hypercolor::ParameterIDs::dryWet, 0.0f);
+    setParameter(observed, hypercolor::ParameterIDs::dryWet, 0.0f);
+    reference.prepareToPlay(sampleRate, 64);
+    observed.prepareToPlay(sampleRate, 64);
+
+    juce::AudioBuffer<float> referenceBuffer(2, 6000);
+    juce::AudioBuffer<float> observedBuffer(2, 6000);
+    fillBuffer(referenceBuffer, 0.25f);
+    fillBuffer(observedBuffer, 0.25f);
+    juce::MidiBuffer midi;
+    reference.processBlock(referenceBuffer, midi);
+    observed.processBlock(observedBuffer, midi);
+
+    hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+    context.expect(
+        observed.tryPopGranularTelemetry(snapshot),
+        "observed processor should expose telemetry"
+    );
+    context.expect(
+        !buffersDiffer(referenceBuffer, observedBuffer, 0.0f),
+        "telemetry publication and consumption must not alter audio output"
     );
 }
 
@@ -707,6 +949,8 @@ bool removeParameterFromXml(
     return false;
 }
 
+void renderVisualizerForTest(GranularVisualizer& visualizer);
+
 void testEditorControlsStateAndResize(TestContext& context)
 {
     HypercolorAudioProcessor source;
@@ -747,6 +991,9 @@ void testEditorControlsStateAndResize(TestContext& context)
     auto* reverse = dynamic_cast<juce::Button*>(
         editor->findChildWithID(hypercolor::ParameterIDs::grainReverse)
     );
+    auto* visualizer = dynamic_cast<GranularVisualizer*>(
+        editor->findChildWithID(GranularVisualizer::componentID)
+    );
 
     context.expect(density != nullptr, "editor should expose Density control");
     context.expect(size != nullptr, "editor should expose Size control");
@@ -755,6 +1002,17 @@ void testEditorControlsStateAndResize(TestContext& context)
     context.expect(reverse != nullptr, "editor should expose Reverse control");
     context.expect(dryWet != nullptr, "editor should retain Dry/Wet control");
     context.expect(outputGain != nullptr, "editor should retain Output Gain control");
+    context.expect(visualizer != nullptr, "editor should contain granular visualizer");
+
+    if (visualizer != nullptr)
+    {
+        hypercolor::dsp::granular::GranularTelemetrySnapshot emptySnapshot;
+        context.expect(
+            !visualizer->copyLatestSnapshot(emptySnapshot),
+            "unprepared processor should show the waiting state"
+        );
+        renderVisualizerForTest(*visualizer);
+    }
 
     if (density != nullptr)
     {
@@ -811,9 +1069,9 @@ void testEditorControlsStateAndResize(TestContext& context)
     if (const auto* constrainer = editor->getConstrainer())
     {
         context.expect(
-            constrainer->getMinimumWidth() == 480
-                && constrainer->getMinimumHeight() == 320,
-            "editor minimum resize limit should remain 480x320"
+            constrainer->getMinimumWidth() == 600
+                && constrainer->getMinimumHeight() == 440,
+            "editor minimum size should keep visualizer and controls readable"
         );
         context.expect(
             constrainer->getMaximumWidth() == 960
@@ -837,7 +1095,7 @@ void testEditorControlsStateAndResize(TestContext& context)
     };
 
     for (const auto editorSize : {
-             juce::Point<int> { 480, 320 },
+             juce::Point<int> { 600, 440 },
              juce::Point<int> { 960, 630 } })
     {
         editor->setSize(editorSize.x, editorSize.y);
@@ -856,6 +1114,269 @@ void testEditorControlsStateAndResize(TestContext& context)
                 "granular controls should remain inside editor bounds"
             );
         }
+
+        if (visualizer != nullptr)
+        {
+            context.expect(
+                !visualizer->getBounds().isEmpty(),
+                "visualizer should remain visible at resize limits"
+            );
+            context.expect(
+                editor->getLocalBounds().contains(visualizer->getBounds()),
+                "visualizer should remain inside editor bounds"
+            );
+
+            for (const auto* control : controls)
+            {
+                if (control != nullptr)
+                {
+                    context.expect(
+                        !visualizer->getBounds().intersects(
+                            control->getBounds()
+                        ),
+                        "visualizer must not overlap parameter controls"
+                    );
+                }
+            }
+        }
+    }
+}
+
+GranularVisualizer* findGranularVisualizer(
+    juce::AudioProcessorEditor& editor
+)
+{
+    return dynamic_cast<GranularVisualizer*>(
+        editor.findChildWithID(GranularVisualizer::componentID)
+    );
+}
+
+void renderVisualizerForTest(GranularVisualizer& visualizer)
+{
+    visualizer.setSize(640, 160);
+    juce::Image image(juce::Image::ARGB, 640, 160, true);
+    juce::Graphics graphics(image);
+    visualizer.paint(graphics);
+}
+
+void testGranularVisualizerTelemetry(TestContext& context)
+{
+    HypercolorAudioProcessor stereoProcessor;
+    setParameter(
+        stereoProcessor,
+        hypercolor::ParameterIDs::grainDensity,
+        0.0f
+    );
+    stereoProcessor.prepareToPlay(sampleRate, 1600);
+
+    for (std::size_t publication = 0;
+         publication
+            < hypercolor::dsp::granular::granularTelemetryQueueCapacity;
+         ++publication)
+    {
+        processTelemetryBlock(stereoProcessor, 1600, 0.25f);
+    }
+
+    std::unique_ptr<juce::AudioProcessorEditor> stereoEditor(
+        stereoProcessor.createEditor()
+    );
+    auto* stereoVisualizer = stereoEditor != nullptr
+        ? findGranularVisualizer(*stereoEditor)
+        : nullptr;
+    context.expect(stereoVisualizer != nullptr, "stereo visualizer should exist");
+
+    hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+
+    if (stereoVisualizer != nullptr)
+    {
+        context.expect(
+            !stereoVisualizer->copyLatestSnapshot(snapshot),
+            "editor opening must not display retained telemetry"
+        );
+        context.expect(
+            !stereoVisualizer->consumePendingTelemetry(),
+            "drained retained queue should leave the waiting state"
+        );
+        renderVisualizerForTest(*stereoVisualizer);
+
+        // Eight new snapshots fit; the ninth is dropped. One bounded consume
+        // must select the newest of the eight available publications.
+        for (std::size_t publication = 0;
+             publication
+                < hypercolor::dsp::granular::granularTelemetryQueueCapacity + 1;
+             ++publication)
+        {
+            processTelemetryBlock(stereoProcessor, 1600, -0.4f);
+        }
+
+        context.expect(
+            stereoVisualizer->consumePendingTelemetry(),
+            "first post-open telemetry should leave the waiting state"
+        );
+        context.expect(
+            stereoVisualizer->copyLatestSnapshot(snapshot),
+            "new telemetry should become visible"
+        );
+        context.expect(snapshot.sequence == 15, "bounded drain should retain newest queued snapshot");
+        context.expect(snapshot.numChannels == 2, "stereo telemetry channel count");
+        context.expect(
+            snapshot.waveformPointCount > 0
+                && snapshot.waveformPointCount < snapshot.waveformPoints.size(),
+            "short history should produce a partial waveform"
+        );
+        context.expect(snapshot.activeGrainCount == 0, "Density 0 should show no grains");
+        context.expect(
+            !stereoVisualizer->consumePendingTelemetry(),
+            "one consume must perform no more than the eight available reads"
+        );
+        renderVisualizerForTest(*stereoVisualizer);
+
+        constexpr int totalHistoryFrames = 192000;
+        constexpr int processedFrames = 17 * 1600;
+
+        for (int remaining = totalHistoryFrames - processedFrames;
+             remaining > 0;)
+        {
+            const auto blockSize = juce::jmin(1600, remaining);
+            processTelemetryBlock(stereoProcessor, blockSize, -0.4f);
+            (void) stereoVisualizer->consumePendingTelemetry();
+            remaining -= blockSize;
+        }
+
+        context.expect(
+            stereoVisualizer->copyLatestSnapshot(snapshot),
+            "full waveform snapshot should remain available"
+        );
+        context.expect(
+            snapshot.waveformPointCount == snapshot.waveformPoints.size(),
+            "four seconds of history should fill the waveform ring"
+        );
+        renderVisualizerForTest(*stereoVisualizer);
+    }
+
+    HypercolorAudioProcessor monoProcessor;
+    context.expect(
+        monoProcessor.setBusesLayout(
+            { juce::AudioChannelSet::mono(), juce::AudioChannelSet::mono() }
+        ),
+        "mono layout should be accepted for visualizer test"
+    );
+    setParameter(
+        monoProcessor,
+        hypercolor::ParameterIDs::grainDensity,
+        0.0f
+    );
+    monoProcessor.prepareToPlay(sampleRate, 1600);
+    juce::AudioBuffer<float> monoBuffer(1, 1600);
+    fillBuffer(monoBuffer, 0.5f);
+    juce::MidiBuffer midi;
+    monoProcessor.processBlock(monoBuffer, midi);
+
+    std::unique_ptr<juce::AudioProcessorEditor> monoEditor(
+        monoProcessor.createEditor()
+    );
+    auto* monoVisualizer = monoEditor != nullptr
+        ? findGranularVisualizer(*monoEditor)
+        : nullptr;
+    context.expect(monoVisualizer != nullptr, "mono visualizer should exist");
+
+    if (monoVisualizer != nullptr)
+    {
+        context.expect(
+            !monoVisualizer->copyLatestSnapshot(snapshot),
+            "mono editor should discard retained telemetry"
+        );
+
+        monoProcessor.processBlock(monoBuffer, midi);
+        context.expect(
+            monoVisualizer->consumePendingTelemetry(),
+            "mono visualizer should consume a post-open publication"
+        );
+        context.expect(
+            monoVisualizer->copyLatestSnapshot(snapshot),
+            "mono post-open telemetry should become visible"
+        );
+        context.expect(snapshot.numChannels == 1, "mono telemetry channel count");
+        renderVisualizerForTest(*monoVisualizer);
+    }
+}
+
+void testGranularVisualizerGrainsAndLifecycle(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, 120.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainReverse, 1.0f);
+    processor.prepareToPlay(sampleRate, 1600);
+    processTelemetryBlock(processor, 8000, 0.25f);
+
+    std::uint64_t firstSequence = 0;
+
+    {
+        std::unique_ptr<juce::AudioProcessorEditor> editor(
+            processor.createEditor()
+        );
+        auto* visualizer = editor != nullptr
+            ? findGranularVisualizer(*editor)
+            : nullptr;
+        context.expect(visualizer != nullptr, "first visualizer should exist");
+
+        if (visualizer != nullptr)
+        {
+            hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+            context.expect(
+                !visualizer->copyLatestSnapshot(snapshot),
+                "first editor should discard telemetry accumulated before opening"
+            );
+
+            processTelemetryBlock(processor, 1600, 0.25f);
+            context.expect(
+                visualizer->consumePendingTelemetry(),
+                "first editor should accept post-open grain telemetry"
+            );
+            context.expect(
+                visualizer->copyLatestSnapshot(snapshot),
+                "post-open grain telemetry should become visible"
+            );
+            context.expect(
+                snapshot.activeGrainCount > 0,
+                "active granular processing should be visible"
+            );
+            firstSequence = snapshot.sequence;
+            renderVisualizerForTest(*visualizer);
+        }
+    }
+
+    processTelemetryBlock(processor, 1600, 0.25f);
+
+    std::unique_ptr<juce::AudioProcessorEditor> reopenedEditor(
+        processor.createEditor()
+    );
+    auto* reopenedVisualizer = reopenedEditor != nullptr
+        ? findGranularVisualizer(*reopenedEditor)
+        : nullptr;
+    context.expect(reopenedVisualizer != nullptr, "reopened visualizer should exist");
+
+    if (reopenedVisualizer != nullptr)
+    {
+        hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+        context.expect(
+            !reopenedVisualizer->copyLatestSnapshot(snapshot),
+            "reopened editor should discard telemetry produced while closed"
+        );
+
+        processTelemetryBlock(processor, 1600, 0.25f);
+        context.expect(
+            reopenedVisualizer->consumePendingTelemetry(),
+            "reopened editor should accept the next publication"
+        );
+        context.expect(
+            reopenedVisualizer->copyLatestSnapshot(snapshot),
+            "reopened editor should display post-open telemetry"
+        );
+        context.expect(
+            snapshot.sequence > firstSequence,
+            "reopened editor should display a newer snapshot"
+        );
     }
 }
 
@@ -1062,8 +1583,14 @@ int main()
     testFallbackResetAndReprepare(context);
     testNonFiniteInputAndRealtimeAllocations(context);
     testBlockRateGranularAutomation(context);
+    testTelemetryPublicationAndSequence(context);
+    testTelemetryPeriodicityAcrossRatesAndBlocks(context);
+    testTelemetryQueueOverflowAndLifecycle(context);
+    testTelemetryConsumerDoesNotChangeAudio(context);
     testStateRoundTrip(context);
     testEditorControlsStateAndResize(context);
+    testGranularVisualizerTelemetry(context);
+    testGranularVisualizerGrainsAndLifecycle(context);
 
     if (context.getFailures() == 0)
     {

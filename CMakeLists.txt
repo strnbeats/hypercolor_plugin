@@ -45,6 +45,7 @@ target_sources(HYPERCOLOR
         src/dsp/granular/GrainPool.cpp
         src/dsp/granular/GrainRenderer.cpp
         src/dsp/granular/GrainScheduler.cpp
+        src/plugin/GranularVisualizer.cpp
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginEditor.cpp
 )

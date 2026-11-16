@@ -44,6 +44,13 @@ public:
     juce::AudioProcessorValueTreeState& getValueTreeState() noexcept;
     const juce::AudioProcessorValueTreeState& getValueTreeState() const noexcept;
 
+    // Single-consumer API for the message thread. Sequence numbers identify
+    // publication attempts; gaps mean snapshots were dropped because the
+    // fixed SPSC queue was full.
+    [[nodiscard]] bool tryPopGranularTelemetry(
+        hypercolor::dsp::granular::GranularTelemetrySnapshot& destination
+    ) noexcept;
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout
         createParameterLayout();
@@ -59,6 +66,7 @@ private:
         const hypercolor::dsp::granular::GranularEngineParameters&
             granularParameters
     ) noexcept;
+    void publishGranularTelemetry(int processedSamples) noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
 
@@ -72,6 +80,10 @@ private:
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
+    hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
+    std::uint64_t telemetryPublishIntervalSamples = 0;
+    std::uint64_t telemetrySamplesSincePublication = 0;
+    std::uint64_t nextTelemetrySequence = 0;
     bool granularEnginePrepared = false;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         dryWetSmoother;

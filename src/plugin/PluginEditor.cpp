@@ -7,6 +7,7 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
 )
     : AudioProcessorEditor(&processorToEdit),
       audioProcessor(processorToEdit),
+      granularVisualizer(processorToEdit),
       dryWetAttachment(
           processorToEdit.getValueTreeState(),
           hypercolor::ParameterIDs::dryWet,
@@ -48,6 +49,8 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     const auto controlBackground = juce::Colour::fromRGB(27, 31, 46);
     const auto controlOutline = juce::Colour::fromRGB(63, 70, 94);
     const auto text = juce::Colour::fromRGB(205, 210, 226);
+
+    addAndMakeVisible(granularVisualizer);
 
     const auto configureSlider = [
         this,
@@ -185,7 +188,7 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     addAndMakeVisible(reverseButton);
 
     setResizable(true, true);
-    setResizeLimits(480, 320, 960, 630);
+    setResizeLimits(600, 440, 960, 630);
     setSize(760, 500);
 }
 
@@ -224,8 +227,20 @@ void HypercolorAudioProcessorEditor::resized()
     content.removeFromTop(66);
     content.removeFromBottom(22);
 
+    const auto visualizerHeight = juce::jlimit(
+        70,
+        160,
+        juce::roundToInt(
+            static_cast<float>(content.getHeight()) * 0.32f
+        )
+    );
+    granularVisualizer.setBounds(
+        content.removeFromTop(visualizerHeight).reduced(0, 3)
+    );
+    content.removeFromTop(4);
+
     auto granularArea = content.removeFromTop(
-        juce::roundToInt(static_cast<float>(content.getHeight()) * 0.62f)
+        juce::roundToInt(static_cast<float>(content.getHeight()) * 0.57f)
     );
     auto masterArea = content;
 

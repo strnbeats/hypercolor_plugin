@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "GranularVisualizer.h"
 #include "PluginProcessor.h"
 
 class HypercolorAudioProcessorEditor final
@@ -21,6 +22,7 @@ private:
         juce::AudioProcessorValueTreeState::ButtonAttachment;
 
     HypercolorAudioProcessor& audioProcessor;
+    GranularVisualizer granularVisualizer;
 
     juce::Slider dryWetSlider;
     juce::Slider outputGainSlider;
