@@ -234,6 +234,9 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     grainPositionRandomParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainPositionRandom
     );
+    grainTimingJitterParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainTimingJitter
+    );
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -245,6 +248,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(grainCharacterParameter != nullptr);
     jassert(grainPitchRandomParameter != nullptr);
     jassert(grainPositionRandomParameter != nullptr);
+    jassert(grainTimingJitterParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -384,6 +388,18 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::grainPositionRandom, 1 },
         "Grain Position Random",
+        juce::NormalisableRange<float> {
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent,
+            0.1f
+        },
+        granularRandomDefaultPercent,
+        percentAttributes
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainTimingJitter, 1 },
+        "Grain Timing Jitter",
         juce::NormalisableRange<float> {
             granularRandomMinimumPercent,
             granularRandomMaximumPercent,
@@ -582,6 +598,9 @@ HypercolorAudioProcessor::readGranularParameters() const noexcept
         ) / 100.0,
         static_cast<double>(
             grainPositionRandomParameter->load(std::memory_order_relaxed)
+        ) / 100.0,
+        static_cast<double>(
+            grainTimingJitterParameter->load(std::memory_order_relaxed)
         ) / 100.0
     };
 }
@@ -875,6 +894,12 @@ void HypercolorAudioProcessor::setStateInformation(
             parameterTemplateState,
             hypercolor::ParameterIDs::grainPositionRandom,
             granularRandomDefaultPercent
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainTimingJitter,
+            granularRandomDefaultPercent
         ))
     {
         return;
@@ -949,6 +974,12 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidParameterValue(
             restoredState,
             hypercolor::ParameterIDs::grainPositionRandom,
+            granularRandomMinimumPercent,
+            granularRandomMaximumPercent
+        )
+        || !hasValidParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainTimingJitter,
             granularRandomMinimumPercent,
             granularRandomMaximumPercent
         ))

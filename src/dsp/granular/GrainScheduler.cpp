@@ -10,6 +10,7 @@ namespace
 {
 constexpr auto maximumExactDoubleInteger = std::uint64_t { 1 }
     << std::numeric_limits<double>::digits;
+constexpr std::uint64_t timingSeedStream = 0x54494D494E47524EULL;
 
 bool sampleRatesMatch(double first, double second) noexcept
 {
@@ -21,8 +22,10 @@ bool sampleRatesMatch(double first, double second) noexcept
 
 GrainScheduler::GrainScheduler(std::uint64_t randomSeed) noexcept
     : initialRandomSeed(randomSeed),
-      random(randomSeed)
+      random(randomSeed),
+      timingRandom(randomSeed ^ timingSeedStream)
 {
+    resetRandomState();
 }
 
 bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
@@ -37,14 +40,14 @@ bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
     {
         sampleRate = 0.0;
         scaledPhase = 0.0;
-        random.reset(initialRandomSeed);
+        resetRandomState();
         prepared = false;
         return false;
     }
 
     sampleRate = spec.sampleRate;
     scaledPhase = 0.0;
-    random.reset(initialRandomSeed);
+    resetRandomState();
     prepared = true;
     return true;
 }
@@ -52,7 +55,7 @@ bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
 void GrainScheduler::reset() noexcept
 {
     scaledPhase = 0.0;
-    random.reset(initialRandomSeed);
+    resetRandomState();
 }
 
 GrainSchedulerStepResult GrainScheduler::processSample(
@@ -64,19 +67,42 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     if (!prepared)
         return GrainSchedulerStepResult::schedulerNotPrepared;
 
-    if (!std::isfinite(parameters.densityGrainsPerSecond))
+    if (hasEmittedEvent
+        && samplesSinceLastEvent < std::numeric_limits<std::uint64_t>::max())
+    {
+        ++samplesSinceLastEvent;
+    }
+
+    if (!std::isfinite(parameters.densityGrainsPerSecond)
+        || !std::isfinite(parameters.timingJitterAmount))
+    {
         return GrainSchedulerStepResult::invalidParameters;
+    }
 
     const auto density = std::clamp(
         parameters.densityGrainsPerSecond,
         minimumDensityGrainsPerSecond,
         maximumDensityGrainsPerSecond
     );
+
+    if (density == 0.0)
+        return GrainSchedulerStepResult::noEvent;
+
     // This is the requested normalized phase equation multiplied by
     // sampleRate: phase + density / sampleRate becomes scaledPhase + density.
     const auto accumulated = scaledPhase + density;
+    const auto timingThreshold = calculateTimingThreshold(
+        density,
+        parameters.timingJitterAmount,
+        parameters.character
+    );
+    const auto minimumSpacingSamples = static_cast<std::uint64_t>(
+        std::floor(sampleRate / maximumDensityGrainsPerSecond)
+    );
+    const auto spacingAllowsEvent = !hasEmittedEvent
+        || samplesSinceLastEvent >= minimumSpacingSamples;
 
-    if (accumulated < sampleRate)
+    if (accumulated < timingThreshold || !spacingAllowsEvent)
     {
         scaledPhase = accumulated;
         return GrainSchedulerStepResult::noEvent;
@@ -85,6 +111,9 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     // Product limits guarantee fewer than two events per sample. Consume the
     // event before validation so failed starts never create timing debt.
     scaledPhase = accumulated - sampleRate;
+    hasEmittedEvent = true;
+    samplesSinceLastEvent = 0;
+    currentTimingRandomSigned = timingRandom.nextSignedNormalized();
 
     if (!source.isPrepared()
         || !sampleRatesMatch(source.getSampleRate(), sampleRate))
@@ -226,6 +255,44 @@ GrainSchedulerStepResult GrainScheduler::processSample(
 bool GrainScheduler::isPrepared() const noexcept
 {
     return prepared;
+}
+
+void GrainScheduler::resetRandomState() noexcept
+{
+    random.reset(initialRandomSeed);
+    timingRandom.reset(initialRandomSeed ^ timingSeedStream);
+    currentTimingRandomSigned = timingRandom.nextSignedNormalized();
+    samplesSinceLastEvent = 0;
+    hasEmittedEvent = false;
+}
+
+double GrainScheduler::calculateTimingThreshold(
+    double density,
+    double timingJitterAmount,
+    GranularCharacter character
+) const noexcept
+{
+    const auto amount = std::clamp(timingJitterAmount, 0.0, 1.0);
+    const auto& profile = getGranularCharacterProfile(character);
+    const auto requestedAmplitude = sampleRate
+        * maximumTimingJitterFraction
+        * amount
+        * static_cast<double>(profile.timingJitterScale);
+
+    // Adjacent absolute event offsets may differ by twice the amplitude.
+    // This bound leaves at least the 120 grains/s phase-domain spacing. It
+    // naturally collapses to zero as Density approaches its maximum.
+    const auto orderingAmplitudeLimit = 0.5 * sampleRate
+        * std::max(
+            0.0,
+            1.0 - density / maximumDensityGrainsPerSecond
+        );
+    const auto amplitude = std::min(
+        requestedAmplitude,
+        orderingAmplitudeLimit
+    );
+
+    return sampleRate + currentTimingRandomSigned * amplitude;
 }
 
 bool GrainScheduler::calculateDurationFrames(

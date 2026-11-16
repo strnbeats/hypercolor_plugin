@@ -323,8 +323,16 @@ void testGranularParameterContracts(TestContext& context)
         100.0f,
         0.0f
     );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainTimingJitter,
+        0.0f,
+        100.0f,
+        0.0f
+    );
 
-    constexpr std::array<std::string_view, 10> parameterIDs {
+    constexpr std::array<std::string_view, 11> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -334,7 +342,8 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::grainReverse,
         hypercolor::ParameterIDs::grainCharacter,
         hypercolor::ParameterIDs::grainPitchRandom,
-        hypercolor::ParameterIDs::grainPositionRandom
+        hypercolor::ParameterIDs::grainPositionRandom,
+        hypercolor::ParameterIDs::grainTimingJitter
     };
 
     for (std::size_t first = 0; first < parameterIDs.size(); ++first)
@@ -475,7 +484,8 @@ juce::AudioBuffer<float> renderGranularParameters(
     int samples = 36000,
     float character = 1.0f,
     float pitchRandom = 0.0f,
-    float positionRandom = 0.0f
+    float positionRandom = 0.0f,
+    float timingJitter = 0.0f
 )
 {
     HypercolorAudioProcessor processor;
@@ -506,6 +516,11 @@ juce::AudioBuffer<float> renderGranularParameters(
         processor,
         hypercolor::ParameterIDs::grainPositionRandom,
         positionRandom
+    );
+    setParameter(
+        processor,
+        hypercolor::ParameterIDs::grainTimingJitter,
+        timingJitter
     );
     processor.prepareToPlay(sampleRate, 64);
 
@@ -607,6 +622,18 @@ void testGranularParametersReachEngine(TestContext& context)
         100.0f,
         100.0f
     );
+    const auto timingJitteredChaos = renderGranularParameters(
+        20.0f,
+        100.0f,
+        0.5f,
+        0.0f,
+        false,
+        36000,
+        0.0f,
+        100.0f,
+        100.0f,
+        100.0f
+    );
 
     context.expect(
         isSilent(noDensity),
@@ -635,6 +662,10 @@ void testGranularParametersReachEngine(TestContext& context)
     context.expect(
         buffersDiffer(randomizedMusical, randomizedChaos),
         "Character should scale random variation reaching GranularEngine"
+    );
+    context.expect(
+        buffersDiffer(randomizedChaos, timingJitteredChaos),
+        "Timing Jitter should alter event timing reaching GranularEngine"
     );
 
     for (const auto* rendered : {
@@ -774,6 +805,7 @@ void testNonFiniteInputAndRealtimeAllocations(TestContext& context)
 {
     HypercolorAudioProcessor processor;
     setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainTimingJitter, 100.0f);
     processor.prepareToPlay(sampleRate, 64);
 
     juce::AudioBuffer<float> history(2, 10000);
@@ -1548,6 +1580,7 @@ void testStateRoundTrip(TestContext& context)
     setParameter(source, hypercolor::ParameterIDs::grainCharacter, 2.0f);
     setParameter(source, hypercolor::ParameterIDs::grainPitchRandom, 67.5f);
     setParameter(source, hypercolor::ParameterIDs::grainPositionRandom, 42.5f);
+    setParameter(source, hypercolor::ParameterIDs::grainTimingJitter, 58.5f);
 
     juce::MemoryBlock state;
     source.getStateInformation(state);
@@ -1622,6 +1655,13 @@ void testStateRoundTrip(TestContext& context)
         ) - 42.5f) < 0.01f,
         "Grain Position Random should survive state round-trip"
     );
+    context.expect(
+        std::abs(getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::grainTimingJitter
+        ) - 58.5f) < 0.01f,
+        "Grain Timing Jitter should survive state round-trip"
+    );
 
     auto oldStateXml = juce::AudioProcessor::getXmlFromBinary(
         state.getData(),
@@ -1639,7 +1679,8 @@ void testStateRoundTrip(TestContext& context)
                  hypercolor::ParameterIDs::grainReverse,
                  hypercolor::ParameterIDs::grainCharacter,
                  hypercolor::ParameterIDs::grainPitchRandom,
-                 hypercolor::ParameterIDs::grainPositionRandom })
+                 hypercolor::ParameterIDs::grainPositionRandom,
+                 hypercolor::ParameterIDs::grainTimingJitter })
         {
             context.expect(
                 removeParameterFromXml(*oldStateXml, parameterID),
@@ -1660,6 +1701,11 @@ void testStateRoundTrip(TestContext& context)
             restored,
             hypercolor::ParameterIDs::grainPositionRandom,
             77.0f
+        );
+        setParameter(
+            restored,
+            hypercolor::ParameterIDs::grainTimingJitter,
+            66.0f
         );
         restored.setStateInformation(
             oldState.getData(),
@@ -1719,6 +1765,13 @@ void testStateRoundTrip(TestContext& context)
                 hypercolor::ParameterIDs::grainPositionRandom
             ) == 0.0f,
             "legacy state should restore default Grain Position Random"
+        );
+        context.expect(
+            getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainTimingJitter
+            ) == 0.0f,
+            "legacy state should restore default Grain Timing Jitter"
         );
         context.expect(
             std::abs(getParameterValue(

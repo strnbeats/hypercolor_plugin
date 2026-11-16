@@ -353,6 +353,7 @@ StereoRender renderStereo(bool inPlace)
     parameters.character = GranularCharacter::Atmospheric;
     parameters.pitchRandomAmount = 1.0;
     parameters.positionRandomAmount = 1.0;
+    parameters.timingJitterAmount = 1.0;
     StereoRender rendered;
 
     if (inPlace)
@@ -608,6 +609,7 @@ std::vector<float> renderPartitioned(std::size_t blockSize)
     parameters.character = GranularCharacter::ControlledChaos;
     parameters.pitchRandomAmount = 1.0;
     parameters.positionRandomAmount = 1.0;
+    parameters.timingJitterAmount = 1.0;
 
     for (std::size_t start = 0; start < totalSamples; start += blockSize)
     {
@@ -757,6 +759,7 @@ void testParameterSnapshot(TestContext& context)
     changed.character = GranularCharacter::ControlledChaos;
     changed.pitchRandomAmount = 1.0;
     changed.positionRandomAmount = 1.0;
+    changed.timingJitterAmount = 1.0;
     auto stoppedOriginal = original;
     stoppedOriginal.densityGrainsPerSecond = 0.0;
     std::vector<float> activeInput(100, 1.0f);
@@ -893,6 +896,7 @@ void testNoAllocationsAfterPrepare(TestContext& context)
     parameters.character = GranularCharacter::ControlledChaos;
     parameters.pitchRandomAmount = 1.0;
     parameters.positionRandomAmount = 1.0;
+    parameters.timingJitterAmount = 1.0;
 
     allocationProbe::count.store(0, std::memory_order_relaxed);
     allocationProbe::enabled.store(true, std::memory_order_relaxed);

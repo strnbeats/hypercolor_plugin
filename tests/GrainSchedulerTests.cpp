@@ -197,6 +197,7 @@ void testPreparationAndDefaults(TestContext& context)
         parameters.positionRandomAmount == 0.0,
         "default Position Random"
     );
+    context.expect(parameters.timingJitterAmount == 0.0, "default Timing Jitter");
 
     GrainScheduler scheduler;
     context.expect(!scheduler.isPrepared(), "scheduler should start unprepared");
@@ -442,6 +443,8 @@ std::vector<std::uint64_t> collectEventIndices(
         {
             GrainSchedulerParameters parameters;
             parameters.grainSizeMilliseconds = 10.0;
+            parameters.character = GranularCharacter::ControlledChaos;
+            parameters.timingJitterAmount = 1.0;
             parameters.densityGrainsPerSecond = sample < totalSamples / 3
                 ? 10.0
                 : (sample < totalSamples * 2 / 3 ? 37.5 : 120.0);
@@ -465,11 +468,387 @@ std::vector<std::uint64_t> collectEventIndices(
     return events;
 }
 
+std::vector<std::uint64_t> collectConstantTimingEvents(
+    std::uint64_t seed,
+    double timingJitterAmount,
+    GranularCharacter character,
+    double density,
+    std::uint64_t totalSamples,
+    std::uint32_t blockSize = 64,
+    double sampleRate = 48000.0
+)
+{
+    const auto spec = makeSpec(sampleRate, 64);
+    CircularAudioBuffer source;
+    GrainScheduler scheduler { seed };
+    GrainPool pool;
+    std::vector<std::uint64_t> events;
+
+    if (!prepareSource(
+            source,
+            spec,
+            2.0,
+            2.0,
+            static_cast<std::uint64_t>(sampleRate / 10.0)
+        )
+        || !scheduler.prepare(spec))
+    {
+        return events;
+    }
+
+    GrainSchedulerParameters parameters;
+    parameters.densityGrainsPerSecond = density;
+    parameters.grainSizeMilliseconds = 10.0;
+    parameters.positionNormalized = 0.0;
+    parameters.character = character;
+    parameters.timingJitterAmount = timingJitterAmount;
+
+    for (std::uint64_t blockStart = 0;
+         blockStart < totalSamples;
+         blockStart += blockSize)
+    {
+        const auto blockEnd = std::min<std::uint64_t>(
+            totalSamples,
+            blockStart + blockSize
+        );
+
+        for (auto sample = blockStart; sample < blockEnd; ++sample)
+        {
+            if (!writeFrame(source))
+                return {};
+
+            const auto result = scheduler.processSample(parameters, source, pool);
+
+            if (result == GrainSchedulerStepResult::started)
+                events.push_back(sample);
+            else if (result != GrainSchedulerStepResult::noEvent)
+                return {};
+
+            pool.reset();
+        }
+    }
+
+    return events;
+}
+
+std::vector<std::uint64_t> collectNominalTimingEvents(
+    double density,
+    std::uint64_t totalSamples
+)
+{
+    constexpr double timingSampleRate = 48000.0;
+    std::vector<std::uint64_t> events;
+    auto phase = 0.0;
+
+    for (std::uint64_t sample = 0; sample < totalSamples; ++sample)
+    {
+        phase += density;
+
+        if (phase >= timingSampleRate)
+        {
+            events.push_back(sample);
+            phase -= timingSampleRate;
+        }
+    }
+
+    return events;
+}
+
+void testTimingJitterCompatibilityAndDeterminism(TestContext& context)
+{
+    constexpr std::uint64_t totalSamples = 48000 * 10;
+    constexpr double density = 20.0;
+    const auto nominal = collectNominalTimingEvents(density, totalSamples);
+    const auto zeroJitter = collectConstantTimingEvents(
+        17,
+        0.0,
+        GranularCharacter::ControlledChaos,
+        density,
+        totalSamples
+    );
+    context.expect(
+        zeroJitter == nominal,
+        "zero Timing Jitter should exactly preserve the Phase 1L.2 schedule"
+    );
+
+    const auto first = collectConstantTimingEvents(
+        17,
+        1.0,
+        GranularCharacter::ControlledChaos,
+        density,
+        totalSamples
+    );
+    const auto repeat = collectConstantTimingEvents(
+        17,
+        1.0,
+        GranularCharacter::ControlledChaos,
+        density,
+        totalSamples
+    );
+    const auto differentSeed = collectConstantTimingEvents(
+        18,
+        1.0,
+        GranularCharacter::ControlledChaos,
+        density,
+        totalSamples
+    );
+    context.expect(first == repeat, "equal seeds should reproduce jittered events");
+    context.expect(first != differentSeed, "different seeds should alter jittered events");
+}
+
+void testTimingJitterDensityOrderingAndCharacter(TestContext& context)
+{
+    constexpr std::uint64_t totalSamples = 48000 * 30;
+    constexpr double density = 20.0;
+    const auto nominal = collectNominalTimingEvents(density, totalSamples);
+    const auto chaos = collectConstantTimingEvents(
+        123,
+        1.0,
+        GranularCharacter::ControlledChaos,
+        density,
+        totalSamples
+    );
+    const auto musical = collectConstantTimingEvents(
+        123,
+        1.0,
+        GranularCharacter::Musical,
+        density,
+        totalSamples
+    );
+    const auto atmospheric = collectConstantTimingEvents(
+        123,
+        1.0,
+        GranularCharacter::Atmospheric,
+        density,
+        totalSamples
+    );
+
+    const auto expectedCount = static_cast<std::size_t>(density * 30.0);
+    context.expect(
+        chaos.size() >= expectedCount - 1 && chaos.size() <= expectedCount + 1,
+        "bounded jitter should preserve long-term target Density"
+    );
+    context.expect(
+        chaos.size() == nominal.size()
+            || chaos.size() + 1 == nominal.size()
+            || nominal.size() + 1 == chaos.size(),
+        "jittered event count should differ from nominal only at boundaries"
+    );
+
+    auto intervalsVary = false;
+    auto strictlyOrdered = true;
+    auto respectsMinimumSpacing = true;
+    constexpr std::uint64_t minimumSpacing = 48000 / 120;
+
+    for (std::size_t index = 1; index < chaos.size(); ++index)
+    {
+        const auto interval = chaos[index] - chaos[index - 1];
+        intervalsVary = intervalsVary
+            || (index > 1
+                && interval != chaos[index - 1] - chaos[index - 2]);
+        strictlyOrdered = strictlyOrdered && chaos[index] > chaos[index - 1];
+        respectsMinimumSpacing = respectsMinimumSpacing
+            && interval >= minimumSpacing;
+    }
+
+    context.expect(intervalsVary, "non-zero Timing Jitter should vary intervals");
+    context.expect(strictlyOrdered, "jittered events should remain strictly ordered");
+    context.expect(
+        respectsMinimumSpacing,
+        "jittered events should respect the discrete 120 grains/s spacing"
+    );
+
+    const auto accumulatedDeviation = [&](const auto& events)
+    {
+        long double result = 0.0L;
+        const auto count = std::min(events.size(), nominal.size());
+
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            result += std::abs(
+                static_cast<long double>(events[index])
+                    - static_cast<long double>(nominal[index])
+            );
+        }
+
+        return result;
+    };
+
+    context.expect(
+        accumulatedDeviation(chaos) > accumulatedDeviation(musical),
+        "ControlledChaos should jitter timing more than Musical"
+    );
+    context.expect(
+        accumulatedDeviation(musical) > accumulatedDeviation(atmospheric),
+        "Musical should jitter timing more than Atmospheric"
+    );
+}
+
+void testTimingJitterMaximumDensityAndClamping(TestContext& context)
+{
+    constexpr std::uint64_t totalSamples = 48000 * 4;
+    const auto zero = collectConstantTimingEvents(
+        5,
+        0.0,
+        GranularCharacter::ControlledChaos,
+        120.0,
+        totalSamples
+    );
+    const auto maximum = collectConstantTimingEvents(
+        5,
+        1.0,
+        GranularCharacter::ControlledChaos,
+        120.0,
+        totalSamples
+    );
+    const auto aboveMaximum = collectConstantTimingEvents(
+        5,
+        10.0,
+        GranularCharacter::ControlledChaos,
+        20.0,
+        totalSamples
+    );
+    const auto clampedMaximum = collectConstantTimingEvents(
+        5,
+        1.0,
+        GranularCharacter::ControlledChaos,
+        20.0,
+        totalSamples
+    );
+    const auto belowMinimum = collectConstantTimingEvents(
+        5,
+        -1.0,
+        GranularCharacter::ControlledChaos,
+        20.0,
+        totalSamples
+    );
+    const auto clampedMinimum = collectConstantTimingEvents(
+        5,
+        0.0,
+        GranularCharacter::ControlledChaos,
+        20.0,
+        totalSamples
+    );
+
+    context.expect(
+        maximum == zero,
+        "Timing Jitter should collapse safely at maximum Density"
+    );
+    context.expect(
+        aboveMaximum == clampedMaximum,
+        "Timing Jitter above one should clamp"
+    );
+    context.expect(
+        belowMinimum == clampedMinimum,
+        "negative Timing Jitter should clamp to zero"
+    );
+    context.expect(
+        collectConstantTimingEvents(
+            5,
+            1.0,
+            GranularCharacter::ControlledChaos,
+            0.0,
+            totalSamples
+        ).empty(),
+        "Density zero should emit no jittered events"
+    );
+}
+
+void testTimingJitterReset(TestContext& context)
+{
+    const auto spec = makeSpec(48000.0);
+    CircularAudioBuffer source;
+    GrainScheduler scheduler { 777 };
+    GrainPool pool;
+    context.expect(
+        prepareSource(source, spec, 4.0, 4.0, 48000),
+        "timing reset source should prepare"
+    );
+    context.expect(scheduler.prepare(spec), "timing reset scheduler should prepare");
+
+    GrainSchedulerParameters parameters;
+    parameters.densityGrainsPerSecond = 20.0;
+    parameters.grainSizeMilliseconds = 10.0;
+    parameters.character = GranularCharacter::ControlledChaos;
+    parameters.timingJitterAmount = 1.0;
+
+    const auto collect = [&]()
+    {
+        std::vector<std::uint64_t> events;
+
+        for (std::uint64_t sample = 0; sample < 48000; ++sample)
+        {
+            context.expect(writeFrame(source), "timing reset frame should write");
+            const auto result = scheduler.processSample(parameters, source, pool);
+
+            if (result == GrainSchedulerStepResult::started)
+                events.push_back(sample);
+
+            pool.reset();
+        }
+
+        return events;
+    };
+
+    const auto first = collect();
+    scheduler.reset();
+    pool.reset();
+    const auto second = collect();
+    context.expect(first == second, "Scheduler reset should reproduce timing jitter");
+}
+
+void testTimingJitterAcrossSampleRates(TestContext& context)
+{
+    constexpr double density = 37.5;
+
+    for (const auto sampleRate : { 44100.0, 96000.0, 192000.0 })
+    {
+        const auto totalSamples = static_cast<std::uint64_t>(sampleRate * 4.0);
+        const auto events = collectConstantTimingEvents(
+            2024,
+            1.0,
+            GranularCharacter::ControlledChaos,
+            density,
+            totalSamples,
+            4097,
+            sampleRate
+        );
+        const auto expectedCount = static_cast<std::size_t>(density * 4.0);
+        context.expect(
+            events.size() >= expectedCount - 1
+                && events.size() <= expectedCount + 1,
+            "Timing Jitter should preserve Density at every sample rate"
+        );
+
+        const auto minimumSpacing = static_cast<std::uint64_t>(
+            std::floor(sampleRate / 120.0)
+        );
+        for (std::size_t index = 1; index < events.size(); ++index)
+        {
+            context.expect(
+                events[index] - events[index - 1] >= minimumSpacing,
+                "Timing Jitter should preserve spacing at every sample rate"
+            );
+        }
+    }
+}
+
 void testBlockIndependence(TestContext& context)
 {
     constexpr std::uint64_t totalSamples = 96000;
     const auto reference = collectEventIndices(1, totalSamples);
     context.expect(!reference.empty(), "block reference should contain events");
+
+    constexpr std::uint64_t minimumSpacing = 48000 / 120;
+    for (std::size_t index = 1; index < reference.size(); ++index)
+    {
+        context.expect(
+            reference[index] > reference[index - 1]
+                && reference[index] - reference[index - 1]
+                    >= minimumSpacing,
+            "Density automation should not create reordered events or bursts"
+        );
+    }
 
     for (const auto blockSize : { 7u, 64u, 511u, 1024u, 2048u, 4097u })
     {
@@ -543,6 +922,91 @@ double inferNormalizedPosition(const GrainSnapshot& snapshot)
 double inferPitchSemitones(const GrainSnapshot& snapshot)
 {
     return 12.0 * std::log2(std::abs(snapshot.playbackRate));
+}
+
+struct VariationSequence
+{
+    std::vector<double> playbackRates;
+    std::vector<double> normalizedPositions;
+};
+
+VariationSequence collectVariationSequence(double timingJitterAmount)
+{
+    const auto spec = makeSpec(48000.0);
+    CircularAudioBuffer source;
+    GrainScheduler scheduler { 314159 };
+    GrainPool pool;
+    VariationSequence sequence;
+
+    if (!prepareSource(source, spec, 4.0, 4.0, 96000)
+        || !scheduler.prepare(spec))
+    {
+        return sequence;
+    }
+
+    GrainSchedulerParameters parameters;
+    parameters.densityGrainsPerSecond = 40.0;
+    parameters.grainSizeMilliseconds = 100.0;
+    parameters.positionNormalized = 0.5;
+    parameters.character = GranularCharacter::ControlledChaos;
+    parameters.pitchRandomAmount = 1.0;
+    parameters.positionRandomAmount = 1.0;
+    parameters.timingJitterAmount = timingJitterAmount;
+
+    for (std::size_t sample = 0;
+         sample < 48000 && sequence.playbackRates.size() < 24;
+         ++sample)
+    {
+        if (!writeFrame(source))
+            return {};
+
+        const auto result = scheduler.processSample(parameters, source, pool);
+
+        if (result == GrainSchedulerStepResult::started)
+        {
+            const auto snapshot = captureFirstActive(pool);
+            sequence.playbackRates.push_back(snapshot.playbackRate);
+            sequence.normalizedPositions.push_back(
+                inferNormalizedPosition(snapshot)
+            );
+            pool.reset();
+        }
+        else if (result != GrainSchedulerStepResult::noEvent)
+        {
+            return {};
+        }
+    }
+
+    return sequence;
+}
+
+void testTimingStreamDoesNotAffectGrainVariation(TestContext& context)
+{
+    const auto disabled = collectVariationSequence(0.0);
+    const auto enabled = collectVariationSequence(1.0);
+    context.expect(
+        disabled.playbackRates.size() == 24
+            && enabled.playbackRates.size() == disabled.playbackRates.size(),
+        "timing-depth comparison should collect matching grain counts"
+    );
+
+    if (disabled.playbackRates.size() != enabled.playbackRates.size())
+        return;
+
+    for (std::size_t index = 0; index < disabled.playbackRates.size(); ++index)
+    {
+        context.expect(
+            std::bit_cast<std::uint64_t>(disabled.playbackRates[index])
+                == std::bit_cast<std::uint64_t>(enabled.playbackRates[index]),
+            "Timing Jitter depth must not alter Pitch Random sequence"
+        );
+        context.expectNear(
+            disabled.normalizedPositions[index],
+            enabled.normalizedPositions[index],
+            1.0e-10,
+            "Timing Jitter depth must not alter Position Random sequence"
+        );
+    }
 }
 
 void testPitchAndPositionRandomVariation(TestContext& context)
@@ -1437,6 +1901,34 @@ void testInvalidInputsAndUnpreparedObjects(TestContext& context)
         },
         "infinite Position Random should be rejected"
     );
+
+    GrainScheduler invalidTimingScheduler;
+    GrainPool invalidTimingPool;
+    context.expect(
+        invalidTimingScheduler.prepare(spec),
+        "invalid timing scheduler should prepare"
+    );
+    auto invalidTiming = parameters;
+    invalidTiming.timingJitterAmount
+        = std::numeric_limits<double>::quiet_NaN();
+    context.expect(
+        invalidTimingScheduler.processSample(
+            invalidTiming,
+            source,
+            invalidTimingPool
+        ) == GrainSchedulerStepResult::invalidParameters,
+        "NaN Timing Jitter should be rejected before phase accumulation"
+    );
+    invalidTiming.timingJitterAmount
+        = std::numeric_limits<double>::infinity();
+    context.expect(
+        invalidTimingScheduler.processSample(
+            invalidTiming,
+            source,
+            invalidTimingPool
+        ) == GrainSchedulerStepResult::invalidParameters,
+        "infinite Timing Jitter should be rejected"
+    );
 }
 }
 
@@ -1449,6 +1941,12 @@ int main()
     testFirstEventZeroDensityAndReset(context);
     testDensityChangesAndInvalidDensity(context);
     testBlockIndependence(context);
+    testTimingJitterCompatibilityAndDeterminism(context);
+    testTimingJitterDensityOrderingAndCharacter(context);
+    testTimingJitterMaximumDensityAndClamping(context);
+    testTimingJitterReset(context);
+    testTimingJitterAcrossSampleRates(context);
+    testTimingStreamDoesNotAffectGrainVariation(context);
     testPitchAndPositionRandomVariation(context);
     testCharacterScalingAndSeedDeterminism(context);
     testSchedulerResetRestoresRandomSequence(context);

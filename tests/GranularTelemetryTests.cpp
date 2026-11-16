@@ -78,6 +78,7 @@ GranularTelemetrySnapshot makeSnapshot(std::uint64_t sequence)
         = hypercolor::dsp::granular::GranularCharacter::Atmospheric;
     snapshot.appliedParameters.pitchRandomAmount = 0.75;
     snapshot.appliedParameters.positionRandomAmount = 0.5;
+    snapshot.appliedParameters.timingJitterAmount = 0.625;
 
     for (std::size_t index = 0; index < snapshot.waveformPoints.size(); ++index)
     {
@@ -159,6 +160,10 @@ bool payloadMatches(
         || !exactlyEqual(
             actual.appliedParameters.positionRandomAmount,
             expected.appliedParameters.positionRandomAmount
+        )
+        || !exactlyEqual(
+            actual.appliedParameters.timingJitterAmount,
+            expected.appliedParameters.timingJitterAmount
         ))
     {
         return false;
