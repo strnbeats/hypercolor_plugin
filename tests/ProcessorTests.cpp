@@ -976,6 +976,11 @@ void testEditorControlsStateAndResize(TestContext& context)
     if (editor == nullptr)
         return;
 
+    context.expect(
+        editor->getWidth() == 1100 && editor->getHeight() == 700,
+        "editor should open at the redesigned default size"
+    );
+
     const auto findSlider = [&editor](const char* parameterID)
     {
         return dynamic_cast<juce::Slider*>(
@@ -1069,14 +1074,14 @@ void testEditorControlsStateAndResize(TestContext& context)
     if (const auto* constrainer = editor->getConstrainer())
     {
         context.expect(
-            constrainer->getMinimumWidth() == 600
-                && constrainer->getMinimumHeight() == 440,
+            constrainer->getMinimumWidth() == 760
+                && constrainer->getMinimumHeight() == 560,
             "editor minimum size should keep visualizer and controls readable"
         );
         context.expect(
-            constrainer->getMaximumWidth() == 960
-                && constrainer->getMaximumHeight() == 630,
-            "editor maximum resize limit should remain 960x630"
+            constrainer->getMaximumWidth() == 1600
+                && constrainer->getMaximumHeight() == 1000,
+            "editor maximum size should support expanded visualizer layouts"
         );
     }
     else
@@ -1095,8 +1100,11 @@ void testEditorControlsStateAndResize(TestContext& context)
     };
 
     for (const auto editorSize : {
-             juce::Point<int> { 600, 440 },
-             juce::Point<int> { 960, 630 } })
+             juce::Point<int> { 760, 560 },
+             juce::Point<int> { 900, 620 },
+             juce::Point<int> { 1100, 700 },
+             juce::Point<int> { 1320, 840 },
+             juce::Point<int> { 1600, 1000 } })
     {
         editor->setSize(editorSize.x, editorSize.y);
 
@@ -1113,6 +1121,27 @@ void testEditorControlsStateAndResize(TestContext& context)
                 editor->getLocalBounds().contains(control->getBounds()),
                 "granular controls should remain inside editor bounds"
             );
+        }
+
+        for (std::size_t first = 0; first < controls.size(); ++first)
+        {
+            if (controls[first] == nullptr)
+                continue;
+
+            for (std::size_t second = first + 1;
+                 second < controls.size();
+                 ++second)
+            {
+                if (controls[second] == nullptr)
+                    continue;
+
+                context.expect(
+                    !controls[first]->getBounds().intersects(
+                        controls[second]->getBounds()
+                    ),
+                    "parameter controls should not overlap at supported sizes"
+                );
+            }
         }
 
         if (visualizer != nullptr)
@@ -1139,6 +1168,15 @@ void testEditorControlsStateAndResize(TestContext& context)
                 }
             }
         }
+
+        juce::Image renderedEditor(
+            juce::Image::ARGB,
+            editorSize.x,
+            editorSize.y,
+            true
+        );
+        juce::Graphics editorGraphics(renderedEditor);
+        editor->paintEntireComponent(editorGraphics, true);
     }
 }
 
@@ -1153,8 +1191,8 @@ GranularVisualizer* findGranularVisualizer(
 
 void renderVisualizerForTest(GranularVisualizer& visualizer)
 {
-    visualizer.setSize(640, 160);
-    juce::Image image(juce::Image::ARGB, 640, 160, true);
+    visualizer.setSize(800, 260);
+    juce::Image image(juce::Image::ARGB, 800, 260, true);
     juce::Graphics graphics(image);
     visualizer.paint(graphics);
 }

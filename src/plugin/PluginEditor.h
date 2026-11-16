@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include "GranularVisualizer.h"
+#include "HypercolorLookAndFeel.h"
 #include "PluginProcessor.h"
 
 class HypercolorAudioProcessorEditor final
@@ -11,6 +12,7 @@ public:
     explicit HypercolorAudioProcessorEditor(
         HypercolorAudioProcessor& processorToEdit
     );
+    ~HypercolorAudioProcessorEditor() override;
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
@@ -22,7 +24,12 @@ private:
         juce::AudioProcessorValueTreeState::ButtonAttachment;
 
     HypercolorAudioProcessor& audioProcessor;
+    hypercolor::ui::HypercolorLookAndFeel lookAndFeel;
     GranularVisualizer granularVisualizer;
+
+    juce::Rectangle<int> headerArea;
+    juce::Rectangle<int> grainControlPanel;
+    juce::Rectangle<int> masterPanel;
 
     juce::Slider dryWetSlider;
     juce::Slider outputGainSlider;

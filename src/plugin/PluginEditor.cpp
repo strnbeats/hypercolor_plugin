@@ -2,6 +2,40 @@
 
 #include <array>
 
+namespace
+{
+void drawTechnicalPanel(
+    juce::Graphics& graphics,
+    juce::Rectangle<int> integerBounds,
+    juce::Colour accent
+)
+{
+    auto bounds = integerBounds.toFloat();
+
+    if (bounds.isEmpty())
+        return;
+
+    constexpr float cut = 13.0f;
+    juce::Path panelPath;
+    panelPath.startNewSubPath(bounds.getX(), bounds.getY());
+    panelPath.lineTo(bounds.getRight() - cut, bounds.getY());
+    panelPath.lineTo(bounds.getRight(), bounds.getY() + cut);
+    panelPath.lineTo(bounds.getRight(), bounds.getBottom());
+    panelPath.lineTo(bounds.getX() + cut, bounds.getBottom());
+    panelPath.lineTo(bounds.getX(), bounds.getBottom() - cut);
+    panelPath.closeSubPath();
+
+    graphics.setColour(hypercolor::ui::palette::panel());
+    graphics.fillPath(panelPath);
+    graphics.setColour(hypercolor::ui::palette::border());
+    graphics.strokePath(panelPath, juce::PathStrokeType(1.0f));
+
+    graphics.setColour(accent);
+    graphics.fillRect(bounds.getX(), bounds.getY(), 54.0f, 2.0f);
+    graphics.fillRect(bounds.getRight() - 18.0f, bounds.getY(), 18.0f, 2.0f);
+}
+}
+
 HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     HypercolorAudioProcessor& processorToEdit
 )
@@ -44,53 +78,53 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
           reverseButton
       )
 {
-    const auto accent = juce::Colour::fromRGB(115, 230, 210);
-    const auto accentSecondary = juce::Colour::fromRGB(230, 115, 198);
-    const auto controlBackground = juce::Colour::fromRGB(27, 31, 46);
-    const auto controlOutline = juce::Colour::fromRGB(63, 70, 94);
-    const auto text = juce::Colour::fromRGB(205, 210, 226);
+    setLookAndFeel(&lookAndFeel);
+
+    const auto cyan = hypercolor::ui::palette::cyan();
+    const auto pink = hypercolor::ui::palette::pink();
+    const auto lime = hypercolor::ui::palette::lime();
+    const auto panelRaised = hypercolor::ui::palette::panelRaised();
+    const auto text = hypercolor::ui::palette::text();
 
     addAndMakeVisible(granularVisualizer);
 
     const auto configureSlider = [
         this,
-        accent,
-        accentSecondary,
-        controlBackground,
-        controlOutline,
         text
     ](
         juce::Slider& slider,
-        juce::String suffix
+        juce::String suffix,
+        juce::Colour accent
     )
     {
         slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 90, 24);
+        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 96, 25);
+        slider.setMouseDragSensitivity(180);
         slider.setTextValueSuffix(std::move(suffix));
         slider.setColour(juce::Slider::rotarySliderFillColourId, accent);
         slider.setColour(
             juce::Slider::rotarySliderOutlineColourId,
-            controlOutline
+            hypercolor::ui::palette::grid()
         );
-        slider.setColour(juce::Slider::thumbColourId, accentSecondary);
+        slider.setColour(juce::Slider::thumbColourId, accent);
         slider.setColour(
             juce::Slider::textBoxBackgroundColourId,
-            controlBackground
+            hypercolor::ui::palette::background()
         );
         slider.setColour(juce::Slider::textBoxTextColourId, text);
         slider.setColour(
             juce::Slider::textBoxOutlineColourId,
-            controlOutline
+            hypercolor::ui::palette::border()
         );
         addAndMakeVisible(slider);
     };
 
-    configureSlider(dryWetSlider, " %");
-    configureSlider(outputGainSlider, " dB");
-    configureSlider(densitySlider, " gr/s");
-    configureSlider(sizeSlider, " ms");
-    configureSlider(positionSlider, {});
-    configureSlider(pitchSlider, {});
+    configureSlider(dryWetSlider, " %", lime);
+    configureSlider(outputGainSlider, " dB", cyan);
+    configureSlider(densitySlider, " gr/s", cyan);
+    configureSlider(sizeSlider, " ms", pink);
+    configureSlider(positionSlider, {}, lime);
+    configureSlider(pitchSlider, {}, cyan);
 
     positionSlider.textFromValueFunction = [](double value)
     {
@@ -138,6 +172,7 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     {
         label->setJustificationType(juce::Justification::centred);
         label->setColour(juce::Label::textColourId, text);
+        label->setFont(juce::FontOptions(11.0f).withStyle("Bold"));
         addAndMakeVisible(*label);
     }
 
@@ -148,35 +183,39 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     positionHintLabel.setJustificationType(juce::Justification::centred);
     positionHintLabel.setColour(
         juce::Label::textColourId,
-        juce::Colour::fromRGB(132, 140, 164)
+        hypercolor::ui::palette::mutedText()
     );
-    positionHintLabel.setFont(juce::FontOptions(10.0f));
+    positionHintLabel.setFont(juce::FontOptions(9.0f).withStyle("Bold"));
     addAndMakeVisible(positionHintLabel);
 
-    granularSectionLabel.setText("GRANULAR", juce::dontSendNotification);
-    masterSectionLabel.setText("MASTER", juce::dontSendNotification);
+    granularSectionLabel.setText(
+        "01 / GRAIN CONTROL",
+        juce::dontSendNotification
+    );
+    masterSectionLabel.setText("02 / MASTER", juce::dontSendNotification);
 
-    for (auto* label : { &granularSectionLabel, &masterSectionLabel })
-    {
-        label->setJustificationType(juce::Justification::centredLeft);
-        label->setColour(juce::Label::textColourId, accent);
-        label->setFont(juce::FontOptions(12.0f).withStyle("Bold"));
-        addAndMakeVisible(*label);
-    }
+    granularSectionLabel.setJustificationType(juce::Justification::centredLeft);
+    granularSectionLabel.setColour(juce::Label::textColourId, cyan);
+    granularSectionLabel.setFont(juce::FontOptions(12.0f).withStyle("Bold"));
+    masterSectionLabel.setJustificationType(juce::Justification::centredLeft);
+    masterSectionLabel.setColour(juce::Label::textColourId, pink);
+    masterSectionLabel.setFont(juce::FontOptions(12.0f).withStyle("Bold"));
+    addAndMakeVisible(granularSectionLabel);
+    addAndMakeVisible(masterSectionLabel);
 
     reverseButton.setClickingTogglesState(true);
     reverseButton.setColour(
         juce::TextButton::buttonColourId,
-        controlBackground
+        panelRaised
     );
     reverseButton.setColour(
         juce::TextButton::buttonOnColourId,
-        accent
+        pink
     );
     reverseButton.setColour(juce::TextButton::textColourOffId, text);
     reverseButton.setColour(
         juce::TextButton::textColourOnId,
-        juce::Colour::fromRGB(13, 15, 24)
+        hypercolor::ui::palette::background()
     );
     reverseButton.onStateChange = [this]
     {
@@ -188,64 +227,117 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     addAndMakeVisible(reverseButton);
 
     setResizable(true, true);
-    setResizeLimits(600, 440, 960, 630);
-    setSize(760, 500);
+    setResizeLimits(760, 560, 1600, 1000);
+    setSize(1100, 700);
+}
+
+HypercolorAudioProcessorEditor::~HypercolorAudioProcessorEditor()
+{
+    setLookAndFeel(nullptr);
 }
 
 void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
 {
     juce::ignoreUnused(audioProcessor);
 
-    graphics.fillAll(juce::Colour::fromRGB(13, 15, 24));
+    graphics.fillAll(hypercolor::ui::palette::background());
 
-    graphics.setColour(juce::Colour::fromRGB(115, 230, 210));
+    const auto header = headerArea.toFloat();
+    graphics.setColour(hypercolor::ui::palette::grid());
+    graphics.drawHorizontalLine(
+        headerArea.getBottom() - 1,
+        header.getX(),
+        header.getRight()
+    );
 
-    graphics.setFont(juce::FontOptions(32.0f));
+    auto wordmark = header.reduced(0.0f, 5.0f);
+    const auto titleWidth = juce::jmin(460.0f, wordmark.getWidth() * 0.58f);
+    auto titleArea = wordmark.removeFromLeft(titleWidth);
 
+    graphics.setFont(juce::FontOptions(43.0f).withStyle("Bold"));
+    graphics.setColour(hypercolor::ui::palette::text());
     graphics.drawFittedText(
-        "HYPERCOLOR",
-        getLocalBounds().removeFromTop(76).reduced(24),
-        juce::Justification::centred,
+        "HYPER",
+        titleArea.removeFromLeft(titleWidth * 0.54f).toNearestInt(),
+        juce::Justification::centredLeft,
+        1
+    );
+    graphics.setColour(hypercolor::ui::palette::pink());
+    graphics.drawFittedText(
+        "COLOR",
+        titleArea.toNearestInt(),
+        juce::Justification::centredLeft,
         1
     );
 
-    graphics.setColour(juce::Colour::fromRGB(145, 150, 170));
+    graphics.setColour(hypercolor::ui::palette::cyan());
+    graphics.fillRect(header.getX(), header.getBottom() - 4.0f, 96.0f, 2.0f);
+    graphics.setColour(hypercolor::ui::palette::lime());
+    graphics.fillRect(header.getX() + 100.0f, header.getBottom() - 4.0f, 31.0f, 2.0f);
 
-    graphics.setFont(juce::FontOptions(12.0f));
-
+    graphics.setFont(juce::FontOptions(10.0f).withStyle("Bold"));
+    graphics.setColour(hypercolor::ui::palette::mutedText());
     graphics.drawText(
-        "GRANULAR CREATIVE EFFECT",
-        getLocalBounds().removeFromBottom(30),
-        juce::Justification::centred
+        "EXPERIMENTAL GRANULAR PROCESSOR  //  64 VOICE FIELD",
+        wordmark.removeFromBottom(23.0f),
+        juce::Justification::centredRight,
+        false
+    );
+    graphics.setColour(hypercolor::ui::palette::lime());
+    graphics.drawText(
+        "HYPERCOLOR  V0.1.0",
+        wordmark,
+        juce::Justification::centredRight,
+        false
+    );
+
+    drawTechnicalPanel(
+        graphics,
+        grainControlPanel,
+        hypercolor::ui::palette::cyan()
+    );
+    drawTechnicalPanel(
+        graphics,
+        masterPanel,
+        hypercolor::ui::palette::pink()
     );
 }
 
 void HypercolorAudioProcessorEditor::resized()
 {
-    const auto margin = juce::jlimit(14, 32, getWidth() / 24);
+    const auto margin = juce::jlimit(18, 36, getWidth() / 30);
     auto content = getLocalBounds().reduced(margin);
-    content.removeFromTop(66);
-    content.removeFromBottom(22);
+    const auto headerHeight = juce::jlimit(
+        68,
+        96,
+        juce::roundToInt(static_cast<float>(getHeight()) * 0.13f)
+    );
+    headerArea = content.removeFromTop(headerHeight);
+    content.removeFromTop(12);
 
     const auto visualizerHeight = juce::jlimit(
-        70,
-        160,
-        juce::roundToInt(
-            static_cast<float>(content.getHeight()) * 0.32f
-        )
-    );
-    granularVisualizer.setBounds(
-        content.removeFromTop(visualizerHeight).reduced(0, 3)
-    );
-    content.removeFromTop(4);
-
-    auto granularArea = content.removeFromTop(
+        210,
+        440,
         juce::roundToInt(static_cast<float>(content.getHeight()) * 0.57f)
     );
-    auto masterArea = content;
+    granularVisualizer.setBounds(content.removeFromTop(visualizerHeight));
+    content.removeFromTop(14);
 
-    granularSectionLabel.setBounds(granularArea.removeFromTop(20));
-    masterSectionLabel.setBounds(masterArea.removeFromTop(20));
+    const auto panelGap = juce::jlimit(10, 18, getWidth() / 70);
+    const auto grainPanelWidth = juce::roundToInt(
+        static_cast<float>(content.getWidth() - panelGap) * 0.70f
+    );
+    grainControlPanel = content.removeFromLeft(grainPanelWidth);
+    content.removeFromLeft(panelGap);
+    masterPanel = content;
+
+    auto granularArea = grainControlPanel.reduced(14, 10);
+    auto masterArea = masterPanel.reduced(14, 10);
+
+    granularSectionLabel.setBounds(granularArea.removeFromTop(24));
+    masterSectionLabel.setBounds(masterArea.removeFromTop(24));
+    granularArea.removeFromTop(3);
+    masterArea.removeFromTop(3);
 
     const auto granularControlWidth = granularArea.getWidth() / 5;
     std::array<juce::Component*, 5> granularControls {
@@ -269,18 +361,18 @@ void HypercolorAudioProcessorEditor::resized()
             index + 1 == granularControls.size()
                 ? granularArea.getWidth()
                 : granularControlWidth
-        ).reduced(4);
-        granularLabels[index]->setBounds(cell.removeFromTop(20));
+        ).reduced(5, 0);
+        granularLabels[index]->setBounds(cell.removeFromTop(21));
 
         if (granularControls[index] == &positionSlider)
-            positionHintLabel.setBounds(cell.removeFromBottom(16));
+            positionHintLabel.setBounds(cell.removeFromBottom(17));
 
         if (granularControls[index] == &reverseButton)
         {
             granularControls[index]->setBounds(
                 cell.withSizeKeepingCentre(
-                    juce::jmax(70, cell.getWidth() - 12),
-                    juce::jmin(42, cell.getHeight())
+                    juce::jmax(76, cell.getWidth() - 10),
+                    juce::jmin(48, cell.getHeight())
                 )
             );
         }
@@ -290,10 +382,7 @@ void HypercolorAudioProcessorEditor::resized()
         }
     }
 
-    auto masterControls = masterArea.withSizeKeepingCentre(
-        juce::jmin(380, masterArea.getWidth()),
-        masterArea.getHeight()
-    );
+    auto masterControls = masterArea;
     const auto masterControlWidth = masterControls.getWidth() / 2;
     auto dryWetBounds = masterControls.removeFromLeft(masterControlWidth)
         .reduced(6, 0);

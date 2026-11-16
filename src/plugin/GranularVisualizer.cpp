@@ -1,4 +1,5 @@
 #include "GranularVisualizer.h"
+#include "HypercolorLookAndFeel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,14 +8,6 @@
 namespace
 {
 constexpr int visualizerRefreshRateHz = 30;
-
-const auto background = juce::Colour::fromRGB(18, 22, 35);
-const auto outline = juce::Colour::fromRGB(55, 64, 88);
-const auto grid = juce::Colour::fromRGB(43, 50, 70);
-const auto text = juce::Colour::fromRGB(184, 191, 212);
-const auto mutedText = juce::Colour::fromRGB(112, 122, 148);
-const auto teal = juce::Colour::fromRGB(115, 230, 210);
-const auto pink = juce::Colour::fromRGB(230, 115, 198);
 
 float sanitiseAmplitude(float value) noexcept
 {
@@ -98,24 +91,55 @@ void GranularVisualizer::paint(juce::Graphics& graphics)
 {
     auto bounds = getLocalBounds().toFloat();
 
-    graphics.setColour(background);
-    graphics.fillRoundedRectangle(bounds, 8.0f);
-    graphics.setColour(outline);
-    graphics.drawRoundedRectangle(bounds.reduced(0.5f), 8.0f, 1.0f);
+    constexpr float cut = 18.0f;
+    juce::Path fieldShape;
+    fieldShape.startNewSubPath(bounds.getX(), bounds.getY());
+    fieldShape.lineTo(bounds.getRight() - cut, bounds.getY());
+    fieldShape.lineTo(bounds.getRight(), bounds.getY() + cut);
+    fieldShape.lineTo(bounds.getRight(), bounds.getBottom());
+    fieldShape.lineTo(bounds.getX() + cut, bounds.getBottom());
+    fieldShape.lineTo(bounds.getX(), bounds.getBottom() - cut);
+    fieldShape.closeSubPath();
 
-    auto content = bounds.reduced(12.0f, 8.0f);
-    auto header = content.removeFromTop(20.0f);
+    graphics.setColour(hypercolor::ui::palette::panel());
+    graphics.fillPath(fieldShape);
+    graphics.setColour(hypercolor::ui::palette::border());
+    graphics.strokePath(fieldShape, juce::PathStrokeType(1.0f));
+    graphics.setColour(hypercolor::ui::palette::cyan());
+    graphics.fillRect(bounds.getX(), bounds.getY(), bounds.getWidth() * 0.64f, 2.0f);
+    graphics.setColour(hypercolor::ui::palette::pink());
+    graphics.fillRect(
+        bounds.getX() + bounds.getWidth() * 0.64f,
+        bounds.getY(),
+        bounds.getWidth() * 0.23f,
+        2.0f
+    );
+    graphics.setColour(hypercolor::ui::palette::lime());
+    graphics.fillRect(
+        bounds.getX() + bounds.getWidth() * 0.87f,
+        bounds.getY(),
+        bounds.getWidth() * 0.08f,
+        2.0f
+    );
+
+    auto content = bounds.reduced(15.0f, 10.0f);
+    auto header = content.removeFromTop(27.0f);
+    auto footer = content.removeFromBottom(24.0f);
 
     graphics.setFont(juce::FontOptions(11.0f).withStyle("Bold"));
-    graphics.setColour(teal);
+    graphics.setColour(hypercolor::ui::palette::cyan());
     graphics.drawText(
-        "LIVE BUFFER",
+        "00 / GRANULAR FIELD  //  BUFFER HISTORY",
         header,
         juce::Justification::centredLeft,
         false
     );
 
-    graphics.setColour(hasSnapshot ? text : mutedText);
+    graphics.setColour(
+        hasSnapshot
+            ? hypercolor::ui::palette::text()
+            : hypercolor::ui::palette::mutedText()
+    );
     const auto grainCount = hasSnapshot
         ? std::min<std::uint32_t>(
             latestSnapshot.activeGrainCount,
@@ -123,7 +147,9 @@ void GranularVisualizer::paint(juce::Graphics& graphics)
         )
         : 0u;
     const auto status = hasSnapshot
-        ? juce::String(grainCount) + (grainCount == 1 ? " GRAIN" : " GRAINS")
+        ? "SEQ " + juce::String(latestSnapshot.sequence).paddedLeft('0', 6)
+            + "  //  " + juce::String(grainCount)
+            + (grainCount == 1 ? " GRAIN" : " GRAINS")
         : juce::String("WAITING FOR AUDIO");
     graphics.drawText(
         status,
@@ -132,18 +158,16 @@ void GranularVisualizer::paint(juce::Graphics& graphics)
         false
     );
 
-    auto plot = content.reduced(0.0f, 3.0f);
-    graphics.setColour(grid);
-    graphics.drawHorizontalLine(
-        juce::roundToInt(plot.getCentreY()),
-        plot.getX(),
-        plot.getRight()
-    );
+    auto plot = content.reduced(0.0f, 5.0f);
+    graphics.setColour(hypercolor::ui::palette::background().withAlpha(0.58f));
+    graphics.fillRect(plot);
 
-    for (int division = 1; division < 4; ++division)
+    graphics.setColour(hypercolor::ui::palette::grid());
+
+    for (int division = 0; division <= 8; ++division)
     {
         const auto x = plot.getX()
-            + plot.getWidth() * static_cast<float>(division) / 4.0f;
+            + plot.getWidth() * static_cast<float>(division) / 8.0f;
         graphics.drawVerticalLine(
             juce::roundToInt(x),
             plot.getY(),
@@ -151,12 +175,23 @@ void GranularVisualizer::paint(juce::Graphics& graphics)
         );
     }
 
+    for (int division = 0; division <= 4; ++division)
+    {
+        const auto y = plot.getY()
+            + plot.getHeight() * static_cast<float>(division) / 4.0f;
+        graphics.drawHorizontalLine(
+            juce::roundToInt(y),
+            plot.getX(),
+            plot.getRight()
+        );
+    }
+
     if (!hasSnapshot)
     {
-        graphics.setColour(mutedText);
-        graphics.setFont(juce::FontOptions(11.0f));
+        graphics.setColour(hypercolor::ui::palette::mutedText());
+        graphics.setFont(juce::FontOptions(12.0f).withStyle("Bold"));
         graphics.drawText(
-            "Telemetry appears when audio is running",
+            "AWAITING LIVE AUDIO TELEMETRY",
             plot,
             juce::Justification::centred,
             false
@@ -166,6 +201,18 @@ void GranularVisualizer::paint(juce::Graphics& graphics)
 
     drawWaveform(graphics, plot);
     drawGrains(graphics, plot);
+
+    graphics.setFont(juce::FontOptions(9.0f).withStyle("Bold"));
+    graphics.setColour(hypercolor::ui::palette::mutedText());
+    graphics.drawText("OLD", footer, juce::Justification::centredLeft, false);
+    graphics.drawText("FRESH", footer, juce::Justification::centredRight, false);
+
+    const auto sampleRateKhz = latestSnapshot.sampleRate / 1000.0;
+    const auto info = juce::String(latestSnapshot.validDurationSeconds, 2)
+        + " s HISTORY  //  " + juce::String(sampleRateKhz, 1) + " kHz  //  "
+        + (latestSnapshot.numChannels == 2 ? "STEREO" : "MONO");
+    graphics.setColour(hypercolor::ui::palette::lime());
+    graphics.drawText(info, footer, juce::Justification::centred, false);
 }
 
 void GranularVisualizer::drawWaveform(
@@ -200,7 +247,49 @@ void GranularVisualizer::drawWaveform(
         const auto centreY = laneTop + laneHeight * 0.5f;
         const auto amplitudeHeight = juce::jmax(1.0f, laneHeight * 0.43f);
 
-        graphics.setColour((channel == 0 ? teal : pink).withAlpha(0.82f));
+        const auto channelColour = channel == 0
+            ? hypercolor::ui::palette::cyan()
+            : hypercolor::ui::palette::pink();
+        juce::Path envelope;
+
+        for (std::size_t point = 0; point < pointCount; ++point)
+        {
+            const auto& telemetryPoint = latestSnapshot.waveformPoints[point];
+            const auto x = pointCount > 1
+                ? bounds.getX() + step * static_cast<float>(point)
+                : bounds.getCentreX();
+            const auto y = sampleToY(
+                telemetryPoint.maximum[channel],
+                centreY,
+                amplitudeHeight
+            );
+
+            if (point == 0)
+                envelope.startNewSubPath(x, y);
+            else
+                envelope.lineTo(x, y);
+        }
+
+        for (std::size_t point = pointCount; point-- > 0;)
+        {
+            const auto& telemetryPoint = latestSnapshot.waveformPoints[point];
+            const auto x = pointCount > 1
+                ? bounds.getX() + step * static_cast<float>(point)
+                : bounds.getCentreX();
+            envelope.lineTo(
+                x,
+                sampleToY(
+                    telemetryPoint.minimum[channel],
+                    centreY,
+                    amplitudeHeight
+                )
+            );
+        }
+
+        envelope.closeSubPath();
+        graphics.setColour(channelColour.withAlpha(0.13f));
+        graphics.fillPath(envelope);
+        graphics.setColour(channelColour.withAlpha(0.88f));
 
         for (std::size_t point = 0; point < pointCount; ++point)
         {
@@ -225,6 +314,20 @@ void GranularVisualizer::drawWaveform(
                 std::max(minimumY, maximumY)
             );
         }
+
+        graphics.setFont(juce::FontOptions(8.0f).withStyle("Bold"));
+        graphics.setColour(channelColour.withAlpha(0.72f));
+        graphics.drawText(
+            channelCount == 1 ? "M" : (channel == 0 ? "L" : "R"),
+            juce::Rectangle<float>(
+                bounds.getX() + 5.0f,
+                laneTop + 3.0f,
+                14.0f,
+                12.0f
+            ),
+            juce::Justification::centred,
+            false
+        );
     }
 }
 
@@ -266,18 +369,26 @@ void GranularVisualizer::drawGrains(
         );
         const auto x = bounds.getX()
             + static_cast<float>(normalised) * bounds.getWidth();
-        const auto markerColour = grain.playbackRate < 0.0 ? pink : teal;
+        const auto markerColour = grain.playbackRate < 0.0
+            ? hypercolor::ui::palette::pink()
+            : hypercolor::ui::palette::cyan();
         const auto markerY = bounds.getY()
-            + 4.0f
-            + static_cast<float>(index % 4u) * 3.0f;
+            + 7.0f
+            + static_cast<float>(index % 8u) * 4.0f;
 
-        graphics.setColour(markerColour.withAlpha(0.22f));
+        graphics.setColour(markerColour.withAlpha(0.24f));
         graphics.drawVerticalLine(
             juce::roundToInt(x),
             bounds.getY(),
             bounds.getBottom()
         );
+        juce::Path directionMarker;
+        const auto direction = grain.playbackRate < 0.0 ? -1.0f : 1.0f;
+        directionMarker.startNewSubPath(x + direction * 5.0f, markerY + 3.0f);
+        directionMarker.lineTo(x - direction * 3.0f, markerY - 1.0f);
+        directionMarker.lineTo(x - direction * 3.0f, markerY + 7.0f);
+        directionMarker.closeSubPath();
         graphics.setColour(markerColour);
-        graphics.fillEllipse(x - 2.5f, markerY, 5.0f, 5.0f);
+        graphics.fillPath(directionMarker);
     }
 }
