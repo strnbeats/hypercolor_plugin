@@ -24,4 +24,11 @@ inline constexpr auto reverbDecay = "reverbDecay";
 inline constexpr auto reverbDamping = "reverbDamping";
 inline constexpr auto reverbPreDelay = "reverbPreDelay";
 inline constexpr auto reverbWidth = "reverbWidth";
+inline constexpr auto modulationMode = "modulationMode";
+inline constexpr auto modulationRate = "modulationRate";
+inline constexpr auto modulationDepth = "modulationDepth";
+inline constexpr auto modulationBaseDelay = "modulationBaseDelay";
+inline constexpr auto modulationFeedback = "modulationFeedback";
+inline constexpr auto modulationMix = "modulationMix";
+inline constexpr auto modulationWidth = "modulationWidth";
 }

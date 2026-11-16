@@ -57,6 +57,16 @@ private:
     float gain;
 };
 
+class FailingModule final : public EffectModule
+{
+public:
+    bool prepare(const ProcessSpec&) noexcept override { return false; }
+    void reset() noexcept override { ++resetCalls; }
+    void process(EffectAudioBlock&) noexcept override { ++processCalls; }
+    int resetCalls = 0;
+    int processCalls = 0;
+};
+
 EffectAudioBlock makeBlock(
     std::array<float, 8>& left,
     std::array<float, 8>& right,
@@ -74,6 +84,7 @@ void testEmptyAndSequential(TestContext& context)
 {
     EffectChain chain;
     context.expect(chain.prepare({ 48000.0, 1024, 2 }), "empty chain prepare");
+    context.expect(chain.isPrepared(), "prepared state should be observable");
     std::array left { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f };
     std::array right = left;
     auto block = makeBlock(left, right, 2);
@@ -86,6 +97,7 @@ void testEmptyAndSequential(TestContext& context)
     context.expect(sequential.addModule(&first), "first module add");
     context.expect(sequential.addModule(&second), "second module add");
     context.expect(sequential.prepare({ 48000.0, 1024, 2 }), "sequential prepare");
+    context.expect(!sequential.addModule(&first), "composition is immutable after prepare");
     left.fill(1.0f);
     right.fill(1.0f);
     block = makeBlock(left, right, 2);
@@ -121,6 +133,13 @@ void testBypassResetAndValidation(TestContext& context)
         chain.process(invalidBlock) == EffectChainResult::invalidConfiguration,
         "invalid channel count rejected"
     );
+
+    EffectChain failing;
+    FailingModule failingModule;
+    context.expect(failing.addModule(&failingModule), "failing module add");
+    context.expect(!failing.prepare({ 44100.0, 64, 1 }), "module prepare failure propagates");
+    context.expect(!failing.isPrepared(), "failed prepare leaves chain unprepared");
+    context.expect(failingModule.resetCalls == 1, "failed prepare resets modules");
 }
 
 void testCapacityAndOversized(TestContext& context)

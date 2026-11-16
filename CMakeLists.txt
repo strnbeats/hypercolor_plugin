@@ -55,6 +55,7 @@ target_sources(HYPERCOLOR
     PRIVATE
         src/dsp/fx/EffectChain.cpp
         src/dsp/fx/SpaceReverb.cpp
+        src/dsp/fx/ModulationEffect.cpp
         src/dsp/granular/CircularAudioBuffer.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
@@ -358,4 +359,16 @@ if(BUILD_TESTING)
             juce::juce_recommended_warning_flags
     )
     add_test(NAME HYPERCOLOR.SpaceReverb COMMAND HYPERCOLORSpaceReverbTests)
+
+    add_executable(HYPERCOLORModulationEffectTests
+        src/dsp/fx/ModulationEffect.cpp
+        tests/ModulationEffectTests.cpp
+    )
+    target_include_directories(HYPERCOLORModulationEffectTests PRIVATE src)
+    target_compile_features(HYPERCOLORModulationEffectTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORModulationEffectTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+    add_test(NAME HYPERCOLOR.ModulationEffect COMMAND HYPERCOLORModulationEffectTests)
 endif()

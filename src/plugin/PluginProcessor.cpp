@@ -215,6 +215,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
       )
 {
     (void) effectChain.addModule(&spaceReverb);
+    (void) effectChain.addModule(&modulationEffect);
     parameters.state.setProperty(
         stateSchemaProperty,
         currentStateSchemaVersion,
@@ -269,6 +270,13 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     reverbDampingParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbDamping);
     reverbPreDelayParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbPreDelay);
     reverbWidthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbWidth);
+    modulationModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationMode);
+    modulationRateParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationRate);
+    modulationDepthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationDepth);
+    modulationBaseDelayParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationBaseDelay);
+    modulationFeedbackParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationFeedback);
+    modulationMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationMix);
+    modulationWidthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationWidth);
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -290,6 +298,13 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(reverbDampingParameter != nullptr);
     jassert(reverbPreDelayParameter != nullptr);
     jassert(reverbWidthParameter != nullptr);
+    jassert(modulationModeParameter != nullptr);
+    jassert(modulationRateParameter != nullptr);
+    jassert(modulationDepthParameter != nullptr);
+    jassert(modulationBaseDelayParameter != nullptr);
+    jassert(modulationFeedbackParameter != nullptr);
+    jassert(modulationMixParameter != nullptr);
+    jassert(modulationWidthParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -343,6 +358,13 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbDamping, 1 }, "Reverb Damping", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 40.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbPreDelay, 1 }, "Reverb Pre-Delay", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 20.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbWidth, 1 }, "Reverb Width", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::ParameterIDs::modulationMode, 1 }, "Modulation Mode", juce::StringArray { "Chorus", "Flanger" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationRate, 1 }, "Modulation Rate", juce::NormalisableRange<float> { 0.01f, 10.0f, 0.01f }, 0.3f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationDepth, 1 }, "Modulation Depth", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationBaseDelay, 1 }, "Modulation Base Delay", juce::NormalisableRange<float> { 0.1f, 20.0f, 0.01f }, 7.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationFeedback, 1 }, "Modulation Feedback", juce::NormalisableRange<float> { -95.0f, 95.0f, 0.1f }, 0.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationMix, 1 }, "Modulation Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::modulationWidth, 1 }, "Modulation Width", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::outputGain, 1 },
@@ -583,6 +605,17 @@ void HypercolorAudioProcessor::processBlock(
     updateParameterTargets();
     const auto granularParameters = readGranularParameters();
     spaceReverb.setParameters(readReverbParameters());
+    modulationEffect.setParameters({
+        modulationModeParameter->load(std::memory_order_relaxed) >= 0.5f
+            ? hypercolor::dsp::fx::ModulationMode::flanger
+            : hypercolor::dsp::fx::ModulationMode::chorus,
+        modulationRateParameter->load(std::memory_order_relaxed),
+        modulationDepthParameter->load(std::memory_order_relaxed) / 100.0f,
+        modulationBaseDelayParameter->load(std::memory_order_relaxed),
+        modulationFeedbackParameter->load(std::memory_order_relaxed) / 100.0f,
+        modulationMixParameter->load(std::memory_order_relaxed) / 100.0f,
+        modulationWidthParameter->load(std::memory_order_relaxed) / 100.0f
+    });
 
     const auto numChannels = juce::jmin(
         totalInputChannels,
@@ -1071,6 +1104,14 @@ void HypercolorAudioProcessor::setStateInformation(
             parameterTemplateState,
             hypercolor::ParameterIDs::reverbWidth,
             100.0
+        )
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationMode, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationRate, 0.3)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationDepth, 50.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationBaseDelay, 7.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationFeedback, 0.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationMix, 30.0)
+        || !addDefaultParameterIfMissing(restoredState, parameterTemplateState, hypercolor::ParameterIDs::modulationWidth, 100.0
         ))
     {
         return;
@@ -1178,6 +1219,13 @@ void HypercolorAudioProcessor::setStateInformation(
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbDamping, 0.0f, 100.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbPreDelay, 0.0f, 200.0f)
         || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbWidth, 0.0f, 200.0f)
+        || !hasValidChoiceParameterValue(restoredState, hypercolor::ParameterIDs::modulationMode, 0, 1)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationRate, 0.01f, 10.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationDepth, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationBaseDelay, 0.1f, 20.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationFeedback, -95.0f, 95.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationMix, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::modulationWidth, 0.0f, 200.0f)
         )
     {
         return;

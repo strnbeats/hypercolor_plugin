@@ -361,8 +361,22 @@ void testGranularParameterContracts(TestContext& context)
     expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbDamping, 0.0f, 100.0f, 40.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbPreDelay, 0.0f, 200.0f, 20.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbWidth, 0.0f, 200.0f, 100.0f);
+    context.expect(
+        dynamic_cast<juce::AudioParameterChoice*>(
+            processor.getValueTreeState().getParameter(
+                hypercolor::ParameterIDs::modulationMode
+            )
+        ) != nullptr,
+        "Modulation Mode should be an AudioParameterChoice"
+    );
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationRate, 0.01f, 10.0f, 0.3f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationDepth, 0.0f, 100.0f, 50.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationBaseDelay, 0.1f, 20.0f, 7.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationFeedback, -95.0f, 95.0f, 0.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationMix, 0.0f, 100.0f, 30.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::modulationWidth, 0.0f, 200.0f, 100.0f);
 
-    constexpr std::array<std::string_view, 14> parameterIDs {
+    constexpr std::array<std::string_view, 27> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -376,7 +390,20 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::grainTimingJitter,
         hypercolor::ParameterIDs::grainStereoSpread,
         hypercolor::ParameterIDs::grainPanRandom,
-        hypercolor::ParameterIDs::grainEnvelope
+        hypercolor::ParameterIDs::grainEnvelope,
+        hypercolor::ParameterIDs::reverbMix,
+        hypercolor::ParameterIDs::reverbSize,
+        hypercolor::ParameterIDs::reverbDecay,
+        hypercolor::ParameterIDs::reverbDamping,
+        hypercolor::ParameterIDs::reverbPreDelay,
+        hypercolor::ParameterIDs::reverbWidth,
+        hypercolor::ParameterIDs::modulationMode,
+        hypercolor::ParameterIDs::modulationRate,
+        hypercolor::ParameterIDs::modulationDepth,
+        hypercolor::ParameterIDs::modulationBaseDelay,
+        hypercolor::ParameterIDs::modulationFeedback,
+        hypercolor::ParameterIDs::modulationMix,
+        hypercolor::ParameterIDs::modulationWidth
     };
 
     for (std::size_t first = 0; first < parameterIDs.size(); ++first)
@@ -766,6 +793,7 @@ void testStereoGranularProcessing(TestContext& context)
     HypercolorAudioProcessor processor;
     setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
     setParameter(processor, hypercolor::ParameterIDs::reverbMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::modulationMix, 0.0f);
     processor.prepareToPlay(sampleRate, 17);
 
     juce::AudioBuffer<float> buffer(2, 12000);

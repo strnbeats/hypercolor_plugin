@@ -23,6 +23,7 @@ public:
 
     [[nodiscard]] bool addModule(EffectModule* module) noexcept;
     [[nodiscard]] std::size_t getModuleCount() const noexcept;
+    [[nodiscard]] bool isPrepared() const noexcept;
 
     [[nodiscard]] EffectChainResult process(
         EffectAudioBlock& block

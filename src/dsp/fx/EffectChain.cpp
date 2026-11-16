@@ -53,6 +53,11 @@ std::size_t EffectChain::getModuleCount() const noexcept
     return moduleCount;
 }
 
+bool EffectChain::isPrepared() const noexcept
+{
+    return prepared;
+}
+
 EffectChainResult EffectChain::process(EffectAudioBlock& block) const noexcept
 {
     if (!prepared

@@ -17,6 +17,10 @@ struct EffectAudioBlock
 class EffectModule
 {
 public:
+    // The owner must keep each module alive and at the same address from
+    // addModule() until the chain is no longer used by the audio thread.
+    // EffectModule does not own the object and the chain composition is
+    // immutable after prepare().
     virtual ~EffectModule() = default;
 
     [[nodiscard]] virtual bool prepare(

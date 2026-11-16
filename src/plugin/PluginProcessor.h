@@ -6,6 +6,7 @@
 #include "dsp/granular/GranularEngine.h"
 #include "dsp/fx/EffectChain.h"
 #include "dsp/fx/SpaceReverb.h"
+#include "dsp/fx/ModulationEffect.h"
 
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
@@ -94,10 +95,18 @@ private:
     std::atomic<float>* reverbDampingParameter = nullptr;
     std::atomic<float>* reverbPreDelayParameter = nullptr;
     std::atomic<float>* reverbWidthParameter = nullptr;
+    std::atomic<float>* modulationModeParameter = nullptr;
+    std::atomic<float>* modulationRateParameter = nullptr;
+    std::atomic<float>* modulationDepthParameter = nullptr;
+    std::atomic<float>* modulationBaseDelayParameter = nullptr;
+    std::atomic<float>* modulationFeedbackParameter = nullptr;
+    std::atomic<float>* modulationMixParameter = nullptr;
+    std::atomic<float>* modulationWidthParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
     hypercolor::dsp::fx::SpaceReverb spaceReverb;
+    hypercolor::dsp::fx::ModulationEffect modulationEffect;
     hypercolor::dsp::fx::EffectChain effectChain;
     hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
     std::uint64_t telemetryPublishIntervalSamples = 0;
