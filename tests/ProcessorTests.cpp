@@ -355,6 +355,12 @@ void testGranularParameterContracts(TestContext& context)
         ) != nullptr,
         "Grain Envelope should be an AudioParameterChoice"
     );
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbMix, 0.0f, 100.0f, 30.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbSize, 0.0f, 100.0f, 50.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbDecay, 0.1f, 20.0f, 4.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbDamping, 0.0f, 100.0f, 40.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbPreDelay, 0.0f, 200.0f, 20.0f);
+    expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbWidth, 0.0f, 200.0f, 100.0f);
 
     constexpr std::array<std::string_view, 14> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
@@ -759,6 +765,7 @@ void testStereoGranularProcessing(TestContext& context)
 {
     HypercolorAudioProcessor processor;
     setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    setParameter(processor, hypercolor::ParameterIDs::reverbMix, 0.0f);
     processor.prepareToPlay(sampleRate, 17);
 
     juce::AudioBuffer<float> buffer(2, 12000);

@@ -18,4 +18,10 @@ inline constexpr auto grainTimingJitter = "grainTimingJitter";
 inline constexpr auto grainStereoSpread = "grainStereoSpread";
 inline constexpr auto grainPanRandom = "grainPanRandom";
 inline constexpr auto grainEnvelope = "grainEnvelope";
+inline constexpr auto reverbMix = "reverbMix";
+inline constexpr auto reverbSize = "reverbSize";
+inline constexpr auto reverbDecay = "reverbDecay";
+inline constexpr auto reverbDamping = "reverbDamping";
+inline constexpr auto reverbPreDelay = "reverbPreDelay";
+inline constexpr auto reverbWidth = "reverbWidth";
 }

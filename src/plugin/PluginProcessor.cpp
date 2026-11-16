@@ -214,6 +214,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
           createParameterLayout()
       )
 {
+    (void) effectChain.addModule(&spaceReverb);
     parameters.state.setProperty(
         stateSchemaProperty,
         currentStateSchemaVersion,
@@ -262,6 +263,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     grainEnvelopeParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainEnvelope
     );
+    reverbMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbMix);
+    reverbSizeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbSize);
+    reverbDecayParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbDecay);
+    reverbDampingParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbDamping);
+    reverbPreDelayParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbPreDelay);
+    reverbWidthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbWidth);
 
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
@@ -277,6 +284,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(grainStereoSpreadParameter != nullptr);
     jassert(grainPanRandomParameter != nullptr);
     jassert(grainEnvelopeParameter != nullptr);
+    jassert(reverbMixParameter != nullptr);
+    jassert(reverbSizeParameter != nullptr);
+    jassert(reverbDecayParameter != nullptr);
+    jassert(reverbDampingParameter != nullptr);
+    jassert(reverbPreDelayParameter != nullptr);
+    jassert(reverbWidthParameter != nullptr);
 
     dryWetSmoother.setCurrentAndTargetValue(dryWetDefault / 100.0f);
     outputGainSmoother.setCurrentAndTargetValue(1.0f);
@@ -323,6 +336,13 @@ HypercolorAudioProcessor::createParameterLayout()
         juce::StringArray { "Hann", "Triangle", "Smooth", "Exponential" },
         grainEnvelopeDefaultIndex
     ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbMix, 1 }, "Reverb Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbSize, 1 }, "Reverb Size", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbDecay, 1 }, "Reverb Decay", juce::NormalisableRange<float> { 0.1f, 20.0f, 0.01f }, 4.0f, juce::AudioParameterFloatAttributes().withLabel("s")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbDamping, 1 }, "Reverb Damping", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 40.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbPreDelay, 1 }, "Reverb Pre-Delay", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 20.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::reverbWidth, 1 }, "Reverb Width", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::outputGain, 1 },
@@ -562,6 +582,7 @@ void HypercolorAudioProcessor::processBlock(
 
     updateParameterTargets();
     const auto granularParameters = readGranularParameters();
+    spaceReverb.setParameters(readReverbParameters());
 
     const auto numChannels = juce::jmin(
         totalInputChannels,
@@ -673,6 +694,19 @@ HypercolorAudioProcessor::readGranularParameters() const noexcept
         readGrainEnvelope(
             grainEnvelopeParameter->load(std::memory_order_relaxed)
         )
+    };
+}
+
+hypercolor::dsp::fx::SpaceReverbParameters
+HypercolorAudioProcessor::readReverbParameters() const noexcept
+{
+    return {
+        reverbMixParameter->load(std::memory_order_relaxed) / 100.0f,
+        reverbSizeParameter->load(std::memory_order_relaxed) / 100.0f,
+        reverbDecayParameter->load(std::memory_order_relaxed),
+        reverbDampingParameter->load(std::memory_order_relaxed) / 100.0f,
+        reverbPreDelayParameter->load(std::memory_order_relaxed),
+        reverbWidthParameter->load(std::memory_order_relaxed) / 100.0f
     };
 }
 
@@ -1001,6 +1035,42 @@ void HypercolorAudioProcessor::setStateInformation(
             parameterTemplateState,
             hypercolor::ParameterIDs::grainEnvelope,
             grainEnvelopeDefaultIndex
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::reverbMix,
+            30.0
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::reverbSize,
+            50.0
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::reverbDecay,
+            4.0
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::reverbDamping,
+            40.0
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::reverbPreDelay,
+            20.0
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::reverbWidth,
+            100.0
         ))
     {
         return;
@@ -1101,7 +1171,14 @@ void HypercolorAudioProcessor::setStateInformation(
             hypercolor::ParameterIDs::grainEnvelope,
             grainEnvelopeMinimumIndex,
             grainEnvelopeMaximumIndex
-        ))
+        )
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbMix, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbSize, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbDecay, 0.1f, 20.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbDamping, 0.0f, 100.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbPreDelay, 0.0f, 200.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::reverbWidth, 0.0f, 200.0f)
+        )
     {
         return;
     }

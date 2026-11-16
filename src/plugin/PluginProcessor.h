@@ -5,6 +5,7 @@
 #include "PluginParameters.h"
 #include "dsp/granular/GranularEngine.h"
 #include "dsp/fx/EffectChain.h"
+#include "dsp/fx/SpaceReverb.h"
 
 class HypercolorAudioProcessor final : public juce::AudioProcessor
 {
@@ -59,6 +60,8 @@ private:
     void updateParameterTargets() noexcept;
     [[nodiscard]] hypercolor::dsp::granular::GranularEngineParameters
         readGranularParameters() const noexcept;
+    [[nodiscard]] hypercolor::dsp::fx::SpaceReverbParameters
+        readReverbParameters() const noexcept;
     void processChunk(
         juce::AudioBuffer<float>& buffer,
         int startSample,
@@ -85,9 +88,16 @@ private:
     std::atomic<float>* grainStereoSpreadParameter = nullptr;
     std::atomic<float>* grainPanRandomParameter = nullptr;
     std::atomic<float>* grainEnvelopeParameter = nullptr;
+    std::atomic<float>* reverbMixParameter = nullptr;
+    std::atomic<float>* reverbSizeParameter = nullptr;
+    std::atomic<float>* reverbDecayParameter = nullptr;
+    std::atomic<float>* reverbDampingParameter = nullptr;
+    std::atomic<float>* reverbPreDelayParameter = nullptr;
+    std::atomic<float>* reverbWidthParameter = nullptr;
 
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
+    hypercolor::dsp::fx::SpaceReverb spaceReverb;
     hypercolor::dsp::fx::EffectChain effectChain;
     hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
     std::uint64_t telemetryPublishIntervalSamples = 0;
