@@ -4,6 +4,7 @@
 #include "GranularVisualizer.h"
 #include "HypercolorLookAndFeel.h"
 #include "PluginProcessor.h"
+#include "XYController.h"
 
 #include <array>
 #include <memory>
@@ -33,6 +34,7 @@ private:
     HypercolorAudioProcessor& audioProcessor;
     hypercolor::ui::HypercolorLookAndFeel lookAndFeel;
     GranularVisualizer granularVisualizer;
+    hypercolor::ui::XYController xyController;
 
     juce::Rectangle<int> headerArea;
     juce::Rectangle<int> grainControlPanel;

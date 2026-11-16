@@ -107,6 +107,8 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     const auto text = hypercolor::ui::palette::text();
 
     addAndMakeVisible(granularVisualizer);
+    addAndMakeVisible(xyController);
+    xyController.setCoordinates({ 0.5f, 0.5f }, false);
 
     const auto configureSlider = [
         this,
@@ -448,9 +450,15 @@ void HypercolorAudioProcessorEditor::resized()
     grainControlPanel = content.removeFromLeft(leftWidth);
     content.removeFromLeft(gap);
     inspectorPanel = content;
-    granularVisualizer.setBounds(grainControlPanel.reduced(10, 10).withTrimmedBottom(126));
+    auto grainContent = grainControlPanel.reduced(10, 10);
+    const auto xyHeight = juce::jmin(140, juce::jmax(86, juce::roundToInt(static_cast<float>(grainContent.getHeight()) * 0.36f)));
+    xyController.setBounds(grainContent.removeFromTop(xyHeight));
+    grainContent.removeFromTop(8);
+    const auto visualizerHeight = juce::jmin(126, juce::jmax(52, juce::roundToInt(static_cast<float>(grainContent.getHeight()) * 0.50f)));
+    granularVisualizer.setBounds(grainContent.removeFromTop(visualizerHeight));
+    grainContent.removeFromTop(8);
 
-    auto granularArea = grainControlPanel.reduced(12, 10).withTrimmedTop(granularVisualizer.getBottom() - grainControlPanel.getY() + 8);
+    auto granularArea = grainContent;
     auto masterArea = footer.reduced(12, 8);
 
     granularSectionLabel.setBounds(granularArea.removeFromTop(22));
@@ -484,7 +492,12 @@ void HypercolorAudioProcessorEditor::resized()
         granularLabels[index]->setBounds(cell.removeFromTop(21));
 
         if (granularControls[index] == &positionSlider)
-            positionHintLabel.setBounds(cell.removeFromBottom(17));
+        {
+            if (cell.getHeight() >= 38)
+                positionHintLabel.setBounds(cell.removeFromBottom(17));
+            else
+                positionHintLabel.setBounds({});
+        }
 
         if (granularControls[index] == &reverseButton)
         {
