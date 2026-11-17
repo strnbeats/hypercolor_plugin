@@ -72,6 +72,7 @@ target_sources(HYPERCOLOR
         src/dsp/granular/GrainScheduler.cpp
         src/plugin/GranularVisualizer.cpp
         src/plugin/HypercolorLookAndFeel.cpp
+        src/plugin/DensitySync.cpp
         src/plugin/PremiumRotaryKnob.cpp
         src/plugin/XYController.cpp
         src/plugin/PluginProcessor.cpp
@@ -477,4 +478,18 @@ if(BUILD_TESTING)
         NAME HYPERCOLOR.XYController
         COMMAND HYPERCOLORXYControllerTests
     )
+
+    add_executable(HYPERCOLORDensitySyncTests
+        src/plugin/DensitySync.cpp
+        tests/DensitySyncTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORDensitySyncTests PRIVATE src)
+    target_compile_features(HYPERCOLORDensitySyncTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORDensitySyncTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME HYPERCOLOR.DensitySync COMMAND HYPERCOLORDensitySyncTests)
 endif()

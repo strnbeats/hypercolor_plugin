@@ -65,8 +65,9 @@ private:
         createParameterLayout();
 
     void updateParameterTargets() noexcept;
+    [[nodiscard]] double readHostBpm() noexcept;
     [[nodiscard]] hypercolor::dsp::granular::GranularEngineParameters
-        readGranularParameters() const noexcept;
+        readGranularParameters(double hostBpm) const noexcept;
     [[nodiscard]] hypercolor::dsp::fx::SpaceReverbParameters
         readReverbParameters() const noexcept;
     void processChunk(
@@ -84,6 +85,8 @@ private:
     std::atomic<float>* dryWetParameter = nullptr;
     std::atomic<float>* outputGainParameter = nullptr;
     std::atomic<float>* grainDensityParameter = nullptr;
+    std::atomic<float>* grainDensityModeParameter = nullptr;
+    std::atomic<float>* grainDensityDivisionParameter = nullptr;
     std::atomic<float>* grainSizeParameter = nullptr;
     std::atomic<float>* grainPositionParameter = nullptr;
     std::atomic<float>* grainPitchParameter = nullptr;
@@ -163,6 +166,7 @@ private:
     std::uint64_t telemetryPublishIntervalSamples = 0;
     std::uint64_t telemetrySamplesSincePublication = 0;
     std::uint64_t nextTelemetrySequence = 0;
+    std::atomic<float> lastValidHostBpm { 120.0f };
     bool granularEnginePrepared = false;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         dryWetSmoother;

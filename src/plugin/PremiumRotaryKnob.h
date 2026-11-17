@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 
+#include <functional>
+
 namespace hypercolor::ui
 {
 /**
@@ -23,8 +25,15 @@ public:
                                juce::Colour middle,
                                juce::Colour end);
     void setArcContrastColour(juce::Colour colour);
+    void setTargetPalette(juce::Colour accent,
+                          juce::Colour start,
+                          juce::Colour middle,
+                          juce::Colour end,
+                          juce::Colour contrast);
     void setVisualScale(float scale);
     [[nodiscard]] juce::Colour getAccentColour() const noexcept { return accentColour; }
+
+    std::function<void()> onInteractionFinished;
 
     void paint(juce::Graphics&) override;
     void mouseEnter(const juce::MouseEvent&) override;
@@ -42,6 +51,13 @@ private:
     juce::Colour arcEndColour;
     juce::Colour arcContrastColour;
     juce::Colour secondaryAccentColour;
+    juce::Colour targetAccentColour;
+    juce::Colour targetArcStartColour;
+    juce::Colour targetArcMiddleColour;
+    juce::Colour targetArcEndColour;
+    juce::Colour targetArcContrastColour;
+    juce::Colour targetSecondaryAccentColour;
+    float paletteTransition = 1.0f;
     float interactionEnergy = 0.0f;
     float arcPhase = 0.0f;
     double lastAnimationTimeMs = 0.0;

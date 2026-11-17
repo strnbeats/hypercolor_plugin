@@ -13,7 +13,13 @@ PremiumRotaryKnob::PremiumRotaryKnob()
       arcMiddleColour(palette::cyan()),
       arcEndColour(palette::cyan().brighter(0.44f)),
       arcContrastColour(palette::modulation()),
-      secondaryAccentColour(palette::cyan().brighter(0.18f))
+      secondaryAccentColour(palette::cyan().brighter(0.18f)),
+      targetAccentColour(accentColour),
+      targetArcStartColour(arcStartColour),
+      targetArcMiddleColour(arcMiddleColour),
+      targetArcEndColour(arcEndColour),
+      targetArcContrastColour(arcContrastColour),
+      targetSecondaryAccentColour(secondaryAccentColour)
 {
     setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
     setTextBoxStyle(juce::Slider::TextBoxBelow, false, 96, 25);
@@ -45,6 +51,13 @@ void PremiumRotaryKnob::setAccentColour(juce::Colour colour)
     arcEndColour = colour.brighter(0.44f);
     arcContrastColour = colour.interpolatedWith(juce::Colours::white, 0.42f);
     secondaryAccentColour = colour.brighter(0.18f);
+    targetAccentColour = accentColour;
+    targetArcStartColour = arcStartColour;
+    targetArcMiddleColour = arcMiddleColour;
+    targetArcEndColour = arcEndColour;
+    targetArcContrastColour = arcContrastColour;
+    targetSecondaryAccentColour = secondaryAccentColour;
+    paletteTransition = 1.0f;
     setColour(juce::Slider::rotarySliderFillColourId, accentColour);
     setColour(juce::Slider::thumbColourId, accentColour);
     repaint();
@@ -54,6 +67,9 @@ void PremiumRotaryKnob::setSecondaryAccentColour(juce::Colour colour)
 {
     secondaryAccentColour = colour;
     arcEndColour = colour;
+    targetSecondaryAccentColour = colour;
+    targetArcEndColour = colour;
+    paletteTransition = 1.0f;
     repaint();
 }
 
@@ -65,12 +81,35 @@ void PremiumRotaryKnob::setArcGradientColours(juce::Colour start,
     arcMiddleColour = middle;
     arcEndColour = end;
     secondaryAccentColour = end;
+    targetArcStartColour = start;
+    targetArcMiddleColour = middle;
+    targetArcEndColour = end;
+    targetSecondaryAccentColour = end;
+    paletteTransition = 1.0f;
     repaint();
 }
 
 void PremiumRotaryKnob::setArcContrastColour(juce::Colour colour)
 {
     arcContrastColour = colour;
+    targetArcContrastColour = colour;
+    paletteTransition = 1.0f;
+    repaint();
+}
+
+void PremiumRotaryKnob::setTargetPalette(juce::Colour accent,
+                                         juce::Colour start,
+                                         juce::Colour middle,
+                                         juce::Colour end,
+                                         juce::Colour contrast)
+{
+    targetAccentColour = accent;
+    targetArcStartColour = start;
+    targetArcMiddleColour = middle;
+    targetArcEndColour = end;
+    targetSecondaryAccentColour = end;
+    targetArcContrastColour = contrast;
+    paletteTransition = 0.0f;
     repaint();
 }
 
@@ -115,6 +154,8 @@ void PremiumRotaryKnob::mouseUp(const juce::MouseEvent& event)
     juce::Slider::mouseUp(event);
     interactionEnergy = juce::jmax(interactionEnergy, 0.72f);
     startTimerHz(30);
+    if (onInteractionFinished != nullptr)
+        onInteractionFinished();
     repaint();
 }
 
@@ -139,6 +180,28 @@ void PremiumRotaryKnob::timerCallback()
 
     if (interactionEnergy < 0.008f && targetEnergy <= 0.0f)
         interactionEnergy = 0.0f;
+
+    if (paletteTransition < 1.0f)
+    {
+        // The existing UI clock also owns theme transitions.  The phase of
+        // the two-second arc animation is intentionally untouched here.
+        paletteTransition = juce::jmin(1.0f, paletteTransition + 0.16f);
+        const auto t = paletteTransition * paletteTransition
+            * (3.0f - 2.0f * paletteTransition);
+        const auto blend = [t](juce::Colour current, juce::Colour target)
+        {
+            return current.interpolatedWith(target, t);
+        };
+        accentColour = blend(accentColour, targetAccentColour);
+        arcStartColour = blend(arcStartColour, targetArcStartColour);
+        arcMiddleColour = blend(arcMiddleColour, targetArcMiddleColour);
+        arcEndColour = blend(arcEndColour, targetArcEndColour);
+        arcContrastColour = blend(arcContrastColour, targetArcContrastColour);
+        secondaryAccentColour = blend(secondaryAccentColour,
+                                      targetSecondaryAccentColour);
+        setColour(juce::Slider::rotarySliderFillColourId, accentColour);
+        setColour(juce::Slider::thumbColourId, accentColour);
+    }
 
     // The timer intentionally remains active in Idle: the base colour
     // animation is a continuous part of the instrument surface, while the

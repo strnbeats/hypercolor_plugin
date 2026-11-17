@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "GranularVisualizer.h"
+#include "DensitySync.h"
 
 #include <algorithm>
 #include <array>
@@ -98,6 +99,29 @@ public:
 
 private:
     int failures = 0;
+};
+
+class TestPlayHead final : public juce::AudioPlayHead
+{
+public:
+    void setBpm(double bpm)
+    {
+        position.emplace();
+        position->setBpm(bpm);
+    }
+
+    void clearPosition() noexcept
+    {
+        position.reset();
+    }
+
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        return position;
+    }
+
+private:
+    juce::Optional<PositionInfo> position;
 };
 
 juce::RangedAudioParameter& getParameter(
@@ -245,6 +269,52 @@ void testGranularParameterContracts(TestContext& context)
         120.0f,
         20.0f
     );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainDensityMode,
+        0.0f,
+        1.0f,
+        0.0f
+    );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::grainDensityDivision,
+        0.0f,
+        9.0f,
+        6.0f
+    );
+    const auto* densityMode = dynamic_cast<const juce::AudioParameterChoice*>(
+        processor.getValueTreeState().getParameter(
+            hypercolor::ParameterIDs::grainDensityMode
+        )
+    );
+    const auto* densityDivision = dynamic_cast<const juce::AudioParameterChoice*>(
+        processor.getValueTreeState().getParameter(
+            hypercolor::ParameterIDs::grainDensityDivision
+        )
+    );
+    context.expect(
+        densityMode != nullptr && densityDivision != nullptr,
+        "Density mode and division should be AudioParameterChoice parameters"
+    );
+    if (densityMode != nullptr && densityDivision != nullptr)
+    {
+        const auto modeChoices = densityMode->getAllValueStrings();
+        const auto divisionChoices = densityDivision->getAllValueStrings();
+        context.expect(
+            modeChoices == juce::StringArray { "Free", "BPM Sync" },
+            "Density mode should expose the Free and BPM Sync choices"
+        );
+        context.expect(
+            divisionChoices == juce::StringArray {
+                "1/4", "1/4T", "1/8", "1/8T", "1/16",
+                "1/16T", "1/32", "1/32T", "1/64", "1/64T"
+            },
+            "Density division should expose all ten musical choices in frequency order"
+        );
+    }
     expectParameterContract(
         context,
         processor,
@@ -434,10 +504,12 @@ void testGranularParameterContracts(TestContext& context)
     expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorMix, 0.0f, 100.0f, 100.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorStereoLink, 0.0f, 100.0f, 100.0f);
 
-    constexpr std::array<std::string_view, 66> parameterIDs {
+    constexpr std::array<std::string_view, 68> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
+        hypercolor::ParameterIDs::grainDensityMode,
+        hypercolor::ParameterIDs::grainDensityDivision,
         hypercolor::ParameterIDs::grainSize,
         hypercolor::ParameterIDs::grainPosition,
         hypercolor::ParameterIDs::grainPitch,
@@ -1006,6 +1078,192 @@ void processTelemetryBlock(
     processor.processBlock(buffer, midi);
 }
 
+bool processAndReadAppliedDensity(
+    HypercolorAudioProcessor& processor,
+    double& density
+)
+{
+    processTelemetryBlock(processor, 1600);
+    hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+    bool received = false;
+
+    while (processor.tryPopGranularTelemetry(snapshot))
+    {
+        density = snapshot.appliedParameters.densityGrainsPerSecond;
+        received = true;
+    }
+
+    return received;
+}
+
+void testDensitySyncProcessing(TestContext& context)
+{
+    constexpr std::array expectedMultipliers {
+        1.0, 1.5, 2.0, 3.0, 4.0,
+        6.0, 8.0, 12.0, 16.0, 24.0
+    };
+
+    // No host BPM has been observed yet, so Sync uses the documented 120 BPM
+    // fallback. At 120 BPM, quarter notes produce 2 grains per second.
+    HypercolorAudioProcessor defaultProcessor;
+    setParameter(
+        defaultProcessor,
+        hypercolor::ParameterIDs::grainDensityMode,
+        1.0f
+    );
+    setParameter(
+        defaultProcessor,
+        hypercolor::ParameterIDs::grainDensityDivision,
+        0.0f
+    );
+    defaultProcessor.prepareToPlay(sampleRate, 64);
+    double density = 0.0;
+    context.expect(
+        processAndReadAppliedDensity(defaultProcessor, density),
+        "Sync processing should publish applied density telemetry"
+    );
+    context.expectNear(
+        density,
+        2.0,
+        1.0e-9,
+        "Sync should use 120 BPM before a valid host BPM is received"
+    );
+
+    TestPlayHead playHead;
+    HypercolorAudioProcessor processor;
+    processor.setPlayHead(&playHead);
+    setParameter(processor, hypercolor::ParameterIDs::grainDensityMode, 1.0f);
+    processor.prepareToPlay(sampleRate, 64);
+
+    playHead.setBpm(120.0);
+    for (std::size_t index = 0; index < expectedMultipliers.size(); ++index)
+    {
+        setParameter(
+            processor,
+            hypercolor::ParameterIDs::grainDensityDivision,
+            static_cast<float>(index)
+        );
+        context.expect(
+            processAndReadAppliedDensity(processor, density),
+            "Each Sync division should publish applied density telemetry"
+        );
+        context.expectNear(
+            density,
+            expectedMultipliers[index] * 2.0,
+            1.0e-9,
+            "Sync density should follow the DensitySync multiplier at 120 BPM"
+        );
+        context.expect(
+            std::isfinite(density) && density >= 0.0 && density <= 120.0,
+            "Effective Sync density should remain inside 0-120"
+        );
+    }
+
+    setParameter(
+        processor,
+        hypercolor::ParameterIDs::grainDensityDivision,
+        0.0f
+    );
+    playHead.setBpm(60.0);
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "Sync density should update after a host BPM change"
+    );
+    context.expectNear(
+        density,
+        1.0,
+        1.0e-9,
+        "Sync density should follow a lower host BPM"
+    );
+    playHead.setBpm(240.0);
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "Sync density should react to a subsequent host BPM change"
+    );
+    context.expectNear(
+        density,
+        4.0,
+        1.0e-9,
+        "Sync density should follow a higher host BPM"
+    );
+
+    // Invalid or absent transport data must preserve the last valid BPM.
+    playHead.setBpm(std::numeric_limits<double>::quiet_NaN());
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "Invalid BPM should still leave Sync processing operational"
+    );
+    context.expectNear(
+        density,
+        4.0,
+        1.0e-9,
+        "Invalid BPM should preserve the last valid BPM"
+    );
+    playHead.clearPosition();
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "Missing BPM should still leave Sync processing operational"
+    );
+    context.expectNear(
+        density,
+        4.0,
+        1.0e-9,
+        "Missing BPM should preserve the last valid BPM"
+    );
+
+    // Free mode continues to use the APVTS value and switching back from Sync
+    // does not overwrite that stored value.
+    constexpr float freeDensity = 37.5f;
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, freeDensity);
+    setParameter(processor, hypercolor::ParameterIDs::grainDensityMode, 0.0f);
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "Free processing should publish applied density telemetry"
+    );
+    context.expectNear(
+        density,
+        freeDensity,
+        1.0e-9,
+        "Free mode should pass grainDensity directly to the engine"
+    );
+
+    setParameter(processor, hypercolor::ParameterIDs::grainDensityMode, 1.0f);
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "Free to Sync transition should process without resetting the engine"
+    );
+    setParameter(processor, hypercolor::ParameterIDs::grainDensityMode, 0.0f);
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "Sync to Free transition should process without resetting the engine"
+    );
+    context.expectNear(
+        density,
+        freeDensity,
+        1.0e-9,
+        "Switching back to Free should restore the original grainDensity"
+    );
+
+    // Positive but out-of-contract BPM values are ignored rather than cached.
+    setParameter(processor, hypercolor::ParameterIDs::grainDensityMode, 1.0f);
+    playHead.setBpm(300.0);
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "A valid upper-range BPM should be accepted"
+    );
+    playHead.setBpm(10.0);
+    context.expect(
+        processAndReadAppliedDensity(processor, density),
+        "An out-of-range BPM should fall back safely"
+    );
+    context.expectNear(
+        density,
+        5.0,
+        1.0e-9,
+        "An out-of-range BPM should preserve the previous valid BPM"
+    );
+}
+
 void testTelemetryPublicationAndSequence(TestContext& context)
 {
     HypercolorAudioProcessor processor;
@@ -1257,6 +1515,318 @@ bool removeParameterFromXml(
     }
 
     return false;
+}
+
+bool setParameterValueInXml(
+    juce::XmlElement& xml,
+    const char* parameterID,
+    double value
+)
+{
+    for (auto* child = xml.getFirstChildElement(); child != nullptr;
+         child = child->getNextElement())
+    {
+        if (child->getStringAttribute("id") == parameterID)
+        {
+            child->setAttribute("value", value);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void testDensitySyncStateMigration(TestContext& context)
+{
+    HypercolorAudioProcessor source;
+    setParameter(source, hypercolor::ParameterIDs::grainDensity, 73.5f);
+
+    juce::MemoryBlock sourceState;
+    source.getStateInformation(sourceState);
+    auto sourceXml = juce::AudioProcessor::getXmlFromBinary(
+        sourceState.getData(),
+        static_cast<int>(sourceState.getSize())
+    );
+    context.expect(
+        sourceXml != nullptr,
+        "Density state fixture should be readable"
+    );
+
+    if (sourceXml != nullptr)
+    {
+        sourceXml->setAttribute("schemaVersion", 1);
+        context.expect(
+            removeParameterFromXml(
+                *sourceXml,
+                hypercolor::ParameterIDs::grainDensityMode
+            ),
+            "Legacy fixture should omit Density mode"
+        );
+        context.expect(
+            removeParameterFromXml(
+                *sourceXml,
+                hypercolor::ParameterIDs::grainDensityDivision
+            ),
+            "Legacy fixture should omit Density division"
+        );
+
+        juce::MemoryBlock legacyState;
+        juce::AudioProcessor::copyXmlToBinary(*sourceXml, legacyState);
+
+        HypercolorAudioProcessor restored;
+        setParameter(restored, hypercolor::ParameterIDs::grainDensityMode, 1.0f);
+        setParameter(
+            restored,
+            hypercolor::ParameterIDs::grainDensityDivision,
+            7.0f
+        );
+        setParameter(restored, hypercolor::ParameterIDs::grainDensity, 99.0f);
+        restored.setStateInformation(
+            legacyState.getData(),
+            static_cast<int>(legacyState.getSize())
+        );
+
+        context.expect(
+            getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainDensityMode
+            ) == 0.0f,
+            "Legacy state should default Density mode to Free"
+        );
+        context.expect(
+            getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainDensityDivision
+            ) == 6.0f,
+            "State without Density division should use the new 1/32 default"
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                restored,
+                hypercolor::ParameterIDs::grainDensity
+            ) - 73.5f) < 0.01f,
+            "Legacy state should preserve its existing Grain Density"
+        );
+    }
+
+    constexpr std::array legacyToCurrent { 0, 2, 4, 6, 1, 3, 5, 7 };
+    for (int legacyIndex = 0; legacyIndex < 8; ++legacyIndex)
+    {
+        HypercolorAudioProcessor legacySource;
+        setParameter(
+            legacySource,
+            hypercolor::ParameterIDs::grainDensityMode,
+            1.0f
+        );
+        setParameter(
+            legacySource,
+            hypercolor::ParameterIDs::grainDensityDivision,
+            static_cast<float>(legacyIndex)
+        );
+        juce::MemoryBlock legacyState;
+        legacySource.getStateInformation(legacyState);
+        auto legacyXml = juce::AudioProcessor::getXmlFromBinary(
+            legacyState.getData(),
+            static_cast<int>(legacyState.getSize())
+        );
+        context.expect(
+            legacyXml != nullptr,
+            "Legacy ordered state should be readable"
+        );
+        if (legacyXml == nullptr)
+            continue;
+
+        legacyXml->setAttribute("schemaVersion", 1);
+        context.expect(
+            setParameterValueInXml(
+                *legacyXml,
+                hypercolor::ParameterIDs::grainDensityDivision,
+                legacyIndex
+            ),
+            "Legacy ordered state should contain Density division"
+        );
+        juce::MemoryBlock legacyOrderedState;
+        juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacyOrderedState);
+
+        HypercolorAudioProcessor migrated;
+        migrated.setStateInformation(
+            legacyOrderedState.getData(),
+            static_cast<int>(legacyOrderedState.getSize())
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                migrated,
+                hypercolor::ParameterIDs::grainDensityDivision
+            ) - static_cast<float>(legacyToCurrent[static_cast<std::size_t>(legacyIndex)]))
+                < 0.01f,
+            "Each legacy division index should migrate by musical meaning"
+        );
+
+        juce::MemoryBlock migratedState;
+        migrated.getStateInformation(migratedState);
+        auto migratedXml = juce::AudioProcessor::getXmlFromBinary(
+            migratedState.getData(),
+            static_cast<int>(migratedState.getSize())
+        );
+        context.expect(
+            migratedXml != nullptr
+                && migratedXml->getIntAttribute("schemaVersion") == 2,
+            "Migrated state should be saved with the current schema version"
+        );
+
+        HypercolorAudioProcessor reloaded;
+        reloaded.setStateInformation(
+            migratedState.getData(),
+            static_cast<int>(migratedState.getSize())
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                reloaded,
+                hypercolor::ParameterIDs::grainDensityDivision
+            ) - static_cast<float>(legacyToCurrent[static_cast<std::size_t>(legacyIndex)]))
+                < 0.01f,
+            "A migrated state should not be remapped a second time"
+        );
+    }
+
+    for (int division = 0; division < 10; ++division)
+    {
+        HypercolorAudioProcessor divisionSource;
+        setParameter(
+            divisionSource,
+            hypercolor::ParameterIDs::grainDensityMode,
+            1.0f
+        );
+        setParameter(
+            divisionSource,
+            hypercolor::ParameterIDs::grainDensityDivision,
+            static_cast<float>(division)
+        );
+        setParameter(
+            divisionSource,
+            hypercolor::ParameterIDs::grainDensity,
+            42.5f
+        );
+
+        juce::MemoryBlock divisionState;
+        divisionSource.getStateInformation(divisionState);
+        HypercolorAudioProcessor divisionRestored;
+        divisionRestored.setStateInformation(
+            divisionState.getData(),
+            static_cast<int>(divisionState.getSize())
+        );
+
+        context.expect(
+            getParameterValue(
+                divisionRestored,
+                hypercolor::ParameterIDs::grainDensityMode
+            ) == 1.0f,
+            "BPM Sync mode should survive state round-trip"
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                divisionRestored,
+                hypercolor::ParameterIDs::grainDensityDivision
+            ) - static_cast<float>(division)) < 0.01f,
+            "Each Density division should survive state round-trip"
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                divisionRestored,
+                hypercolor::ParameterIDs::grainDensity
+            ) - 42.5f) < 0.01f,
+            "Grain Density should remain independent of its sync choices"
+        );
+    }
+
+    HypercolorAudioProcessor validSource;
+    setParameter(validSource, hypercolor::ParameterIDs::grainDensityMode, 1.0f);
+    setParameter(validSource, hypercolor::ParameterIDs::grainDensityDivision, 5.0f);
+    setParameter(validSource, hypercolor::ParameterIDs::grainDensity, 64.0f);
+    juce::MemoryBlock validState;
+    validSource.getStateInformation(validState);
+    auto validXml = juce::AudioProcessor::getXmlFromBinary(
+        validState.getData(),
+        static_cast<int>(validState.getSize())
+    );
+
+    context.expect(
+        validXml != nullptr,
+        "Valid Density state should be readable for invalid-value tests"
+    );
+
+    if (validXml != nullptr)
+    {
+        for (const auto [parameterID, invalidValue] : {
+                 std::pair { hypercolor::ParameterIDs::grainDensityMode, 2.0 },
+                 std::pair { hypercolor::ParameterIDs::grainDensityDivision, 10.0 }
+             })
+        {
+            auto invalidTree = juce::ValueTree::fromXml(*validXml);
+            auto invalidChild = invalidTree.getChildWithProperty(
+                "id",
+                parameterID
+            );
+            context.expect(
+                invalidChild.isValid(),
+                "Choice parameter should exist in the valid state fixture"
+            );
+            invalidChild.setProperty("value", invalidValue, nullptr);
+            const auto invalidXml = invalidTree.createXml();
+            context.expect(
+                invalidXml != nullptr,
+                "Invalid choice state should remain serializable"
+            );
+
+            if (invalidXml == nullptr)
+                continue;
+
+            juce::MemoryBlock invalidState;
+            juce::AudioProcessor::copyXmlToBinary(*invalidXml, invalidState);
+            HypercolorAudioProcessor unchanged;
+            setParameter(
+                unchanged,
+                hypercolor::ParameterIDs::grainDensityMode,
+                1.0f
+            );
+            setParameter(
+                unchanged,
+                hypercolor::ParameterIDs::grainDensityDivision,
+                4.0f
+            );
+            setParameter(
+                unchanged,
+                hypercolor::ParameterIDs::grainDensity,
+                88.0f
+            );
+            unchanged.setStateInformation(
+                invalidState.getData(),
+                static_cast<int>(invalidState.getSize())
+            );
+
+            context.expect(
+                getParameterValue(
+                    unchanged,
+                    hypercolor::ParameterIDs::grainDensityMode
+                ) == 1.0f,
+                "Invalid choice state should not mutate Density mode"
+            );
+            context.expect(
+                getParameterValue(
+                    unchanged,
+                    hypercolor::ParameterIDs::grainDensityDivision
+                ) == 4.0f,
+                "Invalid choice state should not mutate Density division"
+            );
+            context.expect(
+                getParameterValue(
+                    unchanged,
+                    hypercolor::ParameterIDs::grainDensity
+                ) == 88.0f,
+                "Invalid choice state should not mutate Grain Density"
+            );
+        }
+    }
 }
 
 void renderVisualizerForTest(GranularVisualizer& visualizer);
@@ -1734,6 +2304,8 @@ void testStateRoundTrip(TestContext& context)
     setParameter(source, hypercolor::ParameterIDs::dryWet, 37.5f);
     setParameter(source, hypercolor::ParameterIDs::outputGain, -7.2f);
     setParameter(source, hypercolor::ParameterIDs::grainDensity, 73.5f);
+    setParameter(source, hypercolor::ParameterIDs::grainDensityMode, 1.0f);
+    setParameter(source, hypercolor::ParameterIDs::grainDensityDivision, 6.0f);
     setParameter(source, hypercolor::ParameterIDs::grainSize, 321.5f);
     setParameter(source, hypercolor::ParameterIDs::grainPosition, 0.731f);
     setParameter(source, hypercolor::ParameterIDs::grainPitch, -7.25f);
@@ -1773,6 +2345,18 @@ void testStateRoundTrip(TestContext& context)
             hypercolor::ParameterIDs::grainDensity
         ) - 73.5f) < 0.01f,
         "Grain Density should survive state round-trip"
+    );
+    context.expect(
+        getParameterValue(restored, hypercolor::ParameterIDs::grainDensityMode)
+            == 1.0f,
+        "Grain Density mode should survive state round-trip"
+    );
+    context.expect(
+        getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::grainDensityDivision
+        ) == 6.0f,
+        "Grain Density division should survive state round-trip"
     );
     context.expect(
         std::abs(getParameterValue(
@@ -1856,6 +2440,8 @@ void testStateRoundTrip(TestContext& context)
     {
         for (const auto* parameterID : {
                  hypercolor::ParameterIDs::grainDensity,
+                 hypercolor::ParameterIDs::grainDensityMode,
+                 hypercolor::ParameterIDs::grainDensityDivision,
                  hypercolor::ParameterIDs::grainSize,
                  hypercolor::ParameterIDs::grainPosition,
                  hypercolor::ParameterIDs::grainPitch,
@@ -2027,7 +2613,7 @@ void testStateRoundTrip(TestContext& context)
 
     if (futureXml != nullptr)
     {
-        futureXml->setAttribute("schemaVersion", 2);
+        futureXml->setAttribute("schemaVersion", 3);
         juce::MemoryBlock futureState;
         juce::AudioProcessor::copyXmlToBinary(*futureXml, futureState);
 
@@ -2062,11 +2648,13 @@ int main()
     testFallbackResetAndReprepare(context);
     testNonFiniteInputAndRealtimeAllocations(context);
     testBlockRateGranularAutomation(context);
+    testDensitySyncProcessing(context);
     testTelemetryPublicationAndSequence(context);
     testTelemetryPeriodicityAcrossRatesAndBlocks(context);
     testTelemetryQueueOverflowAndLifecycle(context);
     testTelemetryConsumerDoesNotChangeAudio(context);
     testStateRoundTrip(context);
+    testDensitySyncStateMigration(context);
     testEditorControlsStateAndResize(context);
     testGranularVisualizerTelemetry(context);
     testGranularVisualizerGrainsAndLifecycle(context);

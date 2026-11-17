@@ -441,11 +441,6 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
           hypercolor::ParameterIDs::outputGain,
           outputGainSlider
       ),
-      densityAttachment(
-          processorToEdit.getValueTreeState(),
-          hypercolor::ParameterIDs::grainDensity,
-          densitySlider
-      ),
       sizeAttachment(
           processorToEdit.getValueTreeState(),
           hypercolor::ParameterIDs::grainSize,
@@ -583,6 +578,37 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     positionSlider.setComponentID(hypercolor::ParameterIDs::grainPosition);
     pitchSlider.setComponentID(hypercolor::ParameterIDs::grainPitch);
     reverseButton.setComponentID(hypercolor::ParameterIDs::grainReverse);
+    densityModeSelector.setComponentID(hypercolor::ParameterIDs::grainDensityMode);
+    densityModeSelector.addItem("FREE", 1);
+    densityModeSelector.addItem("SYNC", 2);
+    densityModeSelector.setTextWhenNothingSelected("FREE");
+    densityModeSelector.setJustificationType(juce::Justification::centred);
+    densityModeSelector.setColour(
+        juce::ComboBox::backgroundColourId,
+        hypercolor::ui::palette::background().brighter(0.04f)
+    );
+    densityModeSelector.setColour(
+        juce::ComboBox::outlineColourId,
+        hypercolor::ui::palette::border()
+    );
+    densityModeSelector.setColour(
+        juce::ComboBox::textColourId,
+        hypercolor::ui::palette::text()
+    );
+    densityModeSelector.setColour(
+        juce::ComboBox::arrowColourId,
+        cyan
+    );
+    densityModeSelector.setColour(
+        juce::ComboBox::focusedOutlineColourId,
+        cyan
+    );
+    addAndMakeVisible(densityModeSelector);
+
+    densitySlider.onInteractionFinished = [this]
+    {
+        synchronizeDensityMode();
+    };
 
     dryWetLabel.setText("DRY / WET", juce::dontSendNotification);
     outputGainLabel.setText("OUTPUT GAIN", juce::dontSendNotification);
@@ -606,18 +632,6 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
         label->setFont(juce::FontOptions(11.0f).withStyle("Bold"));
         addAndMakeVisible(*label);
     }
-
-    positionHintLabel.setText(
-        "0% FRESH  /  100% OLD",
-        juce::dontSendNotification
-    );
-    positionHintLabel.setJustificationType(juce::Justification::centred);
-    positionHintLabel.setColour(
-        juce::Label::textColourId,
-        hypercolor::ui::palette::mutedText()
-    );
-    positionHintLabel.setFont(juce::FontOptions(9.0f).withStyle("Bold"));
-    addAndMakeVisible(positionHintLabel);
 
     granularSectionLabel.setText(
         "01 / GRAIN CONTROL",
@@ -710,6 +724,23 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     granularNavButton.setToggleState(true, juce::dontSendNotification);
     moduleTitleLabel.setText("GRANULAR CORE", juce::dontSendNotification);
     moduleSubtitleLabel.setText("XY CHARACTER FIELD  //  REAL-TIME HISTORY  //  64 VOICES", juce::dontSendNotification);
+
+    auto& state = audioProcessor.getValueTreeState();
+    densityModeAttachment = std::make_unique<ComboBoxAttachment>(
+        state,
+        hypercolor::ParameterIDs::grainDensityMode,
+        densityModeSelector
+    );
+    densityModeSelector.onChange = [this]
+    {
+        triggerAsyncUpdate();
+    };
+    state.addParameterListener(
+        hypercolor::ParameterIDs::grainDensityMode,
+        this
+    );
+    appliedDensityMode = readDensityMode();
+    rebindDensityControl(appliedDensityMode);
     rebuildInspector();
 
     setResizable(true, true);
@@ -719,7 +750,182 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
 
 HypercolorAudioProcessorEditor::~HypercolorAudioProcessorEditor()
 {
+    audioProcessor.getValueTreeState().removeParameterListener(
+        hypercolor::ParameterIDs::grainDensityMode,
+        this
+    );
+    cancelPendingUpdate();
+    densitySlider.onInteractionFinished = nullptr;
+    densityModeSelector.onChange = nullptr;
+    densityAttachment.reset();
+    densityModeAttachment.reset();
     setLookAndFeel(nullptr);
+}
+
+HypercolorAudioProcessorEditor::DensityMode
+HypercolorAudioProcessorEditor::readDensityMode() const noexcept
+{
+    const auto* parameter = dynamic_cast<const juce::AudioParameterChoice*>(
+        audioProcessor.getValueTreeState().getParameter(
+            hypercolor::ParameterIDs::grainDensityMode
+        )
+    );
+    if (parameter == nullptr)
+        return DensityMode::free;
+
+    return parameter->getIndex() >= 1
+        ? DensityMode::bpmSync
+        : DensityMode::free;
+}
+
+void HypercolorAudioProcessorEditor::parameterChanged(
+    const juce::String& parameterID,
+    float newValue
+)
+{
+    if (parameterID != hypercolor::ParameterIDs::grainDensityMode)
+        return;
+
+    pendingDensityMode.store(
+        newValue >= 0.5f ? 1 : 0,
+        std::memory_order_release
+    );
+    triggerAsyncUpdate();
+}
+
+void HypercolorAudioProcessorEditor::handleAsyncUpdate()
+{
+    synchronizeDensityMode();
+}
+
+void HypercolorAudioProcessorEditor::synchronizeDensityMode()
+{
+    const auto requestedMode = readDensityMode();
+    pendingDensityMode.store(
+        requestedMode == DensityMode::bpmSync ? 1 : 0,
+        std::memory_order_release
+    );
+
+    if (densitySlider.isMouseButtonDown())
+    {
+        densityRebindDeferred = true;
+        return;
+    }
+
+    if (!densityRebindDeferred
+        && densityAttachment != nullptr
+        && requestedMode == appliedDensityMode)
+        return;
+
+    rebindDensityControl(requestedMode);
+}
+
+void HypercolorAudioProcessorEditor::rebindDensityControl(DensityMode mode)
+{
+    if (densitySlider.isMouseButtonDown())
+    {
+        densityRebindDeferred = true;
+        pendingDensityMode.store(
+            mode == DensityMode::bpmSync ? 1 : 0,
+            std::memory_order_release
+        );
+        return;
+    }
+
+    densityRebindDeferred = false;
+
+    // The old attachment must be gone before changing the slider range or
+    // formatter.  This prevents a stale Free value from being written into
+    // the choice parameter during a mode transition.
+    densityAttachment.reset();
+    densitySlider.setValue(0.0, juce::dontSendNotification);
+    densitySlider.setTextValueSuffix({});
+
+    auto& state = audioProcessor.getValueTreeState();
+    const auto* divisionParameter = dynamic_cast<const juce::AudioParameterChoice*>(
+        state.getParameter(hypercolor::ParameterIDs::grainDensityDivision)
+    );
+
+    const auto cyan = hypercolor::ui::palette::cyan();
+    if (mode == DensityMode::free)
+    {
+        densitySlider.setRange(0.0, 120.0, 0.1);
+        densitySlider.setNumDecimalPlacesToDisplay(1);
+        densitySlider.textFromValueFunction = [](double value)
+        {
+            return juce::String(value, 1) + " gr/s";
+        };
+        densitySlider.valueFromTextFunction = [](const juce::String& text)
+        {
+            return text.getDoubleValue();
+        };
+        densitySlider.setTargetPalette(
+            cyan,
+            juce::Colour(0xff005967u),
+            juce::Colour(0xff00e5ffu),
+            juce::Colour(0xffd7fdffu),
+            juce::Colour(0xff398bffu)
+        );
+
+        densityAttachment = std::make_unique<SliderAttachment>(
+            state,
+            hypercolor::ParameterIDs::grainDensity,
+            densitySlider
+        );
+    }
+    else
+    {
+        // The parameter is created by the processor and is the single source
+        // of truth for the musical labels.  Keep a defensive empty array for
+        // construction-time failures rather than duplicating the APVTS list
+        // in the editor.
+        const auto divisionLabels = divisionParameter != nullptr
+            ? divisionParameter->getAllValueStrings()
+            : juce::StringArray {};
+        densitySlider.setRange(0.0, 9.0, 1.0);
+        densitySlider.setNumDecimalPlacesToDisplay(0);
+        densitySlider.textFromValueFunction = [divisionLabels](double value)
+        {
+            if (divisionLabels.isEmpty())
+                return juce::String("SYNC");
+
+            const auto index = juce::jlimit(
+                0,
+                divisionLabels.size() - 1,
+                juce::roundToInt(value)
+            );
+            return divisionLabels[index];
+        };
+        densitySlider.valueFromTextFunction = [divisionLabels](
+            const juce::String& text
+        )
+        {
+            for (int index = 0; index < divisionLabels.size(); ++index)
+                if (divisionLabels[index].equalsIgnoreCase(text.trim()))
+                    return static_cast<double>(index);
+            return static_cast<double>(juce::jlimit(
+                0,
+                divisionLabels.size() - 1,
+                text.getIntValue()
+            ));
+        };
+        densitySlider.setTargetPalette(
+            juce::Colour(0xffffb84au),
+            juce::Colour(0xff6b3510u),
+            juce::Colour(0xffffb84au),
+            juce::Colour(0xfffff0b6u),
+            juce::Colour(0xffa78bfau)
+        );
+
+        densityAttachment = std::make_unique<SliderAttachment>(
+            state,
+            hypercolor::ParameterIDs::grainDensityDivision,
+            densitySlider
+        );
+    }
+
+    appliedDensityMode = mode;
+    densitySlider.repaint();
 }
 
 void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
@@ -1104,6 +1310,7 @@ void HypercolorAudioProcessorEditor::resized()
              static_cast<juce::Component*>(&granularVisualizer),
              static_cast<juce::Component*>(&granularSectionLabel),
              static_cast<juce::Component*>(&densitySlider),
+             static_cast<juce::Component*>(&densityModeSelector),
              static_cast<juce::Component*>(&sizeSlider),
              static_cast<juce::Component*>(&positionSlider),
              static_cast<juce::Component*>(&pitchSlider),
@@ -1112,8 +1319,7 @@ void HypercolorAudioProcessorEditor::resized()
              static_cast<juce::Component*>(&sizeLabel),
              static_cast<juce::Component*>(&positionLabel),
              static_cast<juce::Component*>(&pitchLabel),
-             static_cast<juce::Component*>(&reverseLabel),
-             static_cast<juce::Component*>(&positionHintLabel) })
+             static_cast<juce::Component*>(&reverseLabel) })
         component->setVisible(granularMode);
 
     if (granularMode)
@@ -1179,7 +1385,6 @@ void HypercolorAudioProcessorEditor::resized()
 
         const auto cellWidth = juce::jmax(1, primaryArea.getWidth() / 3);
         const auto cellHeight = juce::jmax(1, primaryArea.getHeight() / 2);
-        auto positionHintPlaced = false;
         for (std::size_t index = 0; index < granularControls.size(); ++index)
         {
             const auto row = static_cast<int>(index / 3);
@@ -1196,14 +1401,18 @@ void HypercolorAudioProcessorEditor::resized()
             ).reduced(3, 1);
 
             granularLabels[index]->setBounds(cell.removeFromTop(18));
-            // Keep the parameter caption visually independent from the
-            // rotary body.  This gap is part of the cell geometry rather
-            // than a paint-order trick, so it remains correct on resize.
-            cell.removeFromTop(10);
-            auto hint = juce::Rectangle<int> {};
-            if (granularControls[index] == &positionSlider && cell.getHeight() > 72)
-                hint = cell.removeFromBottom(14);
-
+            if (index == 0)
+            {
+                densityModeSelector.setBounds(cell.removeFromTop(18).reduced(1, 0));
+                cell.removeFromTop(5);
+            }
+            else
+            {
+                // Keep the parameter caption visually independent from the
+                // rotary body.  This gap is part of the cell geometry rather
+                // than a paint-order trick, so it remains correct on resize.
+                cell.removeFromTop(10);
+            }
             if (granularControls[index] == &reverseButton)
             {
                 granularControls[index]->setBounds(cell.withSizeKeepingCentre(
@@ -1216,15 +1425,7 @@ void HypercolorAudioProcessorEditor::resized()
                 granularControls[index]->setBounds(cell.reduced(1, 0));
             }
 
-            if (!hint.isEmpty())
-            {
-                positionHintLabel.setBounds(hint);
-                positionHintPlaced = true;
-            }
         }
-
-        if (!positionHintPlaced)
-            positionHintLabel.setBounds({});
     }
     else
     {

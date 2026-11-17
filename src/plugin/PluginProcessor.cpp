@@ -1,7 +1,9 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "DensitySync.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -9,9 +11,14 @@
 
 namespace
 {
+static_assert(
+    std::atomic<float>::is_always_lock_free,
+    "Host BPM cache must remain lock-free on the audio thread"
+);
+
 constexpr auto stateTreeType = "HYPERCOLOR_STATE";
 constexpr auto stateSchemaProperty = "schemaVersion";
-constexpr int currentStateSchemaVersion = 1;
+constexpr int currentStateSchemaVersion = 2;
 // Large enough to leave room for future bounded preset/state data while still
 // rejecting clearly unreasonable input before parsing it as XML.
 constexpr int maxStateSizeBytes = 64 * 1024 * 1024;
@@ -41,6 +48,18 @@ constexpr int granularCharacterDefaultIndex = static_cast<int>(
 constexpr int grainEnvelopeMinimumIndex = 0;
 constexpr int grainEnvelopeMaximumIndex = 3;
 constexpr int grainEnvelopeDefaultIndex = 0;
+constexpr int grainDensityModeMinimumIndex = 0;
+constexpr int grainDensityModeMaximumIndex = 1;
+constexpr int grainDensityModeDefaultIndex = 0;
+constexpr int grainDensityDivisionMinimumIndex = static_cast<int>(
+    hypercolor::density::Division::quarter
+);
+constexpr int grainDensityDivisionMaximumIndex = static_cast<int>(
+    hypercolor::density::Division::sixtyFourthTriplet
+);
+constexpr int grainDensityDivisionDefaultIndex = static_cast<int>(
+    hypercolor::density::Division::thirtySecond
+);
 
 constexpr hypercolor::dsp::granular::GranularEngineParameters
     defaultGranularParameters;
@@ -191,6 +210,43 @@ bool addDefaultParameterIfMissing(
     state.addChild(defaultChild, -1, nullptr);
     return true;
 }
+
+bool migrateLegacyDensityDivisionOrder(
+    juce::ValueTree& state,
+    int schemaVersion
+)
+{
+    // Schema 0/1 states used the original order:
+    // 1/4, 1/8, 1/16, 1/32, 1/4T, 1/8T, 1/16T, 1/32T.
+    // A present parameter is therefore migrated by semantic index.  Missing
+    // parameters are deliberately left untouched so the normal defaulting
+    // path can provide the new 1/32 default at index 6.
+    if (schemaVersion >= 2)
+        return true;
+
+    auto divisionState = state.getChildWithProperty(
+        "id",
+        hypercolor::ParameterIDs::grainDensityDivision
+    );
+    if (!divisionState.isValid())
+        return true;
+
+    double rawValue = 0.0;
+    if (!readFiniteNumber(divisionState.getProperty("value"), rawValue)
+        || rawValue != std::floor(rawValue)
+        || rawValue < 0.0
+        || rawValue > 7.0)
+        return false;
+
+    constexpr std::array legacyToCurrent { 0, 2, 4, 6, 1, 3, 5, 7 };
+    const auto legacyIndex = static_cast<std::size_t>(rawValue);
+    divisionState.setProperty(
+        "value",
+        legacyToCurrent[legacyIndex],
+        nullptr
+    );
+    return true;
+}
 }
 
 HypercolorAudioProcessor::HypercolorAudioProcessor()
@@ -236,6 +292,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     );
     grainDensityParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainDensity
+    );
+    grainDensityModeParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainDensityMode
+    );
+    grainDensityDivisionParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::grainDensityDivision
     );
     grainSizeParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainSize
@@ -326,6 +388,8 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(dryWetParameter != nullptr);
     jassert(outputGainParameter != nullptr);
     jassert(grainDensityParameter != nullptr);
+    jassert(grainDensityModeParameter != nullptr);
+    jassert(grainDensityDivisionParameter != nullptr);
     jassert(grainSizeParameter != nullptr);
     jassert(grainPositionParameter != nullptr);
     jassert(grainPitchParameter != nullptr);
@@ -515,6 +579,23 @@ HypercolorAudioProcessor::createParameterLayout()
         },
         static_cast<float>(defaultGranularParameters.densityGrainsPerSecond),
         juce::AudioParameterFloatAttributes().withLabel("grains/s")
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainDensityMode, 1 },
+        "Grain Density Mode",
+        juce::StringArray { "Free", "BPM Sync" },
+        grainDensityModeDefaultIndex
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { hypercolor::ParameterIDs::grainDensityDivision, 1 },
+        "Grain Density Division",
+        juce::StringArray {
+            "1/4", "1/4T", "1/8", "1/8T", "1/16",
+            "1/16T", "1/32", "1/32T", "1/64", "1/64T"
+        },
+        grainDensityDivisionDefaultIndex
     ));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
@@ -726,7 +807,11 @@ void HypercolorAudioProcessor::processBlock(
     }
 
     updateParameterTargets();
-    const auto granularParameters = readGranularParameters();
+    const auto bpmForBlock = readHostBpm();
+    const auto densityBpm = static_cast<double>(lastValidHostBpm.load(
+        std::memory_order_acquire
+    ));
+    const auto granularParameters = readGranularParameters(densityBpm);
     spaceReverb.setParameters(readReverbParameters());
     modulationEffect.setParameters({
         modulationModeParameter->load(std::memory_order_relaxed) >= 0.5f
@@ -750,13 +835,6 @@ void HypercolorAudioProcessor::processBlock(
         driveMixParameter->load(std::memory_order_relaxed) / 100.0f,
         driveOutputParameter->load(std::memory_order_relaxed)
     });
-    double bpm = 120.0;
-    if (const auto* playHead = getPlayHead())
-    {
-        if (const auto position = playHead->getPosition())
-            if (position->getBpm().hasValue())
-                bpm = *position->getBpm();
-    }
     delayEffect.setParameters({
         delayModeParameter->load(std::memory_order_relaxed) >= 0.5f ? hypercolor::dsp::fx::DelayMode::pingPong : hypercolor::dsp::fx::DelayMode::stereo,
         delaySyncParameter->load(std::memory_order_relaxed) >= 0.5f,
@@ -767,7 +845,7 @@ void HypercolorAudioProcessor::processBlock(
         delayHighCutParameter->load(std::memory_order_relaxed),
         delayMixParameter->load(std::memory_order_relaxed) / 100.0f,
         delayWidthParameter->load(std::memory_order_relaxed) / 100.0f,
-        static_cast<float>(bpm)
+        static_cast<float>(bpmForBlock)
     });
     tapeEffect.setParameters({
         tapeDriveParameter->load(std::memory_order_relaxed) / 100.0f,
@@ -875,13 +953,82 @@ void HypercolorAudioProcessor::updateParameterTargets() noexcept
     );
 }
 
-hypercolor::dsp::granular::GranularEngineParameters
-HypercolorAudioProcessor::readGranularParameters() const noexcept
+double HypercolorAudioProcessor::readHostBpm() noexcept
 {
+    // Preserve the existing FX behavior: effects use the current block BPM,
+    // falling back to 120 when this block has no valid transport value.
+    auto bpmForBlock = 120.0;
+
+    if (const auto* playHead = getPlayHead())
+    {
+        if (const auto position = playHead->getPosition())
+        {
+            if (const auto hostBpm = position->getBpm())
+            {
+                const auto candidate = *hostBpm;
+                if (std::isfinite(candidate)
+                    && candidate >= hypercolor::density::minimumBpm
+                    && candidate <= hypercolor::density::maximumBpm)
+                {
+                    bpmForBlock = candidate;
+                    lastValidHostBpm.store(
+                        static_cast<float>(candidate),
+                        std::memory_order_release
+                    );
+                }
+            }
+        }
+    }
+
+    return bpmForBlock;
+}
+
+hypercolor::dsp::granular::GranularEngineParameters
+HypercolorAudioProcessor::readGranularParameters(double hostBpm) const noexcept
+{
+    const auto rawMode = grainDensityModeParameter->load(
+        std::memory_order_relaxed
+    );
+    const auto mode = std::isfinite(rawMode)
+        ? std::clamp(rawMode, 0.0f, 1.0f)
+        : 0.0f;
+    const auto freeDensity = static_cast<double>(
+        grainDensityParameter->load(std::memory_order_relaxed)
+    );
+    auto effectiveDensity = freeDensity;
+
+    if (mode >= 0.5f)
+    {
+        const auto rawDivision = grainDensityDivisionParameter->load(
+            std::memory_order_relaxed
+        );
+        const auto safeDivision = std::isfinite(rawDivision)
+            ? rawDivision
+            : static_cast<float>(grainDensityDivisionDefaultIndex);
+        const auto divisionIndex = static_cast<int>(std::lround(
+            std::clamp(
+                safeDivision,
+                0.0f,
+                static_cast<float>(grainDensityDivisionMaximumIndex)
+            )
+        ));
+        effectiveDensity = hypercolor::density::bpmToGrainsPerSecond(
+            hostBpm,
+            static_cast<hypercolor::density::Division>(divisionIndex)
+        );
+    }
+
+    if (!std::isfinite(effectiveDensity))
+        effectiveDensity = hypercolor::density::minimumGrainsPerSecond;
+
+    effectiveDensity = std::clamp(
+        effectiveDensity,
+        hypercolor::density::minimumGrainsPerSecond,
+        hypercolor::density::maximumGrainsPerSecond
+    );
+
     return {
-        static_cast<double>(
-            grainDensityParameter->load(std::memory_order_relaxed)
-        ),
+        effectiveDensity,
         static_cast<double>(
             grainSizeParameter->load(std::memory_order_relaxed)
         ),
@@ -1181,6 +1328,9 @@ void HypercolorAudioProcessor::setStateInformation(
         schemaVersion = static_cast<int>(numericVersion);
     }
 
+    if (!migrateLegacyDensityDivisionOrder(restoredState, schemaVersion))
+        return;
+
     const auto parameterTemplateState = parameters.copyState();
 
     if (!addDefaultParameterIfMissing(
@@ -1188,6 +1338,18 @@ void HypercolorAudioProcessor::setStateInformation(
             parameterTemplateState,
             hypercolor::ParameterIDs::grainDensity,
             defaultGranularParameters.densityGrainsPerSecond
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainDensityMode,
+            grainDensityModeDefaultIndex
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
+            hypercolor::ParameterIDs::grainDensityDivision,
+            grainDensityDivisionDefaultIndex
         )
         || !addDefaultParameterIfMissing(
             restoredState,
@@ -1372,6 +1534,18 @@ void HypercolorAudioProcessor::setStateInformation(
                 hypercolor::dsp::granular::GrainScheduler::maximumDensityGrainsPerSecond
             )
         )
+        || !hasValidChoiceParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainDensityMode,
+            grainDensityModeMinimumIndex,
+            grainDensityModeMaximumIndex
+        )
+        || !hasValidChoiceParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::grainDensityDivision,
+            grainDensityDivisionMinimumIndex,
+            grainDensityDivisionMaximumIndex
+        )
         || !hasValidParameterValue(
             restoredState,
             hypercolor::ParameterIDs::grainSize,
@@ -1501,6 +1675,13 @@ void HypercolorAudioProcessor::setStateInformation(
         return;
     }
 
+    // Mark the in-memory tree as current after validation.  A subsequent
+    // save cannot be mistaken for the legacy ordering and migrated again.
+    restoredState.setProperty(
+        stateSchemaProperty,
+        currentStateSchemaVersion,
+        nullptr
+    );
     parameters.replaceState(restoredState);
 }
 

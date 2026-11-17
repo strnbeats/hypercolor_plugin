@@ -8,10 +8,13 @@
 #include "XYController.h"
 
 #include <array>
+#include <atomic>
 #include <memory>
 
 class HypercolorAudioProcessorEditor final
-    : public juce::AudioProcessorEditor
+    : public juce::AudioProcessorEditor,
+      private juce::AudioProcessorValueTreeState::Listener,
+      private juce::AsyncUpdater
 {
 public:
     explicit HypercolorAudioProcessorEditor(
@@ -23,15 +26,29 @@ public:
     void resized() override;
 
 private:
+    enum class DensityMode
+    {
+        free,
+        bpmSync
+    };
+
     void selectGranular();
     void selectEffect(std::size_t index);
     void rebuildInspector();
+    void rebindDensityControl(DensityMode mode);
+    [[nodiscard]] DensityMode readDensityMode() const noexcept;
+    void synchronizeDensityMode();
+    void parameterChanged(const juce::String& parameterID,
+                          float newValue) override;
+    void handleAsyncUpdate() override;
 
 private:
     using SliderAttachment =
         juce::AudioProcessorValueTreeState::SliderAttachment;
     using ButtonAttachment =
         juce::AudioProcessorValueTreeState::ButtonAttachment;
+    using ComboBoxAttachment =
+        juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     HypercolorAudioProcessor& audioProcessor;
     hypercolor::ui::HypercolorLookAndFeel lookAndFeel;
@@ -52,6 +69,7 @@ private:
     hypercolor::ui::PremiumRotaryKnob positionSlider;
     hypercolor::ui::PremiumRotaryKnob pitchSlider;
     juce::TextButton reverseButton;
+    juce::ComboBox densityModeSelector;
 
     juce::Label dryWetLabel;
     juce::Label outputGainLabel;
@@ -60,7 +78,6 @@ private:
     juce::Label positionLabel;
     juce::Label pitchLabel;
     juce::Label reverseLabel;
-    juce::Label positionHintLabel;
     juce::Label granularSectionLabel;
     juce::Label masterSectionLabel;
     juce::Label inspectorSectionLabel;
@@ -79,11 +96,16 @@ private:
 
     SliderAttachment dryWetAttachment;
     SliderAttachment outputGainAttachment;
-    SliderAttachment densityAttachment;
+    std::unique_ptr<SliderAttachment> densityAttachment;
     SliderAttachment sizeAttachment;
     SliderAttachment positionAttachment;
     SliderAttachment pitchAttachment;
     ButtonAttachment reverseAttachment;
+    std::unique_ptr<ComboBoxAttachment> densityModeAttachment;
+
+    std::atomic<int> pendingDensityMode { -1 };
+    DensityMode appliedDensityMode = DensityMode::free;
+    bool densityRebindDeferred = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(
         HypercolorAudioProcessorEditor
