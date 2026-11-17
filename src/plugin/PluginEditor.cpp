@@ -1048,13 +1048,13 @@ void HypercolorAudioProcessorEditor::resized()
         // The Grain Control row is a primary instrument surface, not a
         // footer.  Reserve enough vertical space for the layered rotary
         // controls to retain the same physical presence as the FX knobs.
-        constexpr int minimumControlsHeight = 148;
-        constexpr int minimumVisualizerHeight = 82;
+        constexpr int minimumControlsHeight = 132;
+        constexpr int minimumVisualizerHeight = 72;
         const auto availableHeight = grainContent.getHeight();
         const auto desiredXYHeight = juce::jlimit(
             180,
             430,
-            juce::roundToInt(static_cast<float>(availableHeight) * 0.43f)
+            juce::roundToInt(static_cast<float>(availableHeight) * 0.52f)
         );
         const auto xyHeight = juce::jmax(
             80,
