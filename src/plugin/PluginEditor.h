@@ -39,6 +39,7 @@ private:
 
     juce::Rectangle<int> headerArea;
     juce::Rectangle<int> grainControlPanel;
+    juce::Rectangle<int> granularControlsArea;
     juce::Rectangle<int> inspectorPanel;
     juce::Rectangle<int> rackPanel;
     juce::Rectangle<int> masterPanel;

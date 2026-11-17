@@ -777,6 +777,31 @@ void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
         grainControlPanel,
         hypercolor::ui::palette::cyan()
     );
+    if (selectedModule < 0 && !granularControlsArea.isEmpty())
+    {
+        // The primary grain controls live on their own surface.  Keeping this
+        // layer separate from the XY field makes the future rotary controls
+        // feel like an instrument strip instead of controls floating over the
+        // visualisation.
+        auto controlSurface = granularControlsArea.toFloat().reduced(1.0f);
+        juce::ColourGradient granularSurfaceGradient(
+            hypercolor::ui::palette::panelRaised().withAlpha(0.72f),
+            controlSurface.getX(),
+            controlSurface.getY(),
+            hypercolor::ui::palette::background().withAlpha(0.42f),
+            controlSurface.getRight(),
+            controlSurface.getBottom(),
+            false
+        );
+        graphics.setGradientFill(granularSurfaceGradient);
+        graphics.fillRoundedRectangle(controlSurface, 8.0f);
+        graphics.setColour(hypercolor::ui::palette::border().withAlpha(0.82f));
+        graphics.drawRoundedRectangle(controlSurface, 8.0f, 1.0f);
+        graphics.setColour(hypercolor::ui::palette::cyan().withAlpha(0.72f));
+        graphics.fillRect(controlSurface.getX(), controlSurface.getY(), 86.0f, 2.0f);
+        graphics.setColour(hypercolor::ui::palette::pink().withAlpha(0.58f));
+        graphics.fillRect(controlSurface.getRight() - 42.0f, controlSurface.getY(), 42.0f, 2.0f);
+    }
     if (selectedModule >= 0)
     {
         // The two FX panels share one visual surface.  The backdrop fills the
@@ -975,15 +1000,24 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
 
 void HypercolorAudioProcessorEditor::resized()
 {
-    const auto margin = juce::jlimit(18, 36, getWidth() / 30);
-    auto content = getLocalBounds().reduced(margin);
+    // Keep the generous horizontal breathing room of the module layout, but
+    // use a tighter vertical frame.  The previous single margin value made
+    // the top and bottom reservations follow the editor width, leaving an
+    // unnecessarily large dead band above the workspace on a 1100px window.
+    const auto horizontalMargin = juce::jlimit(18, 36, getWidth() / 30);
+    const auto verticalMargin = juce::jlimit(16, 24, getHeight() / 32);
+    auto content = getLocalBounds()
+        .withTrimmedLeft(horizontalMargin)
+        .withTrimmedRight(horizontalMargin)
+        .withTrimmedTop(verticalMargin)
+        .withTrimmedBottom(verticalMargin);
     const auto headerHeight = juce::jlimit(
-        62,
-        82,
-        juce::roundToInt(static_cast<float>(getHeight()) * 0.115f)
+        58,
+        72,
+        juce::roundToInt(static_cast<float>(getHeight()) * 0.105f)
     );
     headerArea = content.removeFromTop(headerHeight);
-    content.removeFromTop(10);
+    content.removeFromTop(6);
     const auto navigationWidth = juce::jlimit(118, 152, getWidth() / 7);
     rackPanel = content.removeFromLeft(navigationWidth);
     content.removeFromLeft(12);
@@ -1014,9 +1048,9 @@ void HypercolorAudioProcessorEditor::resized()
         navigationArea.removeFromTop(4);
     }
 
-    moduleTitleLabel.setBounds(workspace.removeFromTop(27));
-    moduleSubtitleLabel.setBounds(workspace.removeFromTop(18));
-    workspace.removeFromTop(7);
+    moduleTitleLabel.setBounds(workspace.removeFromTop(24));
+    moduleSubtitleLabel.setBounds(workspace.removeFromTop(16));
+    workspace.removeFromTop(4);
 
     const bool granularMode = selectedModule < 0;
     masterSectionLabel.setVisible(!granularMode);
@@ -1040,121 +1074,113 @@ void HypercolorAudioProcessorEditor::resized()
     if (granularMode)
     {
         const auto gap = juce::jlimit(12, 20, workspace.getWidth() / 65);
-        const auto leftWidth = juce::roundToInt(static_cast<float>(workspace.getWidth() - gap) * 0.64f);
+        // Give the XY field the dominant column.  The variation inspector
+        // remains available on the right, while primary grain controls move
+        // into their own two-row instrument strip beneath the inspector
+        // heading instead of competing with the field.
+        const auto leftRatio = workspace.getWidth() >= 700 ? 0.63f : 0.58f;
+        const auto leftWidth = juce::roundToInt(
+            static_cast<float>(workspace.getWidth() - gap) * leftRatio
+        );
         grainControlPanel = workspace.removeFromLeft(leftWidth);
         workspace.removeFromLeft(gap);
         inspectorPanel = workspace;
+        granularControlsArea = {};
+
         auto grainContent = grainControlPanel.reduced(10, 8);
-        // The Grain Control row is a primary instrument surface, not a
-        // footer.  Reserve enough vertical space for the layered rotary
-        // controls to retain the same physical presence as the FX knobs.
-        constexpr int minimumControlsHeight = 132;
-        constexpr int minimumVisualizerHeight = 72;
-        const auto availableHeight = grainContent.getHeight();
-        const auto desiredXYHeight = juce::jlimit(
-            180,
-            430,
-            juce::roundToInt(static_cast<float>(availableHeight) * 0.52f)
-        );
-        const auto xyHeight = juce::jmax(
-            80,
-            juce::jmin(
-                desiredXYHeight,
-                juce::jmax(80, availableHeight - minimumVisualizerHeight - minimumControlsHeight)
-            )
-        );
-        xyController.setBounds(grainContent.removeFromTop(xyHeight));
-        grainContent.removeFromTop(8);
-        const auto visualizerHeight = juce::jmax(
+        constexpr int minimumVisualizerHeight = 74;
+        const auto visualizerHeight = juce::jlimit(
             minimumVisualizerHeight,
-                juce::jmin(
-                    170,
-                juce::jmin(
-                    juce::roundToInt(static_cast<float>(grainContent.getHeight()) * 0.45f),
-                    juce::jmax(minimumVisualizerHeight, grainContent.getHeight() - minimumControlsHeight)
-                )
-            )
+            124,
+            juce::roundToInt(static_cast<float>(grainContent.getHeight()) * 0.22f)
         );
-        granularVisualizer.setBounds(grainContent.removeFromTop(visualizerHeight));
-        grainContent.removeFromTop(7);
-        auto granularArea = grainContent;
-        granularSectionLabel.setBounds(granularArea.removeFromTop(20));
-        granularArea.removeFromTop(2);
 
-        // All five primary controls share one common row.  Position used to
-        // steal the bottom of its cell for the fresh/old hint, which made its
-        // rotary and value box visibly lower than Density, Size and Pitch.
-        // Reserve that hint as a separate strip instead, leaving identical
-        // bounds for every control in the row.
-        const auto positionHintStrip = granularArea.getHeight() > 22
-            ? granularArea.removeFromBottom(16)
-            : juce::Rectangle<int> {};
-        const auto controlRow = granularArea;
+        // The field owns the upper and central portion of the column.  The
+        // telemetry remains a dedicated strip underneath it, never sharing
+        // bounds with labels or controls.
+        const auto visualizerBounds = grainContent.removeFromBottom(visualizerHeight);
+        grainContent.removeFromBottom(8);
+        xyController.setBounds(grainContent);
+        granularVisualizer.setBounds(visualizerBounds);
 
-        const auto granularControlWidth = juce::jmax(1, granularArea.getWidth() / 5);
-    std::array<juce::Component*, 5> granularControls {
-        &densitySlider,
-        &sizeSlider,
-        &positionSlider,
-        &pitchSlider,
-        &reverseButton
-    };
-    std::array<juce::Label*, 5> granularLabels {
-        &densityLabel,
-        &sizeLabel,
-        &positionLabel,
-        &pitchLabel,
-        &reverseLabel
-    };
+        // Primary controls are now a separate two-row area in the right
+        // inspector.  Three columns on the first row and two on the second
+        // leave enough physical room for the future large rotary knobs.
+        auto inspectorArea = inspectorPanel.reduced(16, 12);
+        const auto primaryHeight = juce::jlimit(
+            190,
+            250,
+            juce::roundToInt(static_cast<float>(inspectorArea.getHeight()) * 0.48f)
+        );
+        granularControlsArea = inspectorArea.removeFromTop(primaryHeight);
+        auto primaryArea = granularControlsArea.reduced(10, 8);
+        granularSectionLabel.setBounds(primaryArea.removeFromTop(21));
+        primaryArea.removeFromTop(4);
 
-    for (std::size_t index = 0; index < granularControls.size(); ++index)
-    {
-        auto cell = granularArea.removeFromLeft(
-            index + 1 == granularControls.size()
-                ? granularArea.getWidth()
-                : granularControlWidth
-        ).reduced(5, 0);
-        granularLabels[index]->setBounds(cell.removeFromTop(21));
+        std::array<juce::Component*, 5> granularControls {
+            &densitySlider,
+            &sizeSlider,
+            &positionSlider,
+            &pitchSlider,
+            &reverseButton
+        };
+        std::array<juce::Label*, 5> granularLabels {
+            &densityLabel,
+            &sizeLabel,
+            &positionLabel,
+            &pitchLabel,
+            &reverseLabel
+        };
 
-        auto controlArea = cell.reduced(2, 0);
-
-        if (granularControls[index] == &reverseButton)
+        const auto cellWidth = juce::jmax(1, primaryArea.getWidth() / 3);
+        const auto cellHeight = juce::jmax(1, primaryArea.getHeight() / 2);
+        auto positionHintPlaced = false;
+        for (std::size_t index = 0; index < granularControls.size(); ++index)
         {
-            granularControls[index]->setBounds(
-                controlArea.withSizeKeepingCentre(
-                    juce::jmin(84, juce::jmax(48, controlArea.getWidth() - 8)),
-                    juce::jmin(54, controlArea.getHeight())
-                )
-            );
+            const auto row = static_cast<int>(index / 3);
+            const auto column = static_cast<int>(index % 3);
+            const auto cellX = primaryArea.getX() + column * cellWidth;
+            const auto cellRight = granularControls[index] == &reverseButton
+                ? primaryArea.getRight()
+                : (column == 2 ? primaryArea.getRight() : cellX + cellWidth);
+            auto cell = juce::Rectangle<int>(
+                cellX,
+                primaryArea.getY() + row * cellHeight,
+                cellRight - cellX,
+                row == 1 ? primaryArea.getBottom() - (primaryArea.getY() + row * cellHeight) : cellHeight
+            ).reduced(3, 1);
+
+            granularLabels[index]->setBounds(cell.removeFromTop(18));
+            auto hint = juce::Rectangle<int> {};
+            if (granularControls[index] == &positionSlider && cell.getHeight() > 72)
+                hint = cell.removeFromBottom(14);
+
+            if (granularControls[index] == &reverseButton)
+            {
+                granularControls[index]->setBounds(cell.withSizeKeepingCentre(
+                    juce::jmin(136, juce::jmax(92, cell.getWidth() - 8)),
+                    juce::jmin(62, cell.getHeight())
+                ));
+            }
+            else
+            {
+                granularControls[index]->setBounds(cell.reduced(1, 0));
+            }
+
+            if (!hint.isEmpty())
+            {
+                positionHintLabel.setBounds(hint);
+                positionHintPlaced = true;
+            }
         }
-        else
-        {
-            granularControls[index]->setBounds(controlArea);
-        }
-    }
 
-        if (!positionHintStrip.isEmpty())
-        {
-            const auto positionX = controlRow.getX() + granularControlWidth * 2;
-            const auto positionWidth = juce::jmin(
-                granularControlWidth,
-                controlRow.getRight() - positionX
-            );
-            positionHintLabel.setBounds(
-                positionX + 5,
-                positionHintStrip.getY(),
-                juce::jmax(1, positionWidth - 10),
-                positionHintStrip.getHeight()
-            );
-        }
-        else
-        {
+        if (!positionHintPlaced)
             positionHintLabel.setBounds({});
-        }
     }
     else
     {
         grainControlPanel = {};
+        granularControlsArea = {};
         const auto mixWidth = juce::jlimit(116, 156, workspace.getWidth() / 6);
         // FX workspaces use one continuous surface.  Leaving a separate
         // spacer here exposed the editor background between the inspector
@@ -1172,12 +1198,18 @@ void HypercolorAudioProcessorEditor::resized()
     }
 
     auto inspectorArea = inspectorPanel.reduced(16, 12);
+    if (granularMode && !granularControlsArea.isEmpty())
+    {
+        // Leave a clear breathing gap between the primary grain strip and the
+        // secondary variation inspector.
+        inspectorArea.removeFromTop(granularControlsArea.getHeight() + 8);
+    }
     inspectorSectionLabel.setBounds(inspectorArea.removeFromTop(26));
     inspectorHintLabel.setBounds(inspectorArea.removeFromTop(18));
     inspectorArea.removeFromTop(8);
     if (granularMode)
     {
-        const auto rowHeight = juce::jmax(34, inspectorArea.getHeight() / 8);
+        const auto rowHeight = juce::jmax(26, inspectorArea.getHeight() / 7);
         const auto labelWidth = juce::jlimit(96, 132, inspectorPanel.getWidth() / 3);
         for (std::size_t i = 0; i < inspectorSliders.size(); ++i)
         {

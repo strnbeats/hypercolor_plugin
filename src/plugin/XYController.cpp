@@ -241,6 +241,32 @@ void XYController::paint(juce::Graphics& graphics)
         graphics.drawLine(inner.x, inner.y, outer.x, outer.y, tick % 4 == 0 ? 1.0f : 0.6f);
     }
 
+    // A denser perimeter of tiny, static markers adds instrument-like detail
+    // without turning the boundary into a heavy scale.  The phase-based
+    // alpha variation is deterministic, so the dots never shimmer or depend
+    // on the motion timer.
+    constexpr int perimeterDotCount = 48;
+    for (int dot = 0; dot < perimeterDotCount; ++dot)
+    {
+        const auto angle = juce::MathConstants<float>::twoPi
+            * static_cast<float>(dot) / static_cast<float>(perimeterDotCount);
+        const auto direction = juce::Point<float>(std::cos(angle), std::sin(angle));
+        const auto position = centre + direction * (radius + 0.5f);
+        const auto major = dot % 12 == 0;
+        const auto brightness = 0.84f + 0.16f
+            * (0.5f + 0.5f * std::sin(static_cast<float>(dot) * 1.71f + 0.4f));
+        const auto colour = dot % 6 == 0
+            ? cyan
+            : (dot % 6 == 3 ? pink : grid);
+        const auto alpha = (major ? 0.42f : 0.24f) * brightness;
+        const auto dotRadius = major ? 1.35f : 0.88f;
+        graphics.setColour(colour.withAlpha(alpha));
+        graphics.fillEllipse(position.x - dotRadius,
+                             position.y - dotRadius,
+                             dotRadius * 2.0f,
+                             dotRadius * 2.0f);
+    }
+
     // Fluid grid.  Only the thin, flowing filaments remain here: the larger
     // moving body shapes from the previous iteration were visually noisy and
     // made the core appear to drag objects behind it.
