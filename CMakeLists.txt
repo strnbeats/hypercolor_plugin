@@ -256,6 +256,64 @@ if(BUILD_TESTING)
         COMMAND HYPERCOLORGranularEngineTests
     )
 
+    add_executable(HYPERCOLORGranularLatencyTests
+        src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/GranularCharacter.cpp
+        src/dsp/granular/GranularEngine.cpp
+        src/dsp/granular/GranularRandom.cpp
+        src/dsp/granular/Grain.cpp
+        src/dsp/granular/GrainPool.cpp
+        src/dsp/granular/GrainRenderer.cpp
+        src/dsp/granular/GrainScheduler.cpp
+        tests/GranularLatencyTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGranularLatencyTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(HYPERCOLORGranularLatencyTests PRIVATE cxx_std_20)
+
+    target_link_libraries(HYPERCOLORGranularLatencyTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.GranularLatency
+        COMMAND HYPERCOLORGranularLatencyTests
+    )
+
+    add_executable(HYPERCOLORGrainSchedulerPendingTests
+        src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/GranularCharacter.cpp
+        src/dsp/granular/GranularRandom.cpp
+        src/dsp/granular/Grain.cpp
+        src/dsp/granular/GrainPool.cpp
+        src/dsp/granular/GrainScheduler.cpp
+        tests/GrainSchedulerPendingTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGrainSchedulerPendingTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(HYPERCOLORGrainSchedulerPendingTests PRIVATE cxx_std_20)
+
+    target_link_libraries(HYPERCOLORGrainSchedulerPendingTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.GrainSchedulerPending
+        COMMAND HYPERCOLORGrainSchedulerPendingTests
+    )
+
     add_executable(HYPERCOLORGrainSchedulerTests
         src/dsp/granular/CircularAudioBuffer.cpp
         src/dsp/granular/GranularCharacter.cpp

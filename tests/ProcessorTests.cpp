@@ -426,6 +426,28 @@ void testGranularParameterContracts(TestContext& context)
         "Grain Envelope should be an AudioParameterChoice"
     );
     expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbMix, 0.0f, 100.0f, 30.0f);
+    constexpr std::array fxEnableIDs {
+        hypercolor::ParameterIDs::reverbEnabled,
+        hypercolor::ParameterIDs::modulationEnabled,
+        hypercolor::ParameterIDs::driveEnabled,
+        hypercolor::ParameterIDs::tapeEnabled,
+        hypercolor::ParameterIDs::bitcrushEnabled,
+        hypercolor::ParameterIDs::filterEnabled,
+        hypercolor::ParameterIDs::compressorEnabled,
+        hypercolor::ParameterIDs::delayEnabled
+    };
+    for (const auto* parameterID : fxEnableIDs)
+    {
+        const auto* parameter = processor.getValueTreeState().getParameter(parameterID);
+        context.expect(
+            dynamic_cast<const juce::AudioParameterBool*>(parameter) != nullptr,
+            "FX enable parameters should be AudioParameterBool parameters"
+        );
+        context.expect(
+            parameter != nullptr && parameter->getDefaultValue() == 0.0f,
+            "FX enable parameters should default to false"
+        );
+    }
     expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbSize, 0.0f, 100.0f, 50.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbDecay, 0.1f, 20.0f, 4.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::reverbDamping, 0.0f, 100.0f, 40.0f);
@@ -504,7 +526,7 @@ void testGranularParameterContracts(TestContext& context)
     expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorMix, 0.0f, 100.0f, 100.0f);
     expectParameterContract(context, processor, hypercolor::ParameterIDs::compressorStereoLink, 0.0f, 100.0f, 100.0f);
 
-    constexpr std::array<std::string_view, 68> parameterIDs {
+    constexpr std::array<std::string_view, 76> parameterIDs {
         hypercolor::ParameterIDs::dryWet,
         hypercolor::ParameterIDs::outputGain,
         hypercolor::ParameterIDs::grainDensity,
@@ -521,12 +543,14 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::grainStereoSpread,
         hypercolor::ParameterIDs::grainPanRandom,
         hypercolor::ParameterIDs::grainEnvelope,
+        hypercolor::ParameterIDs::reverbEnabled,
         hypercolor::ParameterIDs::reverbMix,
         hypercolor::ParameterIDs::reverbSize,
         hypercolor::ParameterIDs::reverbDecay,
         hypercolor::ParameterIDs::reverbDamping,
         hypercolor::ParameterIDs::reverbPreDelay,
         hypercolor::ParameterIDs::reverbWidth,
+        hypercolor::ParameterIDs::modulationEnabled,
         hypercolor::ParameterIDs::modulationMode,
         hypercolor::ParameterIDs::modulationRate,
         hypercolor::ParameterIDs::modulationDepth,
@@ -534,11 +558,13 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::modulationFeedback,
         hypercolor::ParameterIDs::modulationMix,
         hypercolor::ParameterIDs::modulationWidth,
+        hypercolor::ParameterIDs::driveEnabled,
         hypercolor::ParameterIDs::driveMode,
         hypercolor::ParameterIDs::driveAmount,
         hypercolor::ParameterIDs::driveTone,
         hypercolor::ParameterIDs::driveMix,
         hypercolor::ParameterIDs::driveOutput,
+        hypercolor::ParameterIDs::delayEnabled,
         hypercolor::ParameterIDs::delayMode,
         hypercolor::ParameterIDs::delaySync,
         hypercolor::ParameterIDs::delayTime,
@@ -548,23 +574,27 @@ void testGranularParameterContracts(TestContext& context)
         hypercolor::ParameterIDs::delayHighCut,
         hypercolor::ParameterIDs::delayMix,
         hypercolor::ParameterIDs::delayWidth,
+        hypercolor::ParameterIDs::tapeEnabled,
         hypercolor::ParameterIDs::tapeDrive,
         hypercolor::ParameterIDs::tapeWow,
         hypercolor::ParameterIDs::tapeFlutter,
         hypercolor::ParameterIDs::tapeWear,
         hypercolor::ParameterIDs::tapeMix,
         hypercolor::ParameterIDs::tapeOutput,
+        hypercolor::ParameterIDs::bitcrushEnabled,
         hypercolor::ParameterIDs::bitcrushBits,
         hypercolor::ParameterIDs::bitcrushRate,
         hypercolor::ParameterIDs::bitcrushMode,
         hypercolor::ParameterIDs::bitcrushMix,
         hypercolor::ParameterIDs::bitcrushOutput,
+        hypercolor::ParameterIDs::filterEnabled,
         hypercolor::ParameterIDs::filterMode,
         hypercolor::ParameterIDs::filterCutoff,
         hypercolor::ParameterIDs::filterResonance,
         hypercolor::ParameterIDs::filterDrive,
         hypercolor::ParameterIDs::filterMix,
         hypercolor::ParameterIDs::filterOutput,
+        hypercolor::ParameterIDs::compressorEnabled,
         hypercolor::ParameterIDs::compressorThreshold,
         hypercolor::ParameterIDs::compressorRatio,
         hypercolor::ParameterIDs::compressorAttack,
@@ -990,7 +1020,9 @@ void testStereoGranularProcessing(TestContext& context)
         if (std::abs(left) > 1.0e-5f)
         {
             context.expect(
-                std::abs(right + 0.5f * left) < 2.0e-5f,
+                // Deferred starts expose a few additional interpolated
+                // samples; allow the existing float interpolation round-off.
+                std::abs(right + 0.5f * left) < 3.0e-5f,
                 "stereo granular processing should preserve channel relationship"
             );
         }
@@ -1670,7 +1702,7 @@ void testDensitySyncStateMigration(TestContext& context)
         );
         context.expect(
             migratedXml != nullptr
-                && migratedXml->getIntAttribute("schemaVersion") == 2,
+                && migratedXml->getIntAttribute("schemaVersion") == 3,
             "Migrated state should be saved with the current schema version"
         );
 
@@ -1824,6 +1856,187 @@ void testDensitySyncStateMigration(TestContext& context)
                     hypercolor::ParameterIDs::grainDensity
                 ) == 88.0f,
                 "Invalid choice state should not mutate Grain Density"
+            );
+        }
+    }
+}
+
+void testFxEnableStateMigration(TestContext& context)
+{
+    constexpr std::array fxEnableIDs {
+        hypercolor::ParameterIDs::reverbEnabled,
+        hypercolor::ParameterIDs::modulationEnabled,
+        hypercolor::ParameterIDs::driveEnabled,
+        hypercolor::ParameterIDs::tapeEnabled,
+        hypercolor::ParameterIDs::bitcrushEnabled,
+        hypercolor::ParameterIDs::filterEnabled,
+        hypercolor::ParameterIDs::compressorEnabled,
+        hypercolor::ParameterIDs::delayEnabled
+    };
+
+    HypercolorAudioProcessor source;
+    setParameter(source, hypercolor::ParameterIDs::grainDensityDivision, 6.0f);
+    juce::MemoryBlock sourceState;
+    source.getStateInformation(sourceState);
+    auto sourceXml = juce::AudioProcessor::getXmlFromBinary(
+        sourceState.getData(),
+        static_cast<int>(sourceState.getSize())
+    );
+    context.expect(sourceXml != nullptr, "FX state fixture should be readable");
+
+    if (sourceXml == nullptr)
+        return;
+
+    auto fullSourceTree = juce::ValueTree::fromXml(*sourceXml);
+    auto sourceTree = fullSourceTree;
+    for (const auto* parameterID : fxEnableIDs)
+    {
+        const auto child = sourceTree.getChildWithProperty("id", parameterID);
+        context.expect(
+            child.isValid(),
+            "FX legacy tree should contain each enable parameter before removal"
+        );
+        sourceTree.removeChild(child, nullptr);
+    }
+
+    for (const int schemaVersion : { 0, 1, 2 })
+    {
+        auto legacyXml = sourceTree.createXml();
+        legacyXml->setAttribute("schemaVersion", schemaVersion);
+        juce::MemoryBlock legacyState;
+        juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacyState);
+
+        HypercolorAudioProcessor restored;
+        for (const auto* parameterID : fxEnableIDs)
+            setParameter(restored, parameterID, 0.0f);
+        restored.setStateInformation(
+            legacyState.getData(),
+            static_cast<int>(legacyState.getSize())
+        );
+
+        for (const auto* parameterID : fxEnableIDs)
+        {
+            context.expect(
+                getParameterValue(restored, parameterID) == 1.0f,
+                "Schema 0/1/2 missing FX enable should migrate to true"
+            );
+        }
+
+        if (schemaVersion == 2)
+        {
+            context.expect(
+                getParameterValue(
+                    restored,
+                    hypercolor::ParameterIDs::grainDensityDivision
+                ) == 6.0f,
+                "Schema 2 should preserve the current Density division ordering"
+            );
+        }
+    }
+
+    auto explicitLegacyXml = juce::AudioProcessor::getXmlFromBinary(
+        sourceState.getData(),
+        static_cast<int>(sourceState.getSize())
+    );
+    context.expect(
+        explicitLegacyXml != nullptr,
+        "Explicit legacy fixture should be readable"
+    );
+    if (explicitLegacyXml == nullptr)
+        return;
+    explicitLegacyXml->setAttribute("schemaVersion", 2);
+    for (std::size_t index = 0; index < fxEnableIDs.size(); ++index)
+    {
+        context.expect(
+            setParameterValueInXml(
+                *explicitLegacyXml,
+                fxEnableIDs[index],
+                index % 2 == 0 ? 0.0 : 1.0
+            ),
+            "Explicit legacy fixture should contain each FX enable"
+        );
+    }
+    juce::MemoryBlock explicitLegacyState;
+    juce::AudioProcessor::copyXmlToBinary(*explicitLegacyXml, explicitLegacyState);
+    HypercolorAudioProcessor explicitRestored;
+    explicitRestored.setStateInformation(
+        explicitLegacyState.getData(),
+        static_cast<int>(explicitLegacyState.getSize())
+    );
+    for (std::size_t index = 0; index < fxEnableIDs.size(); ++index)
+    {
+        context.expect(
+            std::abs(
+                getParameterValue(explicitRestored, fxEnableIDs[index])
+                    - (index % 2 == 0 ? 0.0f : 1.0f)
+            ) < 0.01f,
+            "Explicit legacy FX enable values should not be overwritten"
+        );
+    }
+
+    HypercolorAudioProcessor currentSource;
+    for (std::size_t index = 0; index < fxEnableIDs.size(); ++index)
+        setParameter(currentSource, fxEnableIDs[index], index % 2 == 0 ? 1.0f : 0.0f);
+    setParameter(currentSource, hypercolor::ParameterIDs::grainDensityDivision, 1.0f);
+    juce::MemoryBlock currentState;
+    currentSource.getStateInformation(currentState);
+    auto currentXml = juce::AudioProcessor::getXmlFromBinary(
+        currentState.getData(),
+        static_cast<int>(currentState.getSize())
+    );
+    context.expect(currentXml != nullptr, "Schema 3 state fixture should be readable");
+
+    if (currentXml != nullptr)
+    {
+        context.expect(
+            currentXml->getIntAttribute("schemaVersion") == 3,
+            "Newly saved states should use schema 3"
+        );
+
+        HypercolorAudioProcessor currentRestored;
+        currentRestored.setStateInformation(
+            currentState.getData(),
+            static_cast<int>(currentState.getSize())
+        );
+        context.expect(
+            getParameterValue(
+                currentRestored,
+                hypercolor::ParameterIDs::grainDensityDivision
+            ) == 1.0f,
+            "Schema 3 should not apply legacy Density remapping"
+        );
+        for (std::size_t index = 0; index < fxEnableIDs.size(); ++index)
+        {
+            context.expect(
+                std::abs(
+                    getParameterValue(currentRestored, fxEnableIDs[index])
+                        - (index % 2 == 0 ? 1.0f : 0.0f)
+                ) < 0.01f,
+                "Schema 3 explicit FX enable values should round-trip"
+            );
+        }
+
+        auto damagedTree = juce::ValueTree::fromXml(*currentXml);
+        auto damagedXml = damagedTree.createXml();
+        for (const auto* parameterID : fxEnableIDs)
+            context.expect(
+                removeParameterFromXml(*damagedXml, parameterID),
+                "Damaged schema 3 fixture should omit each FX enable"
+            );
+        juce::MemoryBlock damagedState;
+        juce::AudioProcessor::copyXmlToBinary(*damagedXml, damagedState);
+        HypercolorAudioProcessor damagedRestored;
+        for (const auto* parameterID : fxEnableIDs)
+            setParameter(damagedRestored, parameterID, 1.0f);
+        damagedRestored.setStateInformation(
+            damagedState.getData(),
+            static_cast<int>(damagedState.getSize())
+        );
+        for (const auto* parameterID : fxEnableIDs)
+        {
+            context.expect(
+                getParameterValue(damagedRestored, parameterID) == 0.0f,
+                "Missing schema 3 FX enable should use false"
             );
         }
     }
@@ -2317,6 +2530,18 @@ void testStateRoundTrip(TestContext& context)
     setParameter(source, hypercolor::ParameterIDs::grainStereoSpread, 64.5f);
     setParameter(source, hypercolor::ParameterIDs::grainPanRandom, 29.5f);
     setParameter(source, hypercolor::ParameterIDs::grainEnvelope, 3.0f);
+    constexpr std::array fxEnableIDs {
+        hypercolor::ParameterIDs::reverbEnabled,
+        hypercolor::ParameterIDs::modulationEnabled,
+        hypercolor::ParameterIDs::driveEnabled,
+        hypercolor::ParameterIDs::tapeEnabled,
+        hypercolor::ParameterIDs::bitcrushEnabled,
+        hypercolor::ParameterIDs::filterEnabled,
+        hypercolor::ParameterIDs::compressorEnabled,
+        hypercolor::ParameterIDs::delayEnabled
+    };
+    for (std::size_t index = 0; index < fxEnableIDs.size(); ++index)
+        setParameter(source, fxEnableIDs[index], index % 2 == 0 ? 1.0f : 0.0f);
 
     juce::MemoryBlock state;
     source.getStateInformation(state);
@@ -2429,6 +2654,16 @@ void testStateRoundTrip(TestContext& context)
             == 3.0f,
         "Grain Envelope should survive state round-trip"
     );
+    for (std::size_t index = 0; index < fxEnableIDs.size(); ++index)
+    {
+        context.expect(
+            std::abs(
+                getParameterValue(restored, fxEnableIDs[index])
+                    - (index % 2 == 0 ? 1.0f : 0.0f)
+            ) < 0.01f,
+            "FX enable state should survive state round-trip"
+        );
+    }
 
     auto oldStateXml = juce::AudioProcessor::getXmlFromBinary(
         state.getData(),
@@ -2613,7 +2848,7 @@ void testStateRoundTrip(TestContext& context)
 
     if (futureXml != nullptr)
     {
-        futureXml->setAttribute("schemaVersion", 3);
+        futureXml->setAttribute("schemaVersion", 4);
         juce::MemoryBlock futureState;
         juce::AudioProcessor::copyXmlToBinary(*futureXml, futureState);
 
@@ -2655,6 +2890,7 @@ int main()
     testTelemetryConsumerDoesNotChangeAudio(context);
     testStateRoundTrip(context);
     testDensitySyncStateMigration(context);
+    testFxEnableStateMigration(context);
     testEditorControlsStateAndResize(context);
     testGranularVisualizerTelemetry(context);
     testGranularVisualizerGrainsAndLifecycle(context);

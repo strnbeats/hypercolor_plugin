@@ -3,6 +3,7 @@
 #include "core/ProcessSpec.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <span>
 
@@ -29,10 +30,20 @@ public:
     virtual void reset() noexcept = 0;
     virtual void process(EffectAudioBlock& block) noexcept = 0;
 
-    void setBypassed(bool shouldBypass) noexcept { bypassed = shouldBypass; }
-    [[nodiscard]] bool isBypassed() const noexcept { return bypassed; }
+    // The flag is intentionally atomic so the legacy module-level API remains
+    // race-free while the chain samples it once per audio block.  The actual
+    // transition is performed by EffectChain on the audio thread.
+    void setBypassed(bool shouldBypass) noexcept
+    {
+        bypassed.store(shouldBypass, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool isBypassed() const noexcept
+    {
+        return bypassed.load(std::memory_order_relaxed);
+    }
 
 private:
-    bool bypassed = false;
+    std::atomic<bool> bypassed { false };
 };
 }

@@ -2,9 +2,54 @@
 #include "dsp/fx/EffectChain.h"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <iostream>
+#include <new>
+
+namespace allocationProbe
+{
+std::atomic<bool> enabled { false };
+std::atomic<std::size_t> count { 0 };
+}
+
+void* operator new(std::size_t size)
+{
+    if (allocationProbe::enabled.load(std::memory_order_relaxed))
+        allocationProbe::count.fetch_add(1, std::memory_order_relaxed);
+
+    if (auto* memory = std::malloc(size))
+        return memory;
+
+    throw std::bad_alloc {};
+}
+
+void* operator new[](std::size_t size)
+{
+    return ::operator new(size);
+}
+
+void operator delete(void* memory) noexcept
+{
+    std::free(memory);
+}
+
+void operator delete[](void* memory) noexcept
+{
+    ::operator delete(memory);
+}
+
+void operator delete(void* memory, std::size_t) noexcept
+{
+    ::operator delete(memory);
+}
+
+void operator delete[](void* memory, std::size_t) noexcept
+{
+    ::operator delete[](memory);
+}
 
 namespace
 {
@@ -110,17 +155,35 @@ void testBypassResetAndValidation(TestContext& context)
     EffectChain chain;
     GainModule module { 4.0f };
     context.expect(chain.addModule(&module), "bypass module add");
-    context.expect(chain.prepare({ 44100.0, 64, 1 }), "mono prepare");
+    context.expect(chain.prepare({ 1000.0, 64, 1 }), "mono prepare");
     module.setBypassed(true);
     std::array left { 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f };
     std::array<float, 8> right {};
     auto block = makeBlock(left, right, 1);
     context.expect(chain.process(block) == EffectChainResult::success, "bypass process");
-    context.expect(left[0] == 2.0f && module.processCalls == 0, "bypass skips module");
+    context.expect(
+        left[0] < 8.0f && left[0] > 2.0f && module.processCalls == 1,
+        "bypass processes module and starts a smooth transition"
+    );
+
+    for (int blockIndex = 0; blockIndex < 3; ++blockIndex)
+    {
+        left.fill(2.0f);
+        context.expect(
+            chain.process(block) == EffectChainResult::success,
+            "bypass settling process"
+        );
+    }
+    context.expect(
+        std::abs(left[0] - 2.0f) < 0.001f && module.processCalls == 4,
+        "fully bypassed output should equal dry while module keeps processing"
+    );
+
     module.setBypassed(false);
     chain.reset();
+    left.fill(2.0f);
     context.expect(chain.process(block) == EffectChainResult::success, "reset keeps prepared state");
-    context.expect(left[0] == 8.0f && module.processCalls == 1, "reset is safe");
+    context.expect(left[0] == 8.0f && module.processCalls == 1, "reset restores enabled state safely");
 
     EffectChain invalid;
     context.expect(!invalid.prepare({ 0.0, 64, 1 }), "invalid spec rejected");
@@ -140,6 +203,151 @@ void testBypassResetAndValidation(TestContext& context)
     context.expect(!failing.prepare({ 44100.0, 64, 1 }), "module prepare failure propagates");
     context.expect(!failing.isPrepared(), "failed prepare leaves chain unprepared");
     context.expect(failingModule.resetCalls == 1, "failed prepare resets modules");
+}
+
+void testSmoothTransitionsAndStereo(TestContext& context)
+{
+    EffectChain chain;
+    GainModule module { 2.0f };
+    context.expect(chain.addModule(&module), "smooth module add");
+    context.expect(chain.prepare({ 1000.0, 8, 2 }), "stereo smooth prepare");
+
+    std::array<float, 8> left;
+    std::array<float, 8> right;
+    auto block = makeBlock(left, right, 2);
+
+    left.fill(1.0f);
+    right.fill(1.0f);
+    context.expect(chain.process(block) == EffectChainResult::success, "enabled stereo process");
+    context.expect(left[0] == 2.0f && right[0] == 2.0f, "enabled output should be fully wet");
+
+    module.setBypassed(true);
+    float previous = left[7];
+    for (int blockIndex = 0; blockIndex < 4; ++blockIndex)
+    {
+        left.fill(1.0f);
+        right.fill(1.0f);
+        context.expect(chain.process(block) == EffectChainResult::success, "stereo bypass process");
+        for (std::size_t sample = 0; sample < left.size(); ++sample)
+        {
+            context.expect(
+                std::isfinite(left[sample]) && std::isfinite(right[sample]),
+                "smooth bypass output should remain finite"
+            );
+            context.expect(
+                std::abs(left[sample] - right[sample]) < 0.001f,
+                "stereo channels should receive the same smoothed gain"
+            );
+            context.expect(
+                left[sample] <= previous + 0.001f,
+                "bypass transition should not jump upward"
+            );
+            previous = left[sample];
+        }
+    }
+    context.expect(std::abs(left[7] - 1.0f) < 0.001f, "stereo bypass should settle to dry");
+
+    module.setBypassed(false);
+    left.fill(1.0f);
+    right.fill(1.0f);
+    context.expect(
+        chain.process(block) == EffectChainResult::success,
+        "re-enable settling process"
+    );
+    context.expect(left[0] > 1.0f && left[0] < 2.0f, "re-enable should ramp from dry");
+
+    // Retargeting several times must remain finite and bounded by dry/wet.
+    for (int toggle = 0; toggle < 8; ++toggle)
+    {
+        module.setBypassed(toggle % 2 == 0);
+        left.fill(1.0f);
+        right.fill(1.0f);
+        context.expect(chain.process(block) == EffectChainResult::success, "rapid retarget process");
+        for (const auto sample : left)
+            context.expect(
+                std::isfinite(sample) && sample >= 0.999f && sample <= 2.001f,
+                "rapid bypass retarget should stay within dry/wet bounds"
+            );
+    }
+}
+
+void testDifferentBlockSizes(TestContext& context)
+{
+    for (const auto blockSize : { std::size_t { 1 }, std::size_t { 7 },
+                                  std::size_t { 32 }, std::size_t { 64 } })
+    {
+        EffectChain chain;
+        GainModule module { 1.5f };
+        context.expect(chain.addModule(&module), "block-size module add");
+        context.expect(
+            chain.prepare({
+                48000.0,
+                static_cast<std::uint32_t>(blockSize),
+                1
+            }),
+            "block-size prepare"
+        );
+
+        std::array<float, 64> samples {};
+        EffectAudioBlock block;
+        block.channels[0] = std::span<float>(samples.data(), blockSize);
+        block.numChannels = 1;
+
+        samples.fill(1.0f);
+        context.expect(
+            chain.process(block) == EffectChainResult::success,
+            "block-size enabled process"
+        );
+        context.expect(
+            std::abs(samples[0] - 1.5f) < 0.001f,
+            "block-size enabled result"
+        );
+
+        module.setBypassed(true);
+        const auto blocksToSettle = static_cast<int>(
+            (720 + blockSize - 1) / blockSize + 2
+        );
+        for (int blockIndex = 0; blockIndex < blocksToSettle; ++blockIndex)
+        {
+            samples.fill(1.0f);
+            context.expect(
+                chain.process(block) == EffectChainResult::success,
+                "block-size bypass process"
+            );
+        }
+        context.expect(
+            std::abs(samples[blockSize - 1] - 1.0f) < 0.001f,
+            "block-size bypass should settle to dry"
+        );
+    }
+}
+
+void testProcessPathDoesNotAllocate(TestContext& context)
+{
+    EffectChain chain;
+    GainModule module { 1.25f };
+    context.expect(chain.addModule(&module), "allocation probe module add");
+    context.expect(chain.prepare({ 48000.0, 64, 2 }), "allocation probe prepare");
+
+    std::array<float, 8> left;
+    std::array<float, 8> right;
+    auto block = makeBlock(left, right, 2);
+    allocationProbe::count.store(0, std::memory_order_relaxed);
+    allocationProbe::enabled.store(true, std::memory_order_relaxed);
+    for (int iteration = 0; iteration < 8; ++iteration)
+    {
+        left.fill(1.0f);
+        right.fill(1.0f);
+        context.expect(
+            chain.process(block) == EffectChainResult::success,
+            "allocation probe process"
+        );
+    }
+    allocationProbe::enabled.store(false, std::memory_order_relaxed);
+    context.expect(
+        allocationProbe::count.load(std::memory_order_relaxed) == 0,
+        "EffectChain process should not allocate"
+    );
 }
 
 void testCapacityAndOversized(TestContext& context)
@@ -166,6 +374,9 @@ int main()
     TestContext context;
     testEmptyAndSequential(context);
     testBypassResetAndValidation(context);
+    testSmoothTransitionsAndStereo(context);
+    testDifferentBlockSizes(context);
+    testProcessPathDoesNotAllocate(context);
     testCapacityAndOversized(context);
     if (context.getFailures() == 0)
     {

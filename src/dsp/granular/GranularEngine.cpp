@@ -123,6 +123,7 @@ GranularEngineProcessResult GranularEngine::processBlock(
             case GrainSchedulerStepResult::noEvent:
             case GrainSchedulerStepResult::started:
             case GrainSchedulerStepResult::insufficientHistory:
+            case GrainSchedulerStepResult::pendingStale:
                 break;
             case GrainSchedulerStepResult::poolFull:
             case GrainSchedulerStepResult::invalidParameters:
@@ -130,6 +131,8 @@ GranularEngineProcessResult GranularEngine::processBlock(
             case GrainSchedulerStepResult::traversalInProgress:
             case GrainSchedulerStepResult::schedulerNotPrepared:
             case GrainSchedulerStepResult::sourceUnavailable:
+            case GrainSchedulerStepResult::pendingOverflow:
+            case GrainSchedulerStepResult::pendingExpired:
                 degraded = true;
                 break;
         }

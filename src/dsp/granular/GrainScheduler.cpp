@@ -43,6 +43,14 @@ bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
         sampleRate = 0.0;
         scaledPhase = 0.0;
         resetRandomState();
+        pendingHead = 0;
+        pendingCount = 0;
+        pendingOverflowCount = 0;
+        pendingExpiredCount = 0;
+        pendingStaleCount = 0;
+        sampleClock = 0;
+        lastSuccessfulStartSample = 0;
+        hasSuccessfulStart = false;
         prepared = false;
         return false;
     }
@@ -50,6 +58,14 @@ bool GrainScheduler::prepare(const core::ProcessSpec& spec) noexcept
     sampleRate = spec.sampleRate;
     scaledPhase = 0.0;
     resetRandomState();
+    pendingHead = 0;
+    pendingCount = 0;
+    pendingOverflowCount = 0;
+    pendingExpiredCount = 0;
+    pendingStaleCount = 0;
+    sampleClock = 0;
+    lastSuccessfulStartSample = 0;
+    hasSuccessfulStart = false;
     prepared = true;
     return true;
 }
@@ -58,6 +74,14 @@ void GrainScheduler::reset() noexcept
 {
     scaledPhase = 0.0;
     resetRandomState();
+    pendingHead = 0;
+    pendingCount = 0;
+    pendingOverflowCount = 0;
+    pendingExpiredCount = 0;
+    pendingStaleCount = 0;
+    sampleClock = 0;
+    lastSuccessfulStartSample = 0;
+    hasSuccessfulStart = false;
 }
 
 GrainSchedulerStepResult GrainScheduler::processSample(
@@ -69,6 +93,13 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     if (!prepared)
         return GrainSchedulerStepResult::schedulerNotPrepared;
 
+    const auto currentSample = sampleClock;
+    const auto finish = [this](GrainSchedulerStepResult value) noexcept
+    {
+        advanceSampleClock();
+        return value;
+    };
+
     if (hasEmittedEvent
         && samplesSinceLastEvent < std::numeric_limits<std::uint64_t>::max())
     {
@@ -78,7 +109,89 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     if (!std::isfinite(parameters.densityGrainsPerSecond)
         || !std::isfinite(parameters.timingJitterAmount))
     {
-        return GrainSchedulerStepResult::invalidParameters;
+        return finish(GrainSchedulerStepResult::invalidParameters);
+    }
+
+    bool expiredPending = false;
+    ageAndExpirePendingEvents(currentSample, expiredPending);
+    auto result = expiredPending
+        ? GrainSchedulerStepResult::pendingExpired
+        : GrainSchedulerStepResult::noEvent;
+
+    // Discard only events that are both overdue and currently startable. This
+    // keeps long history starvation observable through pendingExpired, while
+    // allowing recovery to coalesce stale events without replaying them.
+    auto staleDiscarded = false;
+    // Before the first successful launch, retain the original head so the
+    // first grain is not discarded merely because the source became valid a
+    // few samples after its freshness window.  Once playback has started,
+    // stale coalescing prevents an accumulated queue from becoming a burst.
+    while (hasSuccessfulStart && pendingCount > 1)
+    {
+        const auto& pending = pendingEventAt(0);
+        const auto availability = checkGrainStartAvailability(
+            pending.request,
+            source
+        );
+
+        if (availability == GrainSchedulerStepResult::started
+            && isPendingEventTooLate(pending, currentSample))
+        {
+            removePendingHead();
+            ++pendingStaleCount;
+            staleDiscarded = true;
+            continue;
+        }
+
+        break;
+    }
+
+    if (staleDiscarded)
+        result = GrainSchedulerStepResult::pendingStale;
+
+    // Retry at most one pending event per sample. The presence of a pending
+    // head also prevents a newer event from bypassing it.
+    auto pendingWasAttempted = false;
+    if (pendingCount > 0)
+    {
+        pendingWasAttempted = true;
+        const auto& pending = pendingEventAt(0);
+        if (canStartPendingAtSample(pending, currentSample))
+        {
+            const auto pendingResult = attemptGrainStart(
+                pending.request,
+                source,
+                pool
+            );
+
+            switch (pendingResult)
+            {
+                case GrainSchedulerStepResult::started:
+                    removePendingHead();
+                    recordSuccessfulStart(currentSample);
+                    result = GrainSchedulerStepResult::started;
+                    break;
+                case GrainSchedulerStepResult::insufficientHistory:
+                    result = GrainSchedulerStepResult::insufficientHistory;
+                    break;
+                case GrainSchedulerStepResult::noEvent:
+                case GrainSchedulerStepResult::poolFull:
+                case GrainSchedulerStepResult::invalidParameters:
+                case GrainSchedulerStepResult::invalidTrajectory:
+                case GrainSchedulerStepResult::traversalInProgress:
+                case GrainSchedulerStepResult::schedulerNotPrepared:
+                case GrainSchedulerStepResult::sourceUnavailable:
+                case GrainSchedulerStepResult::pendingOverflow:
+                case GrainSchedulerStepResult::pendingExpired:
+                case GrainSchedulerStepResult::pendingStale:
+                    // A pending event is only retained for temporary history
+                    // starvation. Invalid trajectories, unavailable sources
+                    // and pool/traversal failures are deterministic drops.
+                    removePendingHead();
+                    result = pendingResult;
+                    break;
+            }
+        }
     }
 
     const auto density = std::clamp(
@@ -88,7 +201,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     );
 
     if (density == 0.0)
-        return GrainSchedulerStepResult::noEvent;
+        return finish(result);
 
     // This is the requested normalized phase equation multiplied by
     // sampleRate: phase + density / sampleRate becomes scaledPhase + density.
@@ -98,29 +211,126 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         parameters.timingJitterAmount,
         parameters.character
     );
-    const auto minimumSpacingSamples = static_cast<std::uint64_t>(
-        std::floor(sampleRate / maximumDensityGrainsPerSecond)
-    );
+    const auto minimumEventSpacingSamples =
+        calculateMinimumSpacingSamples(maximumDensityGrainsPerSecond);
     const auto spacingAllowsEvent = !hasEmittedEvent
-        || samplesSinceLastEvent >= minimumSpacingSamples;
+        || samplesSinceLastEvent >= minimumEventSpacingSamples;
 
     if (accumulated < timingThreshold || !spacingAllowsEvent)
     {
         scaledPhase = accumulated;
-        return GrainSchedulerStepResult::noEvent;
+        return finish(result);
     }
 
     // Product limits guarantee fewer than two events per sample. Consume the
-    // event before validation so failed starts never create timing debt.
+    // event before validation so a queued event cannot create timing debt.
     scaledPhase = accumulated - sampleRate;
     hasEmittedEvent = true;
     samplesSinceLastEvent = 0;
     currentTimingRandomSigned = timingRandom.nextSignedNormalized();
 
-    if (!source.isPrepared()
-        || !sampleRatesMatch(source.getSampleRate(), sampleRate))
-        return GrainSchedulerStepResult::sourceUnavailable;
+    PreparedGrainRequest request;
+    const auto preparationResult = prepareGrainRequest(parameters, request);
+    if (preparationResult != GrainSchedulerStepResult::started)
+        return finish(preparationResult);
 
+    // Timing Jitter may intentionally move adjacent events closer together
+    // than the nominal Density period.  The scheduler's public guarantee is
+    // the discrete maximum-density spacing, so pending catch-up must use the
+    // same bound rather than the current event's nominal period.
+    const auto minimumSpacingSamples = calculateMinimumSpacingSamples(
+        maximumDensityGrainsPerSecond
+    );
+
+    // Preserve global chronology. A current event is queued whenever an older
+    // pending event was present, even if that older event was rejected for a
+    // deterministic reason on this sample.
+    if (pendingWasAttempted || pendingCount > 0)
+    {
+        if (!enqueuePendingEvent(
+                request,
+                currentSample,
+                minimumSpacingSamples
+            ))
+        {
+            return finish(GrainSchedulerStepResult::pendingOverflow);
+        }
+
+        return finish(result);
+    }
+
+    if (!canStartAtSample(currentSample, minimumSpacingSamples))
+    {
+        if (!enqueuePendingEvent(
+                request,
+                currentSample,
+                minimumSpacingSamples
+            ))
+        {
+            return finish(GrainSchedulerStepResult::pendingOverflow);
+        }
+
+        return finish(result);
+    }
+
+    const auto currentResult = attemptGrainStart(request, source, pool);
+    if (currentResult == GrainSchedulerStepResult::insufficientHistory)
+    {
+        if (!enqueuePendingEvent(
+                request,
+                currentSample,
+                minimumSpacingSamples
+            ))
+        {
+            return finish(GrainSchedulerStepResult::pendingOverflow);
+        }
+
+        return finish(result == GrainSchedulerStepResult::started
+            ? GrainSchedulerStepResult::started
+            : GrainSchedulerStepResult::insufficientHistory);
+    }
+
+    if (currentResult == GrainSchedulerStepResult::started)
+    {
+        recordSuccessfulStart(currentSample);
+        return finish(GrainSchedulerStepResult::started);
+    }
+
+    return finish(result == GrainSchedulerStepResult::started
+        ? result
+        : currentResult);
+}
+
+bool GrainScheduler::isPrepared() const noexcept
+{
+    return prepared;
+}
+
+std::size_t GrainScheduler::getPendingEventCount() const noexcept
+{
+    return pendingCount;
+}
+
+std::uint64_t GrainScheduler::getPendingOverflowCount() const noexcept
+{
+    return pendingOverflowCount;
+}
+
+std::uint64_t GrainScheduler::getPendingExpiredCount() const noexcept
+{
+    return pendingExpiredCount;
+}
+
+std::uint64_t GrainScheduler::getPendingStaleCount() const noexcept
+{
+    return pendingStaleCount;
+}
+
+GrainSchedulerStepResult GrainScheduler::prepareGrainRequest(
+    const GrainSchedulerParameters& parameters,
+    PreparedGrainRequest& result
+) noexcept
+{
     if (!std::isfinite(parameters.grainSizeMilliseconds)
         || !std::isfinite(parameters.positionNormalized)
         || !std::isfinite(parameters.pitchSemitones)
@@ -148,18 +358,13 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         maximumPitchSemitones
     );
 
-    std::uint32_t durationFrames = 0;
-
-    if (!calculateDurationFrames(grainSizeMilliseconds, durationFrames))
+    if (!calculateDurationFrames(
+            grainSizeMilliseconds,
+            result.durationFrames
+        ))
+    {
         return GrainSchedulerStepResult::invalidParameters;
-
-    const auto sourceRegion = source.captureSourceRegion();
-
-    if (!source.isSourceRegionCurrent(sourceRegion))
-        return GrainSchedulerStepResult::sourceUnavailable;
-
-    if (sourceRegion.isEmpty())
-        return GrainSchedulerStepResult::insufficientHistory;
+    }
 
     const auto& characterProfile = getGranularCharacterProfile(
         parameters.character
@@ -175,9 +380,9 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         1.0
     );
 
-    // Every viable start attempt consumes exactly two values in a documented
-    // order, even when an amount is zero. This keeps later variations stable
-    // when only their depths change.
+    // Consume each variation stream once per generated event. The resulting
+    // request is latched in a pending slot if history is not ready yet, so a
+    // retry cannot create a second random variation for the same event.
     const auto pitchRandomSigned = random.nextSignedNormalized();
     const auto positionRandomSigned = random.nextSignedNormalized();
     const auto spreadRandomSigned = panRandom.nextSignedNormalized();
@@ -195,14 +400,14 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         minimumPitchSemitones,
         maximumPitchSemitones
     );
-    const auto effectivePositionNormalized = std::clamp(
+    result.positionNormalized = std::clamp(
         basePositionNormalized + positionOffset,
         0.0,
         1.0
     );
 
     const auto magnitude = std::exp2(effectivePitchSemitones / 12.0);
-    const auto playbackRate = parameters.reverse ? -magnitude : magnitude;
+    result.playbackRate = parameters.reverse ? -magnitude : magnitude;
 
     const auto stereoSpreadAmount = std::clamp(
         parameters.stereoSpreadAmount,
@@ -214,7 +419,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         0.0,
         1.0
     );
-    const auto pan = std::clamp(
+    result.pan = std::clamp(
         spreadRandomSigned * stereoSpreadAmount
             * static_cast<double>(characterProfile.stereoSpreadScale)
         + panRandomSigned * maximumPanRandomDeviation * panRandomAmount
@@ -222,45 +427,51 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         -1.0,
         1.0
     );
+    result.envelope = parameters.envelope;
 
-    if (!std::isfinite(playbackRate) || !std::isfinite(pan))
+    if (!std::isfinite(result.playbackRate)
+        || !std::isfinite(result.pan))
+    {
         return GrainSchedulerStepResult::invalidParameters;
+    }
 
+    return GrainSchedulerStepResult::started;
+}
+
+GrainSchedulerStepResult GrainScheduler::attemptGrainStart(
+    const PreparedGrainRequest& request,
+    const CircularAudioBuffer& source,
+    GrainPool& pool
+) noexcept
+{
+    const auto availability = checkGrainStartAvailability(request, source);
+    if (availability != GrainSchedulerStepResult::started)
+        return availability;
+
+    const auto sourceRegion = source.captureSourceRegion();
     double startPosition = 0.0;
-
     const auto positionResult = calculateStartPosition(
         sourceRegion,
-        durationFrames,
-        playbackRate,
-        effectivePositionNormalized,
+        request.durationFrames,
+        request.playbackRate,
+        request.positionNormalized,
         startPosition
     );
 
-    if (positionResult == StartPositionResult::insufficientHistory)
+    if (positionResult != StartPositionResult::success)
     {
-        return GrainSchedulerStepResult::insufficientHistory;
-    }
-
-    if (positionResult == StartPositionResult::invalidRepresentation)
-        return GrainSchedulerStepResult::invalidTrajectory;
-
-    if (!source.isLinearTrajectoryValid(
-            sourceRegion,
-            startPosition,
-            playbackRate,
-            durationFrames
-        ))
-    {
-        return GrainSchedulerStepResult::invalidTrajectory;
+        return positionResult == StartPositionResult::insufficientHistory
+            ? GrainSchedulerStepResult::insufficientHistory
+            : GrainSchedulerStepResult::invalidTrajectory;
     }
 
     const GrainInit init {
         sourceRegion,
         startPosition,
-        playbackRate,
-        durationFrames,
-        parameters.envelope,
-        pan
+        request.playbackRate,
+        request.durationFrames,
+        request.envelope,
+        request.pan
     };
 
     switch (pool.tryStart(init, source))
@@ -278,9 +489,217 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     return GrainSchedulerStepResult::invalidTrajectory;
 }
 
-bool GrainScheduler::isPrepared() const noexcept
+GrainSchedulerStepResult GrainScheduler::checkGrainStartAvailability(
+    const PreparedGrainRequest& request,
+    const CircularAudioBuffer& source
+) const noexcept
 {
-    return prepared;
+    if (!source.isPrepared()
+        || !sampleRatesMatch(source.getSampleRate(), sampleRate))
+    {
+        return GrainSchedulerStepResult::sourceUnavailable;
+    }
+
+    const auto sourceRegion = source.captureSourceRegion();
+    if (!source.isSourceRegionCurrent(sourceRegion))
+        return GrainSchedulerStepResult::sourceUnavailable;
+
+    if (sourceRegion.isEmpty())
+        return GrainSchedulerStepResult::insufficientHistory;
+
+    double startPosition = 0.0;
+    const auto positionResult = calculateStartPosition(
+        sourceRegion,
+        request.durationFrames,
+        request.playbackRate,
+        request.positionNormalized,
+        startPosition
+    );
+
+    if (positionResult == StartPositionResult::insufficientHistory)
+        return GrainSchedulerStepResult::insufficientHistory;
+
+    if (positionResult == StartPositionResult::invalidRepresentation)
+        return GrainSchedulerStepResult::invalidTrajectory;
+
+    if (!source.isLinearTrajectoryValid(
+            sourceRegion,
+            startPosition,
+            request.playbackRate,
+            request.durationFrames
+        ))
+    {
+        return GrainSchedulerStepResult::invalidTrajectory;
+    }
+
+    return GrainSchedulerStepResult::started;
+}
+
+bool GrainScheduler::enqueuePendingEvent(
+    const PreparedGrainRequest& request,
+    std::uint64_t generationSample,
+    std::uint64_t minimumSpacingSamples
+) noexcept
+{
+    auto overflowed = false;
+    if (pendingCount >= pendingEventCapacity)
+    {
+        ++pendingOverflowCount;
+        // Keep the oldest events. This preserves the global event order and
+        // lets the stale policy decide deterministically how to catch up.
+        const auto newestIndex = (
+            pendingHead + pendingEventCapacity - 1
+        ) % pendingEventCapacity;
+        pendingEvents[newestIndex] = {};
+        --pendingCount;
+        overflowed = true;
+    }
+
+    const auto index = (pendingHead + pendingCount) % pendingEventCapacity;
+    pendingEvents[index].request = request;
+    pendingEvents[index].generationSample = generationSample;
+    pendingEvents[index].minimumSpacingSamples
+        = std::max<std::uint64_t>(1, minimumSpacingSamples);
+    ++pendingCount;
+    return !overflowed;
+}
+
+void GrainScheduler::removePendingHead() noexcept
+{
+    if (pendingCount == 0)
+        return;
+
+    pendingEvents[pendingHead] = {};
+    pendingHead = (pendingHead + 1) % pendingEventCapacity;
+    --pendingCount;
+}
+
+void GrainScheduler::ageAndExpirePendingEvents(
+    std::uint64_t currentSample,
+    bool& expired
+) noexcept
+{
+    expired = false;
+    const auto maximumAge = static_cast<std::uint64_t>(std::ceil(
+        sampleRate * pendingEventMaximumAgeSeconds
+    ));
+
+    while (pendingCount > 0
+           && (currentSample < pendingEventAt(0).generationSample
+               || currentSample - pendingEventAt(0).generationSample
+                   >= maximumAge))
+    {
+        removePendingHead();
+        ++pendingExpiredCount;
+        expired = true;
+    }
+}
+
+bool GrainScheduler::isPendingEventTooLate(
+    const PendingEvent& event,
+    std::uint64_t currentSample
+) const noexcept
+{
+    if (currentSample < event.generationSample)
+        return true;
+
+    const auto elapsed = currentSample - event.generationSample;
+    const auto minimumSpacing = std::max<std::uint64_t>(
+        1,
+        event.minimumSpacingSamples
+    );
+    const auto latenessLimit = minimumSpacing >
+            (std::numeric_limits<std::uint64_t>::max() / 2)
+        ? std::numeric_limits<std::uint64_t>::max()
+        : minimumSpacing * 2;
+    return elapsed > latenessLimit;
+}
+
+bool GrainScheduler::canStartAtSample(
+    std::uint64_t currentSample,
+    std::uint64_t minimumSpacingSamples
+) const noexcept
+{
+    if (!hasSuccessfulStart || currentSample < lastSuccessfulStartSample)
+        return true;
+
+    const auto elapsed = currentSample - lastSuccessfulStartSample;
+    return elapsed >= std::max<std::uint64_t>(
+        1,
+        minimumSpacingSamples
+    );
+}
+
+bool GrainScheduler::canStartPendingAtSample(
+    const PendingEvent& event,
+    std::uint64_t currentSample
+) const noexcept
+{
+    if (currentSample < event.generationSample)
+        return false;
+
+    const auto spacing = std::max<std::uint64_t>(
+        1,
+        event.minimumSpacingSamples
+    );
+    const auto earliestStart = event.generationSample >
+            (std::numeric_limits<std::uint64_t>::max() - spacing)
+        ? std::numeric_limits<std::uint64_t>::max()
+        : event.generationSample + spacing;
+
+    return currentSample >= earliestStart
+        && canStartAtSample(currentSample, spacing);
+}
+
+void GrainScheduler::recordSuccessfulStart(
+    std::uint64_t currentSample
+) noexcept
+{
+    lastSuccessfulStartSample = currentSample;
+    hasSuccessfulStart = true;
+}
+
+void GrainScheduler::advanceSampleClock() noexcept
+{
+    if (sampleClock < std::numeric_limits<std::uint64_t>::max())
+        ++sampleClock;
+}
+
+std::uint64_t GrainScheduler::calculateMinimumSpacingSamples(
+    double density
+) const noexcept
+{
+    if (!std::isfinite(density) || density <= 0.0)
+        return 1;
+
+    const auto boundedDensity = std::clamp(
+        density,
+        minimumDensityGrainsPerSecond,
+        maximumDensityGrainsPerSecond
+    );
+    const auto exactSpacing = sampleRate / boundedDensity;
+
+    if (!std::isfinite(exactSpacing) || exactSpacing <= 0.0)
+        return 1;
+
+    return std::max<std::uint64_t>(
+        1,
+        static_cast<std::uint64_t>(std::floor(exactSpacing))
+    );
+}
+
+GrainScheduler::PendingEvent& GrainScheduler::pendingEventAt(
+    std::size_t offset
+) noexcept
+{
+    return pendingEvents[(pendingHead + offset) % pendingEventCapacity];
+}
+
+const GrainScheduler::PendingEvent& GrainScheduler::pendingEventAt(
+    std::size_t offset
+) const noexcept
+{
+    return pendingEvents[(pendingHead + offset) % pendingEventCapacity];
 }
 
 void GrainScheduler::resetRandomState() noexcept
