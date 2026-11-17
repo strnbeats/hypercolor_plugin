@@ -14,6 +14,14 @@ inline juce::Colour grid() noexcept { return juce::Colour(0xff2a2e3bu); }
 inline juce::Colour cyan() noexcept { return juce::Colour(0xff00e5ffu); }
 inline juce::Colour pink() noexcept { return juce::Colour(0xffff3cacu); }
 inline juce::Colour lime() noexcept { return juce::Colour(0xffd6ff3fu); }
+inline juce::Colour space() noexcept { return juce::Colour(0xffa78bfau); }
+inline juce::Colour modulation() noexcept { return juce::Colour(0xff398bffu); }
+inline juce::Colour drive() noexcept { return juce::Colour(0xffff7138u); }
+inline juce::Colour tape() noexcept { return juce::Colour(0xffd9a441u); }
+inline juce::Colour bitcrush() noexcept { return juce::Colour(0xffd6ff3fu); }
+inline juce::Colour filter() noexcept { return juce::Colour(0xff39d98au); }
+inline juce::Colour dynamics() noexcept { return juce::Colour(0xffff5277u); }
+inline juce::Colour delay() noexcept { return juce::Colour(0xffff3cacu); }
 inline juce::Colour text() noexcept { return juce::Colour(0xffedf1f7u); }
 inline juce::Colour mutedText() noexcept { return juce::Colour(0xff858b9eu); }
 }

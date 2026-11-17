@@ -34,7 +34,7 @@ void HypercolorLookAndFeel::drawRotarySlider(
         static_cast<float>(y),
         static_cast<float>(width),
         static_cast<float>(height)
-    ).reduced(7.0f);
+    ).reduced(8.0f);
     const auto radius = juce::jmax(
         8.0f,
         std::min(bounds.getWidth(), bounds.getHeight()) * 0.5f
@@ -42,31 +42,115 @@ void HypercolorLookAndFeel::drawRotarySlider(
     const auto centre = bounds.getCentre();
     const auto angle = rotaryStartAngle
         + sliderPosition * (rotaryEndAngle - rotaryStartAngle);
-    const auto accent = slider.findColour(
+    const auto baseAccent = slider.findColour(
         juce::Slider::rotarySliderFillColourId
     );
+    const auto isActive = slider.isMouseButtonDown();
+    const auto isHover = slider.isMouseOverOrDragging();
+    const auto accent = isActive
+        ? baseAccent.brighter(0.16f)
+        : (isHover ? baseAccent.brighter(0.08f) : baseAccent);
+    const auto compactControl = std::min(width, height) < 90;
 
-    for (int tick = 0; tick <= 10; ++tick)
+    // The control is intentionally built in layers: a soft shadow, a dark
+    // metal bezel, an inset surface and a separate illuminated scale.  This
+    // keeps the knob readable at small sizes while giving the large Drive
+    // controls a physical, instrument-like presence.
+    const auto outerRadius = juce::jmax(10.0f, radius - 1.0f);
+    const auto shadowRadius = outerRadius + 2.0f;
+    graphics.setColour(juce::Colours::black.withAlpha(0.28f));
+    graphics.fillEllipse(
+        centre.x - shadowRadius,
+        centre.y - shadowRadius + 3.0f,
+        shadowRadius * 2.0f,
+        shadowRadius * 2.0f
+    );
+
+    juce::ColourGradient bezelGradient(
+        palette::panelRaised().brighter(0.16f),
+        centre.x - outerRadius,
+        centre.y - outerRadius,
+        palette::background().brighter(0.03f),
+        centre.x + outerRadius,
+        centre.y + outerRadius,
+        true
+    );
+    graphics.setGradientFill(bezelGradient);
+    graphics.fillEllipse(
+        centre.x - outerRadius,
+        centre.y - outerRadius,
+        outerRadius * 2.0f,
+        outerRadius * 2.0f
+    );
+    graphics.setColour(palette::border().brighter(0.12f));
+    graphics.drawEllipse(
+        centre.x - outerRadius,
+        centre.y - outerRadius,
+        outerRadius * 2.0f,
+        outerRadius * 2.0f,
+        1.1f
+    );
+
+    const auto innerRadius = juce::jmax(8.0f, outerRadius - 6.0f);
+    juce::ColourGradient surfaceGradient(
+        palette::panelRaised().brighter(0.05f),
+        centre.x,
+        centre.y - innerRadius,
+        palette::background().brighter(0.015f),
+        centre.x,
+        centre.y + innerRadius,
+        false
+    );
+    graphics.setGradientFill(surfaceGradient);
+    graphics.fillEllipse(
+        centre.x - innerRadius,
+        centre.y - innerRadius,
+        innerRadius * 2.0f,
+        innerRadius * 2.0f
+    );
+    graphics.setColour(palette::grid().withAlpha(0.95f));
+    graphics.drawEllipse(
+        centre.x - innerRadius,
+        centre.y - innerRadius,
+        innerRadius * 2.0f,
+        innerRadius * 2.0f,
+        1.0f
+    );
+
+    if (isHover || isActive)
+    {
+        graphics.setColour(accent.withAlpha(isActive ? 0.18f : 0.09f));
+        graphics.drawEllipse(
+            centre.x - outerRadius - 3.0f,
+            centre.y - outerRadius - 3.0f,
+            (outerRadius + 3.0f) * 2.0f,
+            (outerRadius + 3.0f) * 2.0f,
+            isActive ? 2.0f : 1.2f
+        );
+    }
+
+    const auto tickCount = compactControl ? 12 : 16;
+    for (int tick = 0; tick <= tickCount; ++tick)
     {
         const auto tickAngle = rotaryStartAngle
             + (rotaryEndAngle - rotaryStartAngle)
-                * static_cast<float>(tick) / 10.0f;
-        const auto inner = radius - 1.0f;
-        const auto outer = radius + (tick % 5 == 0 ? 4.0f : 2.0f);
+                * static_cast<float>(tick) / static_cast<float>(tickCount);
+        const auto inner = outerRadius + 2.0f;
+        const auto outer = inner + (tick % 4 == 0 ? 5.0f : 3.0f);
         const auto sinAngle = std::sin(tickAngle);
         const auto cosAngle = std::cos(tickAngle);
 
         graphics.setColour(
-            tick <= juce::roundToInt(sliderPosition * 10.0f)
-                ? accent.withAlpha(0.72f)
-                : palette::border()
+            tick <= juce::roundToInt(sliderPosition * static_cast<float>(tickCount))
+                ? accent.withAlpha(0.82f)
+                : palette::border().withAlpha(0.9f)
         );
         graphics.drawLine(
             centre.x + sinAngle * inner,
             centre.y - cosAngle * inner,
             centre.x + sinAngle * outer,
             centre.y - cosAngle * outer,
-            tick % 5 == 0 ? 1.5f : 1.0f
+            tick % (compactControl ? 3 : 4) == 0 ? 1.7f : 1.0f
         );
     }
 
@@ -74,25 +158,25 @@ void HypercolorLookAndFeel::drawRotarySlider(
     track.addCentredArc(
         centre.x,
         centre.y,
-        radius - 7.0f,
-        radius - 7.0f,
+        outerRadius + 3.0f,
+        outerRadius + 3.0f,
         0.0f,
         rotaryStartAngle,
         rotaryEndAngle,
         true
     );
-    graphics.setColour(palette::grid());
+    graphics.setColour(palette::grid().withAlpha(0.9f));
     graphics.strokePath(
         track,
-        juce::PathStrokeType(5.0f, juce::PathStrokeType::curved)
+        juce::PathStrokeType(compactControl ? 4.5f : 6.0f, juce::PathStrokeType::curved)
     );
 
     juce::Path valueTrack;
     valueTrack.addCentredArc(
         centre.x,
         centre.y,
-        radius - 7.0f,
-        radius - 7.0f,
+        outerRadius + 3.0f,
+        outerRadius + 3.0f,
         0.0f,
         rotaryStartAngle,
         angle,
@@ -101,18 +185,33 @@ void HypercolorLookAndFeel::drawRotarySlider(
     graphics.setColour(accent);
     graphics.strokePath(
         valueTrack,
-        juce::PathStrokeType(5.0f, juce::PathStrokeType::curved)
+        juce::PathStrokeType(
+            compactControl ? (isActive ? 5.0f : 4.5f) : (isActive ? 7.0f : 6.0f),
+            juce::PathStrokeType::curved
+        )
     );
 
-    const auto knobRadius = juce::jmax(7.0f, radius - 17.0f);
-    graphics.setColour(palette::panelRaised());
+    const auto knobRadius = juce::jmax(
+        8.0f,
+        innerRadius - (compactControl ? 3.0f : 5.0f)
+    );
+    juce::ColourGradient knobGradient(
+        palette::panelRaised().brighter(0.12f),
+        centre.x - knobRadius * 0.7f,
+        centre.y - knobRadius,
+        palette::background().brighter(0.02f),
+        centre.x + knobRadius * 0.7f,
+        centre.y + knobRadius,
+        true
+    );
+    graphics.setGradientFill(knobGradient);
     graphics.fillEllipse(
         centre.x - knobRadius,
         centre.y - knobRadius,
         knobRadius * 2.0f,
         knobRadius * 2.0f
     );
-    graphics.setColour(palette::border());
+    graphics.setColour(palette::border().brighter(0.16f));
     graphics.drawEllipse(
         centre.x - knobRadius,
         centre.y - knobRadius,
@@ -128,9 +227,12 @@ void HypercolorLookAndFeel::drawRotarySlider(
         centre.y,
         centre.x + std::sin(angle) * pointerLength,
         centre.y - std::cos(angle) * pointerLength,
-        2.5f
+        compactControl ? (isActive ? 2.6f : 2.1f) : (isActive ? 3.4f : 2.7f)
     );
-    graphics.fillEllipse(centre.x - 2.0f, centre.y - 2.0f, 4.0f, 4.0f);
+    graphics.setColour(palette::background().brighter(0.12f));
+    graphics.fillEllipse(centre.x - 5.0f, centre.y - 5.0f, 10.0f, 10.0f);
+    graphics.setColour(accent);
+    graphics.fillEllipse(centre.x - 2.5f, centre.y - 2.5f, 5.0f, 5.0f);
 }
 
 void HypercolorLookAndFeel::drawButtonBackground(
@@ -143,7 +245,9 @@ void HypercolorLookAndFeel::drawButtonBackground(
 {
     auto bounds = button.getLocalBounds().toFloat().reduced(0.5f);
     const auto active = button.getToggleState();
-    auto fill = active ? palette::pink() : backgroundColour;
+    auto fill = active
+        ? button.findColour(juce::TextButton::buttonOnColourId)
+        : backgroundColour;
 
     if (shouldDrawButtonAsDown)
         fill = fill.darker(0.18f);
@@ -162,7 +266,11 @@ void HypercolorLookAndFeel::drawButtonBackground(
 
     graphics.setColour(fill);
     graphics.fillPath(shape);
-    graphics.setColour(active ? palette::lime() : palette::border());
+    graphics.setColour(
+        active
+            ? button.findColour(juce::TextButton::buttonOnColourId).brighter(0.18f)
+            : palette::border()
+    );
     graphics.strokePath(shape, juce::PathStrokeType(active ? 1.5f : 1.0f));
 }
 

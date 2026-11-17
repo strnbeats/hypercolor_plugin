@@ -122,9 +122,11 @@ void GranularVisualizer::paint(juce::Graphics& graphics)
         2.0f
     );
 
-    auto content = bounds.reduced(15.0f, 10.0f);
-    auto header = content.removeFromTop(27.0f);
-    auto footer = content.removeFromBottom(24.0f);
+    auto content = bounds.reduced(12.0f, 6.0f);
+    auto header = content.removeFromTop(21.0f);
+    content.removeFromTop(2.0f);
+    auto footer = content.removeFromBottom(20.0f);
+    content.removeFromBottom(3.0f);
 
     graphics.setFont(juce::FontOptions(11.0f).withStyle("Bold"));
     graphics.setColour(hypercolor::ui::palette::cyan());
@@ -158,7 +160,10 @@ void GranularVisualizer::paint(juce::Graphics& graphics)
         false
     );
 
-    auto plot = content.reduced(0.0f, 5.0f);
+    // Keep the telemetry plot strictly separate from the header/footer.  In
+    // particular, grain markers must never be allowed to paint over the
+    // history labels or status text when the component is resized.
+    auto plot = content;
     graphics.setColour(hypercolor::ui::palette::background().withAlpha(0.58f));
     graphics.fillRect(plot);
 
@@ -199,8 +204,11 @@ void GranularVisualizer::paint(juce::Graphics& graphics)
         return;
     }
 
+    graphics.saveState();
+    graphics.reduceClipRegion(plot.toNearestInt());
     drawWaveform(graphics, plot);
     drawGrains(graphics, plot);
+    graphics.restoreState();
 
     graphics.setFont(juce::FontOptions(9.0f).withStyle("Bold"));
     graphics.setColour(hypercolor::ui::palette::mutedText());
