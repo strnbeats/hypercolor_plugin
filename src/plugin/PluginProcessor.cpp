@@ -343,6 +343,9 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     grainEnvelopeParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainEnvelope
     );
+    reverbEnabledParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::reverbEnabled
+    );
     reverbMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbMix);
     reverbSizeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbSize);
     reverbDecayParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::reverbDecay);
@@ -356,7 +359,13 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     modulationFeedbackParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationFeedback);
     modulationMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationMix);
     modulationWidthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::modulationWidth);
+    modulationEnabledParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::modulationEnabled
+    );
     driveModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveMode);
+    driveEnabledParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::driveEnabled
+    );
     driveAmountParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveAmount);
     driveToneParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveTone);
     driveMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::driveMix);
@@ -370,24 +379,39 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     delayHighCutParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayHighCut);
     delayMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayMix);
     delayWidthParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::delayWidth);
+    delayEnabledParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::delayEnabled
+    );
     tapeDriveParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeDrive);
+    tapeEnabledParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::tapeEnabled
+    );
     tapeWowParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeWow);
     tapeFlutterParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeFlutter);
     tapeWearParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeWear);
     tapeMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeMix);
     tapeOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::tapeOutput);
     bitcrushBitsParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushBits);
+    bitcrushEnabledParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::bitcrushEnabled
+    );
     bitcrushRateParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushRate);
     bitcrushModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushMode);
     bitcrushMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushMix);
     bitcrushOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::bitcrushOutput);
     filterModeParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterMode);
+    filterEnabledParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::filterEnabled
+    );
     filterCutoffParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterCutoff);
     filterResonanceParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterResonance);
     filterDriveParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterDrive);
     filterMixParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterMix);
     filterOutputParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::filterOutput);
     compressorThresholdParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorThreshold);
+    compressorEnabledParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::compressorEnabled
+    );
     compressorRatioParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorRatio);
     compressorAttackParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorAttack);
     compressorReleaseParameter = parameters.getRawParameterValue(hypercolor::ParameterIDs::compressorRelease);
@@ -412,6 +436,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(grainStereoSpreadParameter != nullptr);
     jassert(grainPanRandomParameter != nullptr);
     jassert(grainEnvelopeParameter != nullptr);
+    jassert(reverbEnabledParameter != nullptr);
     jassert(reverbMixParameter != nullptr);
     jassert(reverbSizeParameter != nullptr);
     jassert(reverbDecayParameter != nullptr);
@@ -425,7 +450,9 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(modulationFeedbackParameter != nullptr);
     jassert(modulationMixParameter != nullptr);
     jassert(modulationWidthParameter != nullptr);
+    jassert(modulationEnabledParameter != nullptr);
     jassert(driveModeParameter != nullptr);
+    jassert(driveEnabledParameter != nullptr);
     jassert(driveAmountParameter != nullptr);
     jassert(driveToneParameter != nullptr);
     jassert(driveMixParameter != nullptr);
@@ -439,24 +466,29 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(delayHighCutParameter != nullptr);
     jassert(delayMixParameter != nullptr);
     jassert(delayWidthParameter != nullptr);
+    jassert(delayEnabledParameter != nullptr);
     jassert(tapeDriveParameter != nullptr);
+    jassert(tapeEnabledParameter != nullptr);
     jassert(tapeWowParameter != nullptr);
     jassert(tapeFlutterParameter != nullptr);
     jassert(tapeWearParameter != nullptr);
     jassert(tapeMixParameter != nullptr);
     jassert(tapeOutputParameter != nullptr);
     jassert(bitcrushBitsParameter != nullptr);
+    jassert(bitcrushEnabledParameter != nullptr);
     jassert(bitcrushRateParameter != nullptr);
     jassert(bitcrushModeParameter != nullptr);
     jassert(bitcrushMixParameter != nullptr);
     jassert(bitcrushOutputParameter != nullptr);
     jassert(filterModeParameter != nullptr);
+    jassert(filterEnabledParameter != nullptr);
     jassert(filterCutoffParameter != nullptr);
     jassert(filterResonanceParameter != nullptr);
     jassert(filterDriveParameter != nullptr);
     jassert(filterMixParameter != nullptr);
     jassert(filterOutputParameter != nullptr);
     jassert(compressorThresholdParameter != nullptr);
+    jassert(compressorEnabledParameter != nullptr);
     jassert(compressorRatioParameter != nullptr);
     jassert(compressorAttackParameter != nullptr);
     jassert(compressorReleaseParameter != nullptr);
@@ -746,6 +778,10 @@ void HypercolorAudioProcessor::prepareToPlay(
     const auto inputChannels = getTotalNumInputChannels();
 
     dryBuffer.setSize(2, scratchBlockSize, false, false, true);
+    // EffectChain samples module bypass state while it is prepared. Sync the
+    // APVTS targets first so a state loaded before prepareToPlay starts in the
+    // correct enabled/bypassed state.
+    updateEffectBypassTargets();
 
     const hypercolor::core::ProcessSpec processSpec {
         sampleRate,
@@ -826,6 +862,7 @@ void HypercolorAudioProcessor::processBlock(
     }
 
     updateParameterTargets();
+    updateEffectBypassTargets();
     const auto bpmForBlock = readHostBpm();
     const auto densityBpm = static_cast<double>(lastValidHostBpm.load(
         std::memory_order_acquire
@@ -969,6 +1006,37 @@ void HypercolorAudioProcessor::updateParameterTargets() noexcept
                 outputGainDb
             )
         )
+    );
+}
+
+void HypercolorAudioProcessor::updateEffectBypassTargets() noexcept
+{
+    // APVTS raw values are atomic and are therefore safe to sample on the
+    // audio thread. EffectChain owns the sample-level 15 ms ramp; these calls
+    // only publish the current target for each module.
+    spaceReverb.setBypassed(
+        reverbEnabledParameter->load(std::memory_order_relaxed) < 0.5f
+    );
+    modulationEffect.setBypassed(
+        modulationEnabledParameter->load(std::memory_order_relaxed) < 0.5f
+    );
+    driveEffect.setBypassed(
+        driveEnabledParameter->load(std::memory_order_relaxed) < 0.5f
+    );
+    tapeEffect.setBypassed(
+        tapeEnabledParameter->load(std::memory_order_relaxed) < 0.5f
+    );
+    bitcrushEffect.setBypassed(
+        bitcrushEnabledParameter->load(std::memory_order_relaxed) < 0.5f
+    );
+    filterEffect.setBypassed(
+        filterEnabledParameter->load(std::memory_order_relaxed) < 0.5f
+    );
+    compressorEffect.setBypassed(
+        compressorEnabledParameter->load(std::memory_order_relaxed) < 0.5f
+    );
+    delayEffect.setBypassed(
+        delayEnabledParameter->load(std::memory_order_relaxed) < 0.5f
     );
 }
 

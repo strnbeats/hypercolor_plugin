@@ -801,6 +801,240 @@ juce::AudioBuffer<float> renderGranularParameters(
     return buffer;
 }
 
+constexpr std::array fxEnableParameterIDs {
+    hypercolor::ParameterIDs::reverbEnabled,
+    hypercolor::ParameterIDs::modulationEnabled,
+    hypercolor::ParameterIDs::driveEnabled,
+    hypercolor::ParameterIDs::tapeEnabled,
+    hypercolor::ParameterIDs::bitcrushEnabled,
+    hypercolor::ParameterIDs::filterEnabled,
+    hypercolor::ParameterIDs::compressorEnabled,
+    hypercolor::ParameterIDs::delayEnabled
+};
+
+void configureFxForRuntimeTest(
+    HypercolorAudioProcessor& processor,
+    std::size_t effectIndex
+)
+{
+    switch (effectIndex)
+    {
+        case 0:
+            setParameter(processor, hypercolor::ParameterIDs::reverbMix, 100.0f);
+            setParameter(processor, hypercolor::ParameterIDs::reverbSize, 85.0f);
+            setParameter(processor, hypercolor::ParameterIDs::reverbDecay, 8.0f);
+            setParameter(processor, hypercolor::ParameterIDs::reverbDamping, 10.0f);
+            setParameter(processor, hypercolor::ParameterIDs::reverbPreDelay, 10.0f);
+            break;
+        case 1:
+            setParameter(processor, hypercolor::ParameterIDs::modulationMix, 100.0f);
+            setParameter(processor, hypercolor::ParameterIDs::modulationRate, 3.0f);
+            setParameter(processor, hypercolor::ParameterIDs::modulationDepth, 95.0f);
+            setParameter(processor, hypercolor::ParameterIDs::modulationBaseDelay, 12.0f);
+            setParameter(processor, hypercolor::ParameterIDs::modulationFeedback, 45.0f);
+            break;
+        case 2:
+            setParameter(processor, hypercolor::ParameterIDs::driveAmount, 30.0f);
+            setParameter(processor, hypercolor::ParameterIDs::driveTone, 25.0f);
+            setParameter(processor, hypercolor::ParameterIDs::driveMix, 100.0f);
+            break;
+        case 3:
+            setParameter(processor, hypercolor::ParameterIDs::tapeDrive, 95.0f);
+            setParameter(processor, hypercolor::ParameterIDs::tapeWow, 35.0f);
+            setParameter(processor, hypercolor::ParameterIDs::tapeFlutter, 30.0f);
+            setParameter(processor, hypercolor::ParameterIDs::tapeWear, 65.0f);
+            setParameter(processor, hypercolor::ParameterIDs::tapeMix, 100.0f);
+            break;
+        case 4:
+            setParameter(processor, hypercolor::ParameterIDs::bitcrushBits, 4.0f);
+            setParameter(processor, hypercolor::ParameterIDs::bitcrushRate, 500.0f);
+            setParameter(processor, hypercolor::ParameterIDs::bitcrushMix, 100.0f);
+            break;
+        case 5:
+            setParameter(processor, hypercolor::ParameterIDs::filterCutoff, 350.0f);
+            setParameter(processor, hypercolor::ParameterIDs::filterResonance, 70.0f);
+            setParameter(processor, hypercolor::ParameterIDs::filterDrive, 45.0f);
+            setParameter(processor, hypercolor::ParameterIDs::filterMix, 100.0f);
+            break;
+        case 6:
+            setParameter(processor, hypercolor::ParameterIDs::compressorThreshold, -45.0f);
+            setParameter(processor, hypercolor::ParameterIDs::compressorRatio, 20.0f);
+            setParameter(processor, hypercolor::ParameterIDs::compressorAttack, 1.0f);
+            setParameter(processor, hypercolor::ParameterIDs::compressorRelease, 80.0f);
+            setParameter(processor, hypercolor::ParameterIDs::compressorKnee, 0.0f);
+            setParameter(processor, hypercolor::ParameterIDs::compressorMakeup, 6.0f);
+            setParameter(processor, hypercolor::ParameterIDs::compressorMix, 100.0f);
+            break;
+        case 7:
+            setParameter(processor, hypercolor::ParameterIDs::delayTime, 45.0f);
+            setParameter(processor, hypercolor::ParameterIDs::delayFeedback, 55.0f);
+            setParameter(processor, hypercolor::ParameterIDs::delayLowCut, 20.0f);
+            setParameter(processor, hypercolor::ParameterIDs::delayHighCut, 18000.0f);
+            setParameter(processor, hypercolor::ParameterIDs::delayMix, 100.0f);
+            break;
+        default:
+            jassertfalse;
+            break;
+    }
+}
+
+void configureGranularRuntimeTest(HypercolorAudioProcessor& processor)
+{
+    (void) processor.setBusesLayout({
+        juce::AudioChannelSet::mono(),
+        juce::AudioChannelSet::mono()
+    });
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    setParameter(processor, hypercolor::ParameterIDs::outputGain, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, 120.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainSize, 10.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainPosition, 0.5f);
+    setParameter(processor, hypercolor::ParameterIDs::grainPitch, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainReverse, 0.0f);
+    // Keep every non-target module acoustically neutral. This makes the
+    // per-flag assertions sensitive to an accidental APVTS-to-module swap,
+    // rather than merely proving that some other FX became audible.
+    setParameter(processor, hypercolor::ParameterIDs::reverbMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::modulationMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::driveMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::tapeMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::bitcrushMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::filterMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::compressorMix, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::delayMix, 0.0f);
+    for (const auto* parameterID : fxEnableParameterIDs)
+        setParameter(processor, parameterID, 0.0f);
+}
+
+juce::AudioBuffer<float> renderFxRuntimeScenario(int enabledEffect)
+{
+    HypercolorAudioProcessor processor;
+    configureGranularRuntimeTest(processor);
+    if (enabledEffect >= 0)
+    {
+        setParameter(
+            processor,
+            fxEnableParameterIDs[static_cast<std::size_t>(enabledEffect)],
+            1.0f
+        );
+        configureFxForRuntimeTest(
+            processor,
+            static_cast<std::size_t>(enabledEffect)
+        );
+    }
+    processor.prepareToPlay(sampleRate, 64);
+
+    constexpr int renderSamples = 48000;
+    juce::AudioBuffer<float> buffer(1, renderSamples);
+    for (int sample = 0; sample < renderSamples; ++sample)
+    {
+        const auto phase = static_cast<float>(sample % 997) / 997.0f;
+        const auto transient = sample % 1200 < 8 ? 0.65f : 0.0f;
+        buffer.setSample(
+            0,
+            sample,
+            0.22f * std::sin(phase * juce::MathConstants<float>::twoPi)
+                + 0.08f * phase
+                + transient
+        );
+    }
+
+    juce::MidiBuffer midi;
+    processor.processBlock(buffer, midi);
+    return buffer;
+}
+
+float maximumDifferenceAfter(
+    const juce::AudioBuffer<float>& first,
+    const juce::AudioBuffer<float>& second,
+    int firstSample
+)
+{
+    const auto start = juce::jlimit(0, first.getNumSamples(), firstSample);
+    auto maximum = 0.0f;
+    for (int sample = start; sample < first.getNumSamples(); ++sample)
+        maximum = juce::jmax(
+            maximum,
+            std::abs(first.getSample(0, sample) - second.getSample(0, sample))
+        );
+    return maximum;
+}
+
+void testFxEnableRuntimeIntegration(TestContext& context)
+{
+    const auto bypassed = renderFxRuntimeScenario(-1);
+    context.expect(isFinite(bypassed), "fully bypassed processor output should stay finite");
+
+    for (std::size_t effectIndex = 0; effectIndex < fxEnableParameterIDs.size(); ++effectIndex)
+    {
+        const auto enabled = renderFxRuntimeScenario(static_cast<int>(effectIndex));
+        context.expect(isFinite(enabled), "enabled FX processor output should stay finite");
+        context.expect(
+            maximumDifferenceAfter(bypassed, enabled, 24000) > 1.0e-4f,
+            "each APVTS FX enable parameter should change its processor output"
+        );
+    }
+}
+
+void testFxEnableStateAndTransition(TestContext& context)
+{
+    HypercolorAudioProcessor source;
+    configureGranularRuntimeTest(source);
+    setParameter(source, hypercolor::ParameterIDs::driveEnabled, 1.0f);
+    configureFxForRuntimeTest(source, 2);
+    juce::MemoryBlock state;
+    source.getStateInformation(state);
+
+    HypercolorAudioProcessor restored;
+    restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    context.expect(
+        getParameterValue(restored, hypercolor::ParameterIDs::driveEnabled) == 1.0f,
+        "state loading should restore the enabled FX flag"
+    );
+
+    restored.prepareToPlay(sampleRate, 64);
+    HypercolorAudioProcessor bypassed;
+    configureGranularRuntimeTest(bypassed);
+    configureFxForRuntimeTest(bypassed, 2);
+    bypassed.prepareToPlay(sampleRate, 64);
+
+    constexpr int blockSize = 512;
+    juce::AudioBuffer<float> restoredBlock(1, blockSize);
+    juce::AudioBuffer<float> bypassedBlock(1, blockSize);
+    juce::MidiBuffer midi;
+    for (int block = 0; block < 80; ++block)
+    {
+        fillBuffer(restoredBlock, 0.25f);
+        fillBuffer(bypassedBlock, 0.25f);
+        restored.processBlock(restoredBlock, midi);
+        bypassed.processBlock(bypassedBlock, midi);
+    }
+    context.expect(
+        buffersDiffer(restoredBlock, bypassedBlock, 1.0e-4f),
+        "restored enabled state should reach the EffectChain"
+    );
+
+    // Exercise a live APVTS transition on a prepared processor. The chain
+    // should ramp to wet rather than changing at a block boundary.
+    HypercolorAudioProcessor transitioning;
+    configureGranularRuntimeTest(transitioning);
+    configureFxForRuntimeTest(transitioning, 2);
+    transitioning.prepareToPlay(sampleRate, blockSize);
+    juce::AudioBuffer<float> before(1, blockSize);
+    juce::AudioBuffer<float> after(1, blockSize);
+    setParameter(transitioning, hypercolor::ParameterIDs::driveEnabled, 0.0f);
+    fillBuffer(before, 0.25f);
+    transitioning.processBlock(before, midi);
+    setParameter(transitioning, hypercolor::ParameterIDs::driveEnabled, 1.0f);
+    fillBuffer(after, 0.25f);
+    transitioning.processBlock(after, midi);
+    context.expect(isFinite(after), "FX enable transition should stay finite");
+    context.expect(
+        buffersDiffer(before, after, 1.0e-5f),
+        "changing an FX enable parameter during processing should change output"
+    );
+}
+
 void testGranularParametersReachEngine(TestContext& context)
 {
     const auto noDensity = renderGranularParameters(
@@ -2878,6 +3112,8 @@ int main()
     testGranularParameterContracts(context);
     testOutputGain(context);
     testGranularDryWetMix(context);
+    testFxEnableRuntimeIntegration(context);
+    testFxEnableStateAndTransition(context);
     testGranularParametersReachEngine(context);
     testStereoGranularProcessing(context);
     testFallbackResetAndReprepare(context);

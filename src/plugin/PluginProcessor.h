@@ -65,6 +65,7 @@ private:
         createParameterLayout();
 
     void updateParameterTargets() noexcept;
+    void updateEffectBypassTargets() noexcept;
     [[nodiscard]] double readHostBpm() noexcept;
     [[nodiscard]] hypercolor::dsp::granular::GranularEngineParameters
         readGranularParameters(double hostBpm) const noexcept;
@@ -98,6 +99,7 @@ private:
     std::atomic<float>* grainStereoSpreadParameter = nullptr;
     std::atomic<float>* grainPanRandomParameter = nullptr;
     std::atomic<float>* grainEnvelopeParameter = nullptr;
+    std::atomic<float>* reverbEnabledParameter = nullptr;
     std::atomic<float>* reverbMixParameter = nullptr;
     std::atomic<float>* reverbSizeParameter = nullptr;
     std::atomic<float>* reverbDecayParameter = nullptr;
@@ -111,7 +113,9 @@ private:
     std::atomic<float>* modulationFeedbackParameter = nullptr;
     std::atomic<float>* modulationMixParameter = nullptr;
     std::atomic<float>* modulationWidthParameter = nullptr;
+    std::atomic<float>* modulationEnabledParameter = nullptr;
     std::atomic<float>* driveModeParameter = nullptr;
+    std::atomic<float>* driveEnabledParameter = nullptr;
     std::atomic<float>* driveAmountParameter = nullptr;
     std::atomic<float>* driveToneParameter = nullptr;
     std::atomic<float>* driveMixParameter = nullptr;
@@ -125,24 +129,29 @@ private:
     std::atomic<float>* delayHighCutParameter = nullptr;
     std::atomic<float>* delayMixParameter = nullptr;
     std::atomic<float>* delayWidthParameter = nullptr;
+    std::atomic<float>* delayEnabledParameter = nullptr;
     std::atomic<float>* tapeDriveParameter = nullptr;
+    std::atomic<float>* tapeEnabledParameter = nullptr;
     std::atomic<float>* tapeWowParameter = nullptr;
     std::atomic<float>* tapeFlutterParameter = nullptr;
     std::atomic<float>* tapeWearParameter = nullptr;
     std::atomic<float>* tapeMixParameter = nullptr;
     std::atomic<float>* tapeOutputParameter = nullptr;
     std::atomic<float>* bitcrushBitsParameter = nullptr;
+    std::atomic<float>* bitcrushEnabledParameter = nullptr;
     std::atomic<float>* bitcrushRateParameter = nullptr;
     std::atomic<float>* bitcrushModeParameter = nullptr;
     std::atomic<float>* bitcrushMixParameter = nullptr;
     std::atomic<float>* bitcrushOutputParameter = nullptr;
     std::atomic<float>* filterModeParameter = nullptr;
+    std::atomic<float>* filterEnabledParameter = nullptr;
     std::atomic<float>* filterCutoffParameter = nullptr;
     std::atomic<float>* filterResonanceParameter = nullptr;
     std::atomic<float>* filterDriveParameter = nullptr;
     std::atomic<float>* filterMixParameter = nullptr;
     std::atomic<float>* filterOutputParameter = nullptr;
     std::atomic<float>* compressorThresholdParameter = nullptr;
+    std::atomic<float>* compressorEnabledParameter = nullptr;
     std::atomic<float>* compressorRatioParameter = nullptr;
     std::atomic<float>* compressorAttackParameter = nullptr;
     std::atomic<float>* compressorReleaseParameter = nullptr;
