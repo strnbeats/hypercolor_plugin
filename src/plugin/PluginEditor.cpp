@@ -479,43 +479,83 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     addAndMakeVisible(xyController);
     xyController.setCoordinates({ 0.5f, 0.5f }, false);
 
-    const auto configureSlider = [
+    const auto configurePremiumKnob = [
         this,
         text
     ](
-        juce::Slider& slider,
+        hypercolor::ui::PremiumRotaryKnob& knob,
         juce::String suffix,
         juce::Colour accent
     )
     {
-        slider.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
-        slider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 96, 25);
-        slider.setMouseDragSensitivity(180);
-        slider.setTextValueSuffix(std::move(suffix));
-        slider.setColour(juce::Slider::rotarySliderFillColourId, accent);
-        slider.setColour(
-            juce::Slider::rotarySliderOutlineColourId,
-            hypercolor::ui::palette::grid()
-        );
-        slider.setColour(juce::Slider::thumbColourId, accent);
-        slider.setColour(
-            juce::Slider::textBoxBackgroundColourId,
-            hypercolor::ui::palette::background()
-        );
-        slider.setColour(juce::Slider::textBoxTextColourId, text);
-        slider.setColour(
-            juce::Slider::textBoxOutlineColourId,
-            hypercolor::ui::palette::border()
-        );
-        addAndMakeVisible(slider);
+        knob.setAccentColour(accent);
+        knob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 96, 25);
+        knob.setMouseDragSensitivity(180);
+        knob.setTextValueSuffix(std::move(suffix));
+        knob.setColour(juce::Slider::textBoxBackgroundColourId,
+                       hypercolor::ui::palette::background());
+        knob.setColour(juce::Slider::textBoxTextColourId, text);
+        knob.setColour(juce::Slider::textBoxOutlineColourId,
+                       hypercolor::ui::palette::border());
+        addAndMakeVisible(knob);
     };
 
-    configureSlider(dryWetSlider, " %", lime);
-    configureSlider(outputGainSlider, " dB", cyan);
-    configureSlider(densitySlider, " gr/s", cyan);
-    configureSlider(sizeSlider, " ms", pink);
-    configureSlider(positionSlider, {}, lime);
-    configureSlider(pitchSlider, {}, cyan);
+    // The header controls share the Premium rotary language, with a compact
+    // footprint and their own global accent colours.
+    configurePremiumKnob(dryWetSlider, " %", lime);
+    configurePremiumKnob(outputGainSlider, " dB", cyan);
+    configurePremiumKnob(densitySlider, " gr/s", cyan);
+    configurePremiumKnob(sizeSlider, " ms", pink);
+    configurePremiumKnob(positionSlider, {}, lime);
+    configurePremiumKnob(pitchSlider, {}, hypercolor::ui::palette::space());
+
+    // Give the four main Granular controls a slightly larger visual presence
+    // while leaving the compact Header controls at their existing scale.
+    densitySlider.setVisualScale(1.09f);
+    sizeSlider.setVisualScale(1.09f);
+    positionSlider.setVisualScale(1.09f);
+    pitchSlider.setVisualScale(1.09f);
+
+    // Explicit three-stop arc palettes keep the colour travel visible at
+    // rest, not only during hover.  Each one stays within the identity of its
+    // control while giving the active arc a clear dark -> vivid -> light path.
+    densitySlider.setArcGradientColours(
+        juce::Colour(0xff005967u),
+        juce::Colour(0xff00e5ffu),
+        juce::Colour(0xffd7fdffu)
+    );
+    densitySlider.setArcContrastColour(juce::Colour(0xff398bffu));
+    sizeSlider.setArcGradientColours(
+        juce::Colour(0xff781047u),
+        juce::Colour(0xffff3cacu),
+        juce::Colour(0xffffd0eeu)
+    );
+    sizeSlider.setArcContrastColour(juce::Colour(0xffa94dffu));
+    positionSlider.setArcGradientColours(
+        juce::Colour(0xff3d7026u),
+        juce::Colour(0xffd6ff3fu),
+        juce::Colour(0xfff3ffb6u)
+    );
+    positionSlider.setArcContrastColour(juce::Colour(0xff39d98au));
+    pitchSlider.setArcGradientColours(
+        juce::Colour(0xff4c2a8cu),
+        juce::Colour(0xffa78bfau),
+        juce::Colour(0xffede8ffu)
+    );
+    pitchSlider.setArcContrastColour(juce::Colour(0xff398bffu));
+
+    dryWetSlider.setArcGradientColours(
+        juce::Colour(0xff4c6416u),
+        juce::Colour(0xffd6ff3fu),
+        juce::Colour(0xfff3ffb6u)
+    );
+    dryWetSlider.setArcContrastColour(juce::Colour(0xff39d98au));
+    outputGainSlider.setArcGradientColours(
+        juce::Colour(0xff005967u),
+        juce::Colour(0xff00e5ffu),
+        juce::Colour(0xffd7fdffu)
+    );
+    outputGainSlider.setArcContrastColour(juce::Colour(0xff398bffu));
 
     positionSlider.textFromValueFunction = [](double value)
     {
@@ -1012,9 +1052,9 @@ void HypercolorAudioProcessorEditor::resized()
         .withTrimmedTop(verticalMargin)
         .withTrimmedBottom(verticalMargin);
     const auto headerHeight = juce::jlimit(
-        58,
-        72,
-        juce::roundToInt(static_cast<float>(getHeight()) * 0.105f)
+        64,
+        84,
+        juce::roundToInt(static_cast<float>(getHeight()) * 0.112f)
     );
     headerArea = content.removeFromTop(headerHeight);
     content.removeFromTop(6);
@@ -1025,12 +1065,17 @@ void HypercolorAudioProcessorEditor::resized()
     masterPanel = {};
 
     // Global controls stay in the header on every workspace.
-    auto headerControls = headerArea.reduced(8, 7).removeFromRight(244);
+    auto headerControls = headerArea.reduced(8, 6).removeFromRight(244);
     auto dryWetBounds = headerControls.removeFromLeft(116).reduced(6, 0);
     auto outputGainBounds = headerControls.removeFromLeft(116).reduced(6, 0);
+    // Keep the caption in its own row.  The deliberate gap is larger than
+    // the knob's outer arc and shadow, so the label cannot visually sit on
+    // top of the control when the compact Header is resized.
     dryWetLabel.setBounds(dryWetBounds.removeFromTop(16));
+    dryWetBounds.removeFromTop(10);
     dryWetSlider.setBounds(dryWetBounds);
     outputGainLabel.setBounds(outputGainBounds.removeFromTop(16));
+    outputGainBounds.removeFromTop(10);
     outputGainSlider.setBounds(outputGainBounds);
     dryWetLabel.setVisible(true);
     dryWetSlider.setVisible(true);
@@ -1109,8 +1154,8 @@ void HypercolorAudioProcessorEditor::resized()
         auto inspectorArea = inspectorPanel.reduced(16, 12);
         const auto primaryHeight = juce::jlimit(
             190,
-            250,
-            juce::roundToInt(static_cast<float>(inspectorArea.getHeight()) * 0.48f)
+            270,
+            juce::roundToInt(static_cast<float>(inspectorArea.getHeight()) * 0.52f)
         );
         granularControlsArea = inspectorArea.removeFromTop(primaryHeight);
         auto primaryArea = granularControlsArea.reduced(10, 8);
@@ -1151,6 +1196,10 @@ void HypercolorAudioProcessorEditor::resized()
             ).reduced(3, 1);
 
             granularLabels[index]->setBounds(cell.removeFromTop(18));
+            // Keep the parameter caption visually independent from the
+            // rotary body.  This gap is part of the cell geometry rather
+            // than a paint-order trick, so it remains correct on resize.
+            cell.removeFromTop(10);
             auto hint = juce::Rectangle<int> {};
             if (granularControls[index] == &positionSlider && cell.getHeight() > 72)
                 hint = cell.removeFromBottom(14);

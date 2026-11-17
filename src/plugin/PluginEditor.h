@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include "GranularVisualizer.h"
 #include "HypercolorLookAndFeel.h"
+#include "PremiumRotaryKnob.h"
 #include "PluginProcessor.h"
 #include "XYController.h"
 
@@ -44,12 +45,12 @@ private:
     juce::Rectangle<int> rackPanel;
     juce::Rectangle<int> masterPanel;
 
-    juce::Slider dryWetSlider;
-    juce::Slider outputGainSlider;
-    juce::Slider densitySlider;
-    juce::Slider sizeSlider;
-    juce::Slider positionSlider;
-    juce::Slider pitchSlider;
+    hypercolor::ui::PremiumRotaryKnob dryWetSlider;
+    hypercolor::ui::PremiumRotaryKnob outputGainSlider;
+    hypercolor::ui::PremiumRotaryKnob densitySlider;
+    hypercolor::ui::PremiumRotaryKnob sizeSlider;
+    hypercolor::ui::PremiumRotaryKnob positionSlider;
+    hypercolor::ui::PremiumRotaryKnob pitchSlider;
     juce::TextButton reverseButton;
 
     juce::Label dryWetLabel;

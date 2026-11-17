@@ -72,6 +72,7 @@ target_sources(HYPERCOLOR
         src/dsp/granular/GrainScheduler.cpp
         src/plugin/GranularVisualizer.cpp
         src/plugin/HypercolorLookAndFeel.cpp
+        src/plugin/PremiumRotaryKnob.cpp
         src/plugin/XYController.cpp
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginEditor.cpp
