@@ -4,6 +4,7 @@
 #include "dsp/granular/GrainPool.h"
 #include "dsp/granular/GranularCharacter.h"
 #include "dsp/granular/GranularRandom.h"
+#include "dsp/granular/CausalReadPlan.h"
 
 #include <array>
 #include <cstddef>
@@ -87,6 +88,13 @@ public:
     [[nodiscard]] std::uint64_t getPendingExpiredCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingStaleCount() const noexcept;
 
+    // Copies immutable Event-Time metadata for a pending event. This bridge
+    // does not alter launch timing or production rendering.
+    [[nodiscard]] bool getPendingEventSnapshot(
+        std::size_t offset,
+        CausalEventSnapshot& result
+    ) const noexcept;
+
 private:
     enum class StartPositionResult : std::uint8_t
     {
@@ -107,6 +115,8 @@ private:
     struct PendingEvent
     {
         PreparedGrainRequest request {};
+        CausalEventSnapshot causalSnapshot {};
+        bool hasCausalSnapshot = false;
         std::uint64_t generationSample = 0;
         std::uint64_t minimumSpacingSamples = 1;
     };
@@ -129,6 +139,7 @@ private:
 
     [[nodiscard]] bool enqueuePendingEvent(
         const PreparedGrainRequest& request,
+        const CircularAudioBuffer& source,
         std::uint64_t generationSample,
         std::uint64_t minimumSpacingSamples
     ) noexcept;

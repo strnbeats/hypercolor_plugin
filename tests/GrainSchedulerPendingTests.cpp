@@ -51,6 +51,8 @@ using hypercolor::dsp::granular::GrainRenderAccess;
 using hypercolor::dsp::granular::GrainScheduler;
 using hypercolor::dsp::granular::GrainSchedulerParameters;
 using hypercolor::dsp::granular::GrainSchedulerStepResult;
+using hypercolor::dsp::granular::CausalEventSnapshot;
+using hypercolor::dsp::granular::CausalReadPlanBuilder;
 
 class TestContext
 {
@@ -590,6 +592,66 @@ void testTemporalParameterTransitions(TestContext& context)
             "reverse parameter transition must not create a burst"
         );
 }
+
+void testPendingEventTimeSnapshot(TestContext& context)
+{
+    const auto spec = makeSpec();
+    CircularAudioBuffer source;
+    GrainScheduler scheduler;
+    GrainPool pool;
+    context.expect(prepare(source, spec), "Event-Time source prepare");
+    context.expect(scheduler.prepare(spec), "Event-Time scheduler prepare");
+
+    const auto parameters = makeParameters(20.0, 100.0);
+    CausalEventSnapshot captured;
+    auto found = false;
+    std::uint64_t pendingNewest = 0;
+
+    for (std::size_t sample = 0; sample < 3000 && !found; ++sample)
+    {
+        context.expect(writeSilence(source), "Event-Time source write");
+        static_cast<void>(scheduler.processSample(parameters, source, pool));
+        if (scheduler.getPendingEventCount() != 0)
+        {
+            found = scheduler.getPendingEventSnapshot(0, captured);
+            if (found)
+                pendingNewest = captured.historyRegion.newestExclusive;
+        }
+    }
+
+    context.expect(found, "pending event must expose Event-Time snapshot");
+    context.expect(
+        found && captured.eventSample + 1 == pendingNewest,
+        "snapshot timestamp must match post-write Event-Time head");
+
+    const auto original = captured;
+    for (std::size_t sample = 0; sample < 256; ++sample)
+    {
+        context.expect(writeSilence(source), "retry source write");
+        static_cast<void>(scheduler.processSample(parameters, source, pool));
+    }
+
+    CausalEventSnapshot retried;
+    context.expect(
+        scheduler.getPendingEventSnapshot(0, retried),
+        "pending snapshot must survive retry");
+    context.expect(
+        retried.eventSample == original.eventSample
+            && retried.historyRegion.oldest == original.historyRegion.oldest
+            && retried.historyRegion.newestExclusive
+                == original.historyRegion.newestExclusive
+            && std::abs(retried.positionNormalized - original.positionNormalized)
+                <= std::numeric_limits<double>::epsilon()
+            && std::abs(retried.playbackRate - original.playbackRate)
+                <= std::numeric_limits<double>::epsilon()
+            && retried.grainLengthFrames == original.grainLengthFrames,
+        "retry must not replace Event-Time metadata");
+
+    const auto plan = CausalReadPlanBuilder::buildAtLaunch(source, retried);
+    context.expect(
+        plan.historyRegion.newestExclusive == original.historyRegion.newestExclusive,
+        "CausalReadPlan must receive the original SourceRegion");
+}
 }
 
 int main()
@@ -603,6 +665,7 @@ int main()
     testNoAudioPathAllocations(context);
     testTemporalSchedulerIntegrity(context);
     testTemporalParameterTransitions(context);
+    testPendingEventTimeSnapshot(context);
 
     if (context.failureCount() != 0)
         return 1;

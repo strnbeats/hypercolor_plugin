@@ -249,6 +249,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     {
         if (!enqueuePendingEvent(
                 request,
+                source,
                 currentSample,
                 minimumSpacingSamples
             ))
@@ -263,6 +264,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     {
         if (!enqueuePendingEvent(
                 request,
+                source,
                 currentSample,
                 minimumSpacingSamples
             ))
@@ -278,6 +280,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     {
         if (!enqueuePendingEvent(
                 request,
+                source,
                 currentSample,
                 minimumSpacingSamples
             ))
@@ -324,6 +327,22 @@ std::uint64_t GrainScheduler::getPendingExpiredCount() const noexcept
 std::uint64_t GrainScheduler::getPendingStaleCount() const noexcept
 {
     return pendingStaleCount;
+}
+
+bool GrainScheduler::getPendingEventSnapshot(
+    std::size_t offset,
+    CausalEventSnapshot& result
+) const noexcept
+{
+    if (offset >= pendingCount)
+        return false;
+
+    const auto& event = pendingEventAt(offset);
+    if (!event.hasCausalSnapshot)
+        return false;
+
+    result = event.causalSnapshot;
+    return true;
 }
 
 GrainSchedulerStepResult GrainScheduler::prepareGrainRequest(
@@ -537,6 +556,7 @@ GrainSchedulerStepResult GrainScheduler::checkGrainStartAvailability(
 
 bool GrainScheduler::enqueuePendingEvent(
     const PreparedGrainRequest& request,
+    const CircularAudioBuffer& source,
     std::uint64_t generationSample,
     std::uint64_t minimumSpacingSamples
 ) noexcept
@@ -557,6 +577,17 @@ bool GrainScheduler::enqueuePendingEvent(
 
     const auto index = (pendingHead + pendingCount) % pendingEventCapacity;
     pendingEvents[index].request = request;
+    pendingEvents[index].hasCausalSnapshot =
+        CausalReadPlanBuilder::captureDelayedEventSnapshot(
+            source,
+            source.captureSourceRegion(),
+            CausalSourcePolicy::historyThenLiveFallback,
+            generationSample,
+            request.positionNormalized,
+            request.playbackRate,
+            request.durationFrames,
+            pendingEvents[index].causalSnapshot
+        );
     pendingEvents[index].generationSample = generationSample;
     pendingEvents[index].minimumSpacingSamples
         = std::max<std::uint64_t>(1, minimumSpacingSamples);

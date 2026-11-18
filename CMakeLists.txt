@@ -63,6 +63,7 @@ target_sources(HYPERCOLOR
         src/dsp/fx/FilterEffect.cpp
         src/dsp/fx/CompressorEffect.cpp
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/CausalReadPlan.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
         src/dsp/granular/GranularRandom.cpp
@@ -155,6 +156,30 @@ if(BUILD_TESTING)
     add_test(
         NAME HYPERCOLOR.CircularAudioBuffer
         COMMAND HYPERCOLORCircularAudioBufferTests
+    )
+
+    add_executable(HYPERCOLORCausalReadPlanTests
+        src/dsp/granular/CausalReadPlan.cpp
+        src/dsp/granular/CircularAudioBuffer.cpp
+        tests/CausalReadPlanTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORCausalReadPlanTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(HYPERCOLORCausalReadPlanTests PRIVATE cxx_std_20)
+
+    target_link_libraries(HYPERCOLORCausalReadPlanTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.CausalReadPlan
+        COMMAND HYPERCOLORCausalReadPlanTests
     )
 
     add_executable(HYPERCOLORGrainTests
@@ -288,6 +313,7 @@ if(BUILD_TESTING)
 
     add_executable(HYPERCOLORGrainSchedulerPendingTests
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/CausalReadPlan.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularRandom.cpp
         src/dsp/granular/Grain.cpp
@@ -316,6 +342,7 @@ if(BUILD_TESTING)
 
     add_executable(HYPERCOLORGrainSchedulerTests
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/CausalReadPlan.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularRandom.cpp
         src/dsp/granular/Grain.cpp
