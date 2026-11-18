@@ -2594,6 +2594,24 @@ void testEditorControlsStateAndResize(TestContext& context)
             "new editor should show the default Live mode"
         );
     }
+    for (const auto* parameterID : fxEnableParameterIDs)
+    {
+        auto* enableButton = defaultEditor != nullptr
+            ? dynamic_cast<juce::Button*>(
+                  defaultEditor->findChildWithID(parameterID)
+              )
+            : nullptr;
+        context.expect(enableButton != nullptr,
+                       "FX Rack should expose an enable switch for each module");
+        if (enableButton != nullptr)
+        {
+            context.expect(
+                !enableButton->getToggleState()
+                    && enableButton->getButtonText() == "OFF",
+                "new project FX switches should display their disabled defaults"
+            );
+        }
+    }
 
     HypercolorAudioProcessor source;
     setParameter(source, hypercolor::ParameterIDs::grainDensity, 55.5f);
@@ -2602,6 +2620,8 @@ void testEditorControlsStateAndResize(TestContext& context)
     setParameter(source, hypercolor::ParameterIDs::grainPitch, -5.5f);
     setParameter(source, hypercolor::ParameterIDs::grainReverse, 1.0f);
     setParameter(source, hypercolor::ParameterIDs::granularSourceMode, 1.0f);
+    setParameter(source, hypercolor::ParameterIDs::driveEnabled, 1.0f);
+    setParameter(source, hypercolor::ParameterIDs::driveAmount, 14.4f);
 
     juce::MemoryBlock state;
     source.getStateInformation(state);
@@ -2741,6 +2761,40 @@ void testEditorControlsStateAndResize(TestContext& context)
         );
     }
 
+    auto* driveEnabled = dynamic_cast<juce::Button*>(
+        editor->findChildWithID(hypercolor::ParameterIDs::driveEnabled)
+    );
+    auto* delayEnabled = dynamic_cast<juce::Button*>(
+        editor->findChildWithID(hypercolor::ParameterIDs::delayEnabled)
+    );
+    context.expect(driveEnabled != nullptr && delayEnabled != nullptr,
+                   "FX enable buttons should be addressable by APVTS IDs");
+    if (driveEnabled != nullptr)
+    {
+        context.expect(driveEnabled->getToggleState()
+                           && driveEnabled->getButtonText() == "ON",
+                       "FX Rack should reflect an enabled state restored from project state");
+        driveEnabled->setToggleState(false, juce::sendNotificationSync);
+        context.expect(
+            getParameterValue(restored, hypercolor::ParameterIDs::driveEnabled)
+                == 0.0f,
+            "FX Rack switch should update its module's APVTS enabled parameter"
+        );
+        context.expect(
+            std::abs(getParameterValue(
+                restored, hypercolor::ParameterIDs::driveAmount
+            ) - 14.4f) < 0.11f,
+            "disabling an effect should preserve its parameter settings"
+        );
+    }
+    setParameter(restored, hypercolor::ParameterIDs::delayEnabled, 1.0f);
+    if (delayEnabled != nullptr)
+    {
+        context.expect(delayEnabled->getToggleState()
+                           && delayEnabled->getButtonText() == "ON",
+                       "FX Rack should reflect an automation change to Enabled");
+    }
+
     if (const auto* constrainer = editor->getConstrainer())
     {
         context.expect(
@@ -2759,13 +2813,37 @@ void testEditorControlsStateAndResize(TestContext& context)
         context.expect(false, "resizable editor should have a bounds constrainer");
     }
 
-    const auto controls = std::array<juce::Component*, 8> {
+    const auto controls = std::array<juce::Component*, 16> {
         density,
         size,
         position,
         pitch,
         reverse,
         sourceMode,
+        editor != nullptr
+            ? editor->findChildWithID(fxEnableParameterIDs[0])
+            : nullptr,
+        editor != nullptr
+            ? editor->findChildWithID(fxEnableParameterIDs[1])
+            : nullptr,
+        editor != nullptr
+            ? editor->findChildWithID(fxEnableParameterIDs[2])
+            : nullptr,
+        editor != nullptr
+            ? editor->findChildWithID(fxEnableParameterIDs[3])
+            : nullptr,
+        editor != nullptr
+            ? editor->findChildWithID(fxEnableParameterIDs[4])
+            : nullptr,
+        editor != nullptr
+            ? editor->findChildWithID(fxEnableParameterIDs[5])
+            : nullptr,
+        editor != nullptr
+            ? editor->findChildWithID(fxEnableParameterIDs[6])
+            : nullptr,
+        editor != nullptr
+            ? editor->findChildWithID(fxEnableParameterIDs[7])
+            : nullptr,
         dryWet,
         outputGain
     };
@@ -2863,6 +2941,23 @@ void testEditorControlsStateAndResize(TestContext& context)
         reopenedSourceMode != nullptr
             && reopenedSourceMode->getSelectedId() == 2,
         "recreated editor should restore the current History selection"
+    );
+    auto* reopenedDriveEnabled = reopenedEditor != nullptr
+        ? dynamic_cast<juce::Button*>(reopenedEditor->findChildWithID(
+              hypercolor::ParameterIDs::driveEnabled
+          ))
+        : nullptr;
+    auto* reopenedDelayEnabled = reopenedEditor != nullptr
+        ? dynamic_cast<juce::Button*>(reopenedEditor->findChildWithID(
+              hypercolor::ParameterIDs::delayEnabled
+          ))
+        : nullptr;
+    context.expect(
+        reopenedDriveEnabled != nullptr
+            && !reopenedDriveEnabled->getToggleState()
+            && reopenedDelayEnabled != nullptr
+            && reopenedDelayEnabled->getToggleState(),
+        "recreated editor should reflect current FX enable parameters"
     );
 }
 

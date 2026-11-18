@@ -30,6 +30,17 @@ constexpr std::array<std::size_t, 8> effectMixIndices {
     0, 5, 3, 4, 3, 4, 6, 7
 };
 
+constexpr std::array<const char*, 8> effectEnableParameterIDs {
+    hypercolor::ParameterIDs::reverbEnabled,
+    hypercolor::ParameterIDs::modulationEnabled,
+    hypercolor::ParameterIDs::driveEnabled,
+    hypercolor::ParameterIDs::tapeEnabled,
+    hypercolor::ParameterIDs::bitcrushEnabled,
+    hypercolor::ParameterIDs::filterEnabled,
+    hypercolor::ParameterIDs::compressorEnabled,
+    hypercolor::ParameterIDs::delayEnabled
+};
+
 juce::Colour effectAccent(std::size_t effectIndex)
 {
     using namespace hypercolor::ui::palette;
@@ -745,7 +756,8 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     for (std::size_t index = 0; index < effectButtons.size(); ++index)
     {
         auto& button = effectButtons[index];
-        button.setButtonText(effectNames[index]);
+        button.setButtonText(index == 1 ? "MOD" : effectNames[index]);
+        button.setTooltip(effectNames[index]);
         button.setClickingTogglesState(true);
         button.setRadioGroupId(1701);
         button.setColour(juce::TextButton::buttonColourId, panelRaised);
@@ -758,12 +770,52 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
         button.onClick = [this, index] { selectEffect(index); };
         button.setComponentID("module." + juce::String(static_cast<int>(index)));
         addAndMakeVisible(button);
+
+        auto& enableButton = fxEnableButtons[index];
+        const auto accent = effectAccent(index);
+        enableButton.setClickingTogglesState(true);
+        enableButton.setComponentID(effectEnableParameterIDs[index]);
+        enableButton.setColour(
+            juce::TextButton::buttonColourId,
+            hypercolor::ui::palette::panelRaised()
+        );
+        enableButton.setColour(
+            juce::TextButton::buttonOnColourId,
+            accent
+        );
+        enableButton.setColour(
+            juce::TextButton::textColourOffId,
+            hypercolor::ui::palette::mutedText()
+        );
+        enableButton.setColour(
+            juce::TextButton::textColourOnId,
+            hypercolor::ui::palette::background()
+        );
+        enableButton.setTooltip(
+            juce::String(effectNames[index]) + " effect ON / OFF"
+        );
+        enableButton.onStateChange = [enableButtonPtr = &enableButton]
+        {
+            enableButtonPtr->setButtonText(
+                enableButtonPtr->getToggleState() ? "ON" : "OFF"
+            );
+        };
+        enableButton.onStateChange();
+        addAndMakeVisible(enableButton);
     }
     granularNavButton.setToggleState(true, juce::dontSendNotification);
     moduleTitleLabel.setText("GRANULAR CORE", juce::dontSendNotification);
     moduleSubtitleLabel.setText("XY CHARACTER FIELD  //  REAL-TIME HISTORY  //  64 VOICES", juce::dontSendNotification);
 
     auto& state = audioProcessor.getValueTreeState();
+    for (std::size_t index = 0; index < fxEnableButtons.size(); ++index)
+    {
+        fxEnableAttachments[index] = std::make_unique<ButtonAttachment>(
+            state,
+            effectEnableParameterIDs[index],
+            fxEnableButtons[index]
+        );
+    }
     densityModeAttachment = std::make_unique<ComboBoxAttachment>(
         state,
         hypercolor::ParameterIDs::grainDensityMode,
@@ -1308,7 +1360,7 @@ void HypercolorAudioProcessorEditor::resized()
     );
     headerArea = content.removeFromTop(headerHeight);
     content.removeFromTop(6);
-    const auto navigationWidth = juce::jlimit(118, 152, getWidth() / 7);
+    const auto navigationWidth = juce::jlimit(128, 152, getWidth() / 7);
     rackPanel = content.removeFromLeft(navigationWidth);
     content.removeFromLeft(12);
     auto workspace = content;
@@ -1337,9 +1389,14 @@ void HypercolorAudioProcessorEditor::resized()
     navigationArea.removeFromTop(28);
     granularNavButton.setBounds(navigationArea.removeFromTop(34));
     navigationArea.removeFromTop(6);
-    for (auto& button : effectButtons)
+    for (std::size_t index = 0; index < effectButtons.size(); ++index)
     {
-        button.setBounds(navigationArea.removeFromTop(30));
+        auto& button = effectButtons[index];
+        auto row = navigationArea.removeFromTop(30);
+        auto enableBounds = row.removeFromRight(36);
+        row.removeFromRight(4);
+        button.setBounds(row);
+        fxEnableButtons[index].setBounds(enableBounds);
         navigationArea.removeFromTop(4);
     }
 

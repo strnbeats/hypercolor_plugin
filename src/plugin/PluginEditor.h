@@ -89,6 +89,7 @@ private:
 
     juce::TextButton granularNavButton;
     std::array<juce::TextButton, 8> effectButtons;
+    std::array<juce::TextButton, 8> fxEnableButtons;
     std::array<juce::Slider, 9> inspectorSliders;
     std::array<juce::Label, 9> inspectorLabels;
     std::array<std::unique_ptr<SliderAttachment>, 9> inspectorAttachments;
@@ -102,6 +103,7 @@ private:
     SliderAttachment positionAttachment;
     SliderAttachment pitchAttachment;
     ButtonAttachment reverseAttachment;
+    std::array<std::unique_ptr<ButtonAttachment>, 8> fxEnableAttachments;
     std::unique_ptr<ComboBoxAttachment> densityModeAttachment;
     std::unique_ptr<ComboBoxAttachment> sourceModeAttachment;
 
