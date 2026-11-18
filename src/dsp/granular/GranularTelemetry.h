@@ -30,6 +30,7 @@ struct WaveformTelemetryPoint
 
 struct GrainTelemetry
 {
+    CausalSourceKind sourceKind = CausalSourceKind::history;
     double readPosition = 0.0;
     double playbackRate = 0.0;
     std::uint64_t sourceOldest = 0;

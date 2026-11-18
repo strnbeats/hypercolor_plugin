@@ -1858,12 +1858,17 @@ void testInvalidInputsAndUnpreparedObjects(TestContext& context)
     CircularAudioBuffer unavailableSource;
     GrainScheduler sourceScheduler;
     context.expect(sourceScheduler.prepare(spec), "source-status scheduler prepare");
-    GrainSchedulerStepResult unavailable = GrainSchedulerStepResult::noEvent;
-    for (std::size_t sample = 0; sample < 368; ++sample)
-        unavailable = sourceScheduler.processSample(parameters, unavailableSource, pool);
+    auto invalidUnpreparedSourceWasReported = false;
+    for (std::size_t sample = 0; sample < 1024; ++sample)
+    {
+        const auto result = sourceScheduler.processSample(
+            parameters, unavailableSource, pool);
+        invalidUnpreparedSourceWasReported = invalidUnpreparedSourceWasReported
+            || result == GrainSchedulerStepResult::invalidTrajectory;
+    }
     context.expect(
-        unavailable == GrainSchedulerStepResult::sourceUnavailable,
-        "unprepared source should be reported"
+        invalidUnpreparedSourceWasReported,
+        "unprepared source should reject an event without a valid generation"
     );
 
     const auto testInvalidEventParameter = [&](auto change, const char* message)

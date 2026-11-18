@@ -10,7 +10,8 @@ enum class CausalSourcePolicy : std::uint8_t
 {
     historyOnly,
     causalLiveOnly,
-    historyThenLiveFallback
+    historyThenLiveFallback,
+    livePreferredHistoryFallback
 };
 
 enum class CausalSourceKind : std::uint8_t
@@ -151,38 +152,18 @@ private:
     [[nodiscard]] static bool validEvent(const CausalEventSnapshot& event)
         noexcept;
 
-    [[nodiscard]] static bool calculateEndpointRange(
-        CircularAudioBuffer::AbsoluteFrame logicalOldest,
-        CircularAudioBuffer::AbsoluteFrame writeExclusive,
-        double playbackRate,
-        std::uint32_t grainLengthFrames,
-        std::uint32_t causalMarginSamples,
-        double& oldestEndpoint,
-        double& freshestEndpoint
-    ) noexcept;
-
-    [[nodiscard]] static bool calculateStartFromEndpoint(
-        double endpoint,
-        double playbackRate,
-        std::uint32_t grainLengthFrames,
-        double& startPosition
-    ) noexcept;
-
-    [[nodiscard]] static bool isCausalTrajectoryValid(
+    [[nodiscard]] static CausalReadFeasibility buildHistoryPlan(
         const CircularAudioBuffer& source,
-        double startPosition,
-        double playbackRate,
-        std::uint32_t grainLengthFrames,
-        std::uint32_t causalMarginSamples
+        const CausalEventSnapshot& event,
+        const CircularAudioBuffer::SourceRegion& captureRegion,
+        CausalReadPlan& plan
     ) noexcept;
 
-    [[nodiscard]] static bool isFutureRangeValid(
-        CircularAudioBuffer::AbsoluteFrame writeExclusive,
-        std::uint64_t capacityFrames,
-        std::uint64_t logicalLengthFrames,
-        double startPosition,
-        double playbackRate,
-        std::uint32_t grainLengthFrames
+    [[nodiscard]] static CausalReadFeasibility buildLivePlan(
+        const CircularAudioBuffer& source,
+        const CausalEventSnapshot& event,
+        const CircularAudioBuffer::SourceRegion& captureRegion,
+        CausalReadPlan& plan
     ) noexcept;
 
 };

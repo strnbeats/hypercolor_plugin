@@ -390,11 +390,21 @@ void GranularEngine::captureActiveGrainTelemetry(
             const auto& sourceRegion = access.getSourceRegion();
             auto& telemetry
                 = activeGrainTelemetry[activeGrainTelemetryCount++];
+            telemetry.sourceKind = access.getSourceKind();
             telemetry.readPosition = access.getReadPosition();
             telemetry.playbackRate = access.getPlaybackRate();
-            telemetry.sourceOldest = sourceRegion.oldest;
-            telemetry.sourceNewestExclusive
-                = sourceRegion.newestExclusive;
+            if (telemetry.sourceKind == CausalSourceKind::history)
+            {
+                telemetry.sourceOldest = sourceRegion.oldest;
+                telemetry.sourceNewestExclusive
+                    = sourceRegion.newestExclusive;
+            }
+            else
+            {
+                const auto liveRange = circularBuffer.getLogicalFrameRange();
+                telemetry.sourceOldest = liveRange.oldest;
+                telemetry.sourceNewestExclusive = liveRange.newestExclusive;
+            }
             telemetry.durationFrames = access.getDurationFrames();
             telemetry.renderedFrames = access.getRenderedFrames();
         }

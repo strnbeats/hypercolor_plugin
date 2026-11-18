@@ -127,8 +127,8 @@ void testRequiredPrehistoryAndCeiling(TestContext& context)
         );
     };
 
-    context.expect(required(-0.25, 480) == 122, "reverse quarter-rate uses ceil");
-    context.expect(required(-0.5, 480) == 242, "reverse half-rate uses ceil");
+    context.expect(required(-0.25, 480) == 601, "reverse includes write-head motion in prehistory");
+    context.expect(required(-0.5, 480) == 721, "reverse half-rate prehistory includes render-time aging");
     context.expect(required(1.0, 480) == 2, "forward unity-rate needs margin");
     context.expect(required(2.0, 480) == 481, "forward double-rate retreats anchor");
     context.expect(required(4.0, 480) == 1439, "forward quadruple-rate uses ceil");
@@ -228,10 +228,11 @@ void testLiveRatesAndDirections(TestContext& context)
             "live event snapshot should be captured"
         );
         const auto plan = CausalReadPlanBuilder::buildAtLaunch(buffer, event);
-        context.expect(
-            plan.feasibility == CausalReadFeasibility::fallbackNotAllowed,
-            "Live source planning remains outside this History integration"
-        );
+        context.expect(plan.isValid(), "causal Live trajectory should be valid");
+        context.expect(plan.sourceKind == CausalSourceKind::causalLive,
+                       "Live-only policy must select the dynamic reader");
+        context.expect(plan.historyRegion.isEmpty(),
+                       "Live plan must not pin a History SourceRegion");
     }
 }
 
@@ -264,14 +265,14 @@ void testPoliciesAndFallback(TestContext& context)
     context.expect(deferredHistory.isValid(),
                    "pending History event should use the now-available capture region");
     context.expect(deferredHistory.sourceKind == CausalSourceKind::history,
-                   "deferred History capture must remain History");
+                   "History-only policy must remain History");
 
     event.sourcePolicy = CausalSourcePolicy::historyThenLiveFallback;
-    const auto disallowed = CausalReadPlanBuilder::buildAtLaunch(startup, event);
-    context.expect(
-        disallowed.feasibility == CausalReadFeasibility::fallbackNotAllowed,
-        "History integration must not select Live fallback"
-    );
+    const auto explicitHistoryFirst = CausalReadPlanBuilder::buildAtLaunch(startup, event);
+    context.expect(explicitHistoryFirst.isValid(),
+                   "explicit History-first policy should select available History");
+    context.expect(explicitHistoryFirst.sourceKind == CausalSourceKind::history,
+                   "History-first fallback policy prefers valid History");
 }
 
 void testGenerationAndWrapAround(TestContext& context)
@@ -431,11 +432,11 @@ void testSupportedSampleRates(TestContext& context)
             ),
             "supported sample rate should capture a snapshot"
         );
-        context.expect(
-            CausalReadPlanBuilder::buildAtLaunch(buffer, event).feasibility
-                == CausalReadFeasibility::fallbackNotAllowed,
-            "Live remains unintegrated at every supported sample rate"
-        );
+        const auto plan = CausalReadPlanBuilder::buildAtLaunch(buffer, event);
+        context.expect(plan.isValid(),
+                       "Live plan should work at every supported sample rate");
+        context.expect(plan.sourceKind == CausalSourceKind::causalLive,
+                       "Live-only policy remains selected at every sample rate");
     }
 }
 

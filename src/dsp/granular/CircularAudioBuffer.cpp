@@ -1,6 +1,7 @@
 #include "dsp/granular/CircularAudioBuffer.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <new>
@@ -220,6 +221,165 @@ bool CircularAudioBuffer::tryReadLinear(
         + taps.fraction
             * static_cast<double>(secondSample - firstSample)
     );
+    return true;
+}
+
+bool CircularAudioBuffer::tryReadCausalLive(
+    Generation expectedGeneration,
+    std::uint32_t channel,
+    double absolutePosition,
+    std::uint32_t causalMarginSamples,
+    float& result
+) const noexcept
+{
+    result = 0.0f;
+    if (!prepared || expectedGeneration == 0
+        || expectedGeneration != generation
+        || channel >= numChannels
+        || causalMarginSamples < 2
+        || absoluteWritePosition < causalMarginSamples)
+    {
+        return false;
+    }
+
+    LinearTaps taps;
+    if (!getLinearTaps(absolutePosition, taps)
+        || absolutePosition > static_cast<double>(
+            absoluteWritePosition - causalMarginSamples))
+    {
+        return false;
+    }
+
+    const auto logical = getLogicalFrameRange();
+    const auto physical = getPhysicalFrameRange();
+    if (taps.first < logical.oldest
+        || taps.first < physical.oldest
+        || taps.second >= absoluteWritePosition)
+    {
+        return false;
+    }
+
+    const auto firstPhysical = static_cast<std::size_t>(
+        taps.first % capacityFrames
+    );
+    const auto secondPhysical = static_cast<std::size_t>(
+        taps.second % capacityFrames
+    );
+    const auto channelOffset = static_cast<std::size_t>(channel)
+        * capacityFrames;
+    const auto firstSample = samples[channelOffset + firstPhysical];
+    const auto secondSample = samples[channelOffset + secondPhysical];
+    result = static_cast<float>(
+        static_cast<double>(firstSample)
+        + taps.fraction
+            * static_cast<double>(secondSample - firstSample)
+    );
+    return true;
+}
+
+bool CircularAudioBuffer::isCausalLiveTrajectoryValid(
+    Generation expectedGeneration,
+    double startPosition,
+    double playbackRate,
+    std::uint32_t frameCount,
+    std::uint32_t causalMarginSamples
+) const noexcept
+{
+    if (!prepared || expectedGeneration == 0
+        || expectedGeneration != generation
+        || frameCount == 0
+        || !std::isfinite(startPosition)
+        || !std::isfinite(playbackRate)
+        || playbackRate == 0.0
+        || causalMarginSamples < 2
+        || absoluteWritePosition >= maximumExactDoubleInteger)
+    {
+        return false;
+    }
+
+    const auto lastOffset = static_cast<AbsoluteFrame>(frameCount - 1);
+    if (lastOffset >= maximumExactDoubleInteger - absoluteWritePosition)
+        return false;
+
+    const auto logical = getLogicalFrameRange();
+    const auto physical = getPhysicalFrameRange();
+    const auto logicalLength = static_cast<AbsoluteFrame>(logicalLengthFrames);
+    const auto capacity = static_cast<AbsoluteFrame>(capacityFrames);
+    const auto logicalGrowthOffset = logical.size() < logicalLength
+        ? logicalLength - logical.size()
+        : AbsoluteFrame { 0 };
+    const auto physicalGrowthOffset = physical.size() < capacity
+        ? capacity - physical.size()
+        : AbsoluteFrame { 0 };
+
+    std::array<AbsoluteFrame, 6> offsets {};
+    std::size_t offsetCount = 0;
+    const auto addOffset = [&](AbsoluteFrame offset) noexcept
+    {
+        if (offset > lastOffset)
+            return;
+        for (std::size_t index = 0; index < offsetCount; ++index)
+        {
+            if (offsets[index] == offset)
+                return;
+        }
+        offsets[offsetCount++] = offset;
+    };
+
+    addOffset(0);
+    addOffset(lastOffset);
+    for (const auto boundary : { logicalGrowthOffset, physicalGrowthOffset })
+    {
+        addOffset(boundary);
+        if (boundary < std::numeric_limits<AbsoluteFrame>::max())
+            addOffset(boundary + 1);
+    }
+
+    for (std::size_t index = 0; index < offsetCount; ++index)
+    {
+        const auto offset = offsets[index];
+        if (offset > std::numeric_limits<AbsoluteFrame>::max()
+                - absoluteWritePosition)
+        {
+            return false;
+        }
+        const auto writeAtOffset = absoluteWritePosition + offset;
+        if (writeAtOffset < causalMarginSamples)
+            return false;
+
+        const auto position = calculateLinearTrajectoryPosition(
+            startPosition,
+            playbackRate,
+            static_cast<std::uint32_t>(offset)
+        );
+        LinearTaps taps;
+        if (!getLinearTaps(position, taps)
+            || position > static_cast<double>(
+                writeAtOffset - causalMarginSamples))
+        {
+            return false;
+        }
+
+        const auto logicalOldestAtOffset = std::max(
+            logical.oldest,
+            writeAtOffset > logicalLength
+                ? writeAtOffset - logicalLength
+                : AbsoluteFrame { 0 }
+        );
+        const auto physicalOldestAtOffset = std::max(
+            physical.oldest,
+            writeAtOffset > capacity
+                ? writeAtOffset - capacity
+                : AbsoluteFrame { 0 }
+        );
+        if (taps.first < logicalOldestAtOffset
+            || taps.first < physicalOldestAtOffset
+            || taps.second >= writeAtOffset)
+        {
+            return false;
+        }
+    }
+
     return true;
 }
 

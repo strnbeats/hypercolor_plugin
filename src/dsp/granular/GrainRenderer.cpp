@@ -40,12 +40,21 @@ GrainRendererResult GrainRenderer::renderSample(
                  ++channel)
             {
                 float sample = 0.0f;
-                const auto readSucceeded = source.tryReadLinear(
-                    access.getSourceRegion(),
-                    channel,
-                    readPosition,
-                    sample
-                );
+                const auto readSucceeded
+                    = access.getSourceKind() == CausalSourceKind::history
+                    ? source.tryReadLinear(
+                        access.getSourceRegion(),
+                        channel,
+                        readPosition,
+                        sample
+                    )
+                    : source.tryReadCausalLive(
+                        access.getSourceGeneration(),
+                        channel,
+                        readPosition,
+                        access.getCausalMarginSamples(),
+                        sample
+                    );
 
                 sourceFrame[channel] = sample;
                 validFrame = validFrame

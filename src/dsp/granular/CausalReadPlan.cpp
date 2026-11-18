@@ -52,31 +52,6 @@ double positionAt(
     );
 }
 
-bool lowerBoundAtOffset(
-    std::uint64_t writeExclusive,
-    std::uint64_t capacity,
-    std::uint64_t logicalLength,
-    std::uint64_t offset,
-    std::uint64_t& physicalOldest,
-    std::uint64_t& logicalOldest
-) noexcept
-{
-    if (offset > std::numeric_limits<std::uint64_t>::max()
-            - writeExclusive)
-    {
-        return false;
-    }
-
-    const auto futureWrite = writeExclusive + offset;
-    physicalOldest = futureWrite > capacity
-        ? futureWrite - capacity
-        : 0;
-    logicalOldest = futureWrite > logicalLength
-        ? futureWrite - logicalLength
-        : 0;
-    return true;
-}
-
 bool checkedIncrement(std::uint64_t value, std::uint64_t& result) noexcept
 {
     if (value == std::numeric_limits<std::uint64_t>::max())
@@ -93,6 +68,7 @@ bool CausalReadPlanBuilder::isKnownPolicy(CausalSourcePolicy policy) noexcept
         case CausalSourcePolicy::historyOnly:
         case CausalSourcePolicy::causalLiveOnly:
         case CausalSourcePolicy::historyThenLiveFallback:
+        case CausalSourcePolicy::livePreferredHistoryFallback:
             return true;
     }
     return false;
@@ -220,23 +196,81 @@ CausalReadPlan CausalReadPlanBuilder::buildAtLaunch(
         plan.feasibility = CausalReadFeasibility::logicalRangeInvalid;
         return plan;
     }
-    if (event.sourcePolicy != CausalSourcePolicy::historyOnly)
+    const auto historyAttempt = [&]() noexcept
     {
-        plan.feasibility = CausalReadFeasibility::fallbackNotAllowed;
-        return plan;
-    }
+        return buildHistoryPlan(source, event, captureRegion, plan);
+    };
+    const auto liveAttempt = [&]() noexcept
+    {
+        return buildLivePlan(source, event, captureRegion, plan);
+    };
 
+    CausalReadFeasibility failure = CausalReadFeasibility::fallbackNotAllowed;
+    switch (event.sourcePolicy)
+    {
+        case CausalSourcePolicy::historyOnly:
+            failure = historyAttempt();
+            break;
+        case CausalSourcePolicy::causalLiveOnly:
+            failure = liveAttempt();
+            break;
+        case CausalSourcePolicy::historyThenLiveFallback:
+            failure = historyAttempt();
+            if (failure != CausalReadFeasibility::valid)
+            {
+                plan = {};
+                plan.sourcePolicy = event.sourcePolicy;
+                plan.generation = event.generation;
+                plan.eventSample = event.eventSample;
+                plan.captureWriteExclusive = captureRegion.newestExclusive;
+                plan.positionNormalized = event.positionNormalized;
+                plan.playbackRate = event.playbackRate;
+                plan.grainLengthFrames = event.grainLengthFrames;
+                failure = liveAttempt();
+                if (failure == CausalReadFeasibility::valid)
+                    plan.usedLiveFallback = true;
+            }
+            break;
+        case CausalSourcePolicy::livePreferredHistoryFallback:
+            failure = liveAttempt();
+            if (failure != CausalReadFeasibility::valid)
+            {
+                plan = {};
+                plan.sourcePolicy = event.sourcePolicy;
+                plan.generation = event.generation;
+                plan.eventSample = event.eventSample;
+                plan.captureWriteExclusive = captureRegion.newestExclusive;
+                plan.positionNormalized = event.positionNormalized;
+                plan.playbackRate = event.playbackRate;
+                plan.grainLengthFrames = event.grainLengthFrames;
+                failure = historyAttempt();
+                if (failure == CausalReadFeasibility::valid)
+                    plan.usedLiveFallback = false;
+            }
+            break;
+    }
+    plan.feasibility = failure;
+    return plan;
+}
+
+CausalReadFeasibility CausalReadPlanBuilder::buildHistoryPlan(
+    const CircularAudioBuffer& source,
+    const CausalEventSnapshot& event,
+    const CircularAudioBuffer::SourceRegion& captureRegion,
+    CausalReadPlan& plan
+) noexcept
+{
     const auto travel = std::abs(static_cast<long double>(event.playbackRate))
         * static_cast<long double>(event.grainLengthFrames - 1);
     const auto oldest = static_cast<long double>(captureRegion.oldest);
-    const auto upperExclusive = static_cast<long double>(captureRegion.newestExclusive) - 1.0L;
+    const auto upperExclusive
+        = static_cast<long double>(captureRegion.newestExclusive) - 1.0L;
     const auto oldestEndpoint = oldest + travel;
     const auto freshestEndpoint = calculateHistoryFreshEndpoint(captureRegion);
     if (!std::isfinite(travel) || !std::isfinite(oldestEndpoint)
         || static_cast<long double>(freshestEndpoint) < oldestEndpoint)
     {
-        plan.feasibility = CausalReadFeasibility::insufficientHistory;
-        return plan;
+        return CausalReadFeasibility::insufficientHistory;
     }
 
     const auto selected = static_cast<long double>(freshestEndpoint)
@@ -244,18 +278,14 @@ CausalReadPlan CausalReadPlanBuilder::buildAtLaunch(
             * (static_cast<long double>(freshestEndpoint) - oldestEndpoint);
     auto endpoint = static_cast<double>(selected);
     if (!std::isfinite(endpoint))
-    {
-        plan.feasibility = CausalReadFeasibility::causalViolation;
-        return plan;
-    }
+        return CausalReadFeasibility::causalViolation;
     if (static_cast<long double>(endpoint) < oldestEndpoint)
         endpoint = std::nextafter(endpoint, std::numeric_limits<double>::infinity());
     if (!std::isfinite(endpoint) || endpoint > freshestEndpoint
         || static_cast<long double>(endpoint) < oldestEndpoint
         || static_cast<long double>(endpoint) >= upperExclusive)
     {
-        plan.feasibility = CausalReadFeasibility::causalViolation;
-        return plan;
+        return CausalReadFeasibility::causalViolation;
     }
 
     const auto startValue = event.playbackRate < 0.0
@@ -263,33 +293,126 @@ CausalReadPlan CausalReadPlanBuilder::buildAtLaunch(
         : static_cast<long double>(endpoint) - travel;
     auto anchor = static_cast<double>(startValue);
     if (!std::isfinite(anchor))
-    {
-        plan.feasibility = CausalReadFeasibility::causalViolation;
-        return plan;
-    }
+        return CausalReadFeasibility::causalViolation;
     if (static_cast<long double>(anchor) < oldest)
         anchor = std::nextafter(anchor, std::numeric_limits<double>::infinity());
     if (!std::isfinite(anchor) || anchor < 0.0
         || anchor >= maximumExactDoubleInteger
         || static_cast<long double>(anchor) < oldest)
     {
-        plan.feasibility = CausalReadFeasibility::causalViolation;
-        return plan;
+        return CausalReadFeasibility::causalViolation;
     }
 
     if (!source.isLinearTrajectoryValid(
             captureRegion, anchor, event.playbackRate, event.grainLengthFrames))
     {
-        plan.feasibility = CausalReadFeasibility::physicalRangeInvalid;
-        return plan;
+        return CausalReadFeasibility::physicalRangeInvalid;
     }
 
     plan.sourceKind = CausalSourceKind::history;
     plan.anchor = anchor;
-    plan.feasibility = CausalReadFeasibility::valid;
+    plan.historyRegion = captureRegion;
+    plan.requiredPrehistoryFrames = 0;
     plan.causalReadyWriteHead = captureRegion.newestExclusive;
     plan.earliestValidWriteHead = captureRegion.newestExclusive;
-    return plan;
+    return CausalReadFeasibility::valid;
+}
+
+CausalReadFeasibility CausalReadPlanBuilder::buildLivePlan(
+    const CircularAudioBuffer& source,
+    const CausalEventSnapshot& event,
+    const CircularAudioBuffer::SourceRegion& captureRegion,
+    CausalReadPlan& plan
+) noexcept
+{
+    const auto write = captureRegion.newestExclusive;
+    const auto last = static_cast<long double>(event.grainLengthFrames - 1);
+    const auto rate = static_cast<long double>(event.playbackRate);
+    const auto margin = static_cast<long double>(plan.causalMarginSamples);
+    if (write < plan.causalMarginSamples
+        || write >= static_cast<CircularAudioBuffer::AbsoluteFrame>(maximumExactDoubleInteger))
+    {
+        return CausalReadFeasibility::insufficientHistory;
+    }
+
+    // Position interpolates the complete range of causal launch anchors.
+    // The oldest anchor accounts for the moving logical oldest during render;
+    // the freshest anchor accounts for the closest legal interpolation pair.
+    const auto oldestAnchorExact
+        = static_cast<long double>(captureRegion.oldest)
+            + std::max(0.0L, 1.0L - rate) * last;
+    const auto freshestAnchorExact
+        = static_cast<long double>(write) - margin
+            - std::max(0.0L, rate - 1.0L) * last;
+    if (!std::isfinite(oldestAnchorExact)
+        || !std::isfinite(freshestAnchorExact)
+        || freshestAnchorExact < oldestAnchorExact)
+    {
+        return CausalReadFeasibility::insufficientHistory;
+    }
+
+    auto oldestAnchor = static_cast<double>(oldestAnchorExact);
+    auto freshestAnchor = static_cast<double>(freshestAnchorExact);
+    if (static_cast<long double>(oldestAnchor) < oldestAnchorExact)
+        oldestAnchor = std::nextafter(oldestAnchor,
+            std::numeric_limits<double>::infinity());
+    if (static_cast<long double>(freshestAnchor) > freshestAnchorExact)
+        freshestAnchor = std::nextafter(freshestAnchor,
+            -std::numeric_limits<double>::infinity());
+    if (!finiteAndRepresentable(oldestAnchor)
+        || !finiteAndRepresentable(freshestAnchor)
+        || freshestAnchor < oldestAnchor)
+    {
+        return CausalReadFeasibility::insufficientHistory;
+    }
+
+    const auto selected = static_cast<long double>(freshestAnchor)
+        - static_cast<long double>(event.positionNormalized)
+            * (static_cast<long double>(freshestAnchor) - oldestAnchor);
+    auto anchor = static_cast<double>(selected);
+    if (!std::isfinite(anchor))
+        return CausalReadFeasibility::causalViolation;
+    anchor = std::clamp(anchor, oldestAnchor, freshestAnchor);
+
+    if (!source.isCausalLiveTrajectoryValid(
+            event.generation,
+            anchor,
+            event.playbackRate,
+            event.grainLengthFrames,
+            plan.causalMarginSamples))
+    {
+        if (!isConservativelyCausal(
+                anchor,
+                event.playbackRate,
+                event.grainLengthFrames,
+                write,
+                plan.causalMarginSamples))
+        {
+            return CausalReadFeasibility::causalViolation;
+        }
+        return CausalReadFeasibility::physicalRangeInvalid;
+    }
+
+    const auto lastPosition = CircularAudioBuffer::calculateLinearTrajectoryPosition(
+        anchor, event.playbackRate, event.grainLengthFrames - 1);
+    const auto oldestRead = std::min(anchor, lastPosition);
+    const auto needed = std::max(
+        static_cast<long double>(plan.causalMarginSamples),
+        static_cast<long double>(write) - static_cast<long double>(oldestRead));
+    if (!checkedCeilToFrames(static_cast<double>(needed),
+            plan.requiredPrehistoryFrames))
+    {
+        return CausalReadFeasibility::causalViolation;
+    }
+
+    plan.sourceKind = CausalSourceKind::causalLive;
+    plan.anchor = anchor;
+    plan.historyRegion = {};
+    plan.causalReadyWriteHead = std::max(
+        event.eventSample + 1,
+        plan.requiredPrehistoryFrames);
+    plan.earliestValidWriteHead = plan.causalReadyWriteHead;
+    return CausalReadFeasibility::valid;
 }
 
 CausalReadPlan CausalReadPlanBuilder::buildAtLaunch(
@@ -314,11 +437,11 @@ std::uint64_t CausalReadPlanBuilder::requiredPrehistoryFrames(
         return 0;
     }
 
-    const auto extra = std::max({
-        0.0,
-        playbackRate - 1.0,
-        -playbackRate
-    }) * static_cast<double>(grainLengthFrames - 1);
+    const auto extraPerFrame = playbackRate < 0.0
+        ? 1.0 - playbackRate
+        : std::max(0.0, playbackRate - 1.0);
+    const auto extra = extraPerFrame
+        * static_cast<double>(grainLengthFrames - 1);
     std::uint64_t result = 0;
     if (!checkedCeilToFrames(
             static_cast<double>(causalMarginSamples) + extra,
@@ -385,188 +508,5 @@ bool CausalReadPlanBuilder::isConservativelyCausal(
             <= static_cast<double>(writeExclusive + last) - margin;
 }
 
-bool CausalReadPlanBuilder::calculateEndpointRange(
-    CircularAudioBuffer::AbsoluteFrame logicalOldest,
-    CircularAudioBuffer::AbsoluteFrame writeExclusive,
-    double playbackRate,
-    std::uint32_t grainLengthFrames,
-    std::uint32_t causalMarginSamples,
-    double& oldestEndpoint,
-    double& freshestEndpoint
-) noexcept
-{
-    if (grainLengthFrames == 0
-        || !isValidMargin(causalMarginSamples)
-        || !std::isfinite(playbackRate)
-        || playbackRate == 0.0
-        || writeExclusive < logicalOldest
-        || writeExclusive >= static_cast<CircularAudioBuffer::AbsoluteFrame>(maximumExactDoubleInteger)
-        || logicalOldest >= static_cast<CircularAudioBuffer::AbsoluteFrame>(maximumExactDoubleInteger))
-    {
-        return false;
-    }
-
-    const auto last = static_cast<double>(grainLengthFrames - 1);
-    const auto travel = std::abs(playbackRate) * last;
-    if (!std::isfinite(travel))
-        return false;
-
-    oldestEndpoint = static_cast<double>(logicalOldest) + travel;
-    if (!std::isfinite(oldestEndpoint))
-        return false;
-
-    const auto write = static_cast<double>(writeExclusive);
-    const auto margin = static_cast<double>(causalMarginSamples);
-    if (playbackRate > 0.0)
-    {
-        // The first sample must already be available. For rates below one,
-        // the trajectory remains behind the write head; rates above one
-        // retreat the anchor and catch up with the live write head.
-        freshestEndpoint = write - margin
-            + std::min(playbackRate, 1.0) * last;
-    }
-    else
-    {
-        // Reverse never reads future input. Its freshest complete trajectory
-        // starts at the latest safe sample and travels backwards.
-        freshestEndpoint = write - margin;
-    }
-
-    return std::isfinite(freshestEndpoint)
-        && freshestEndpoint >= oldestEndpoint;
-}
-
-bool CausalReadPlanBuilder::calculateStartFromEndpoint(
-    double endpoint,
-    double playbackRate,
-    std::uint32_t grainLengthFrames,
-    double& startPosition
-) noexcept
-{
-    if (!std::isfinite(endpoint)
-        || !std::isfinite(playbackRate)
-        || playbackRate == 0.0
-        || grainLengthFrames == 0)
-    {
-        return false;
-    }
-
-    const auto travel = std::abs(playbackRate)
-        * static_cast<double>(grainLengthFrames - 1);
-    startPosition = playbackRate > 0.0
-        ? endpoint - travel
-        : endpoint;
-    return finiteAndRepresentable(startPosition);
-}
-
-bool CausalReadPlanBuilder::isCausalTrajectoryValid(
-    const CircularAudioBuffer& source,
-    double startPosition,
-    double playbackRate,
-    std::uint32_t grainLengthFrames,
-    std::uint32_t causalMarginSamples
-) noexcept
-{
-    if (!source.isPrepared()
-        || !isFutureRangeValid(
-            source.getAbsoluteWritePosition(),
-            static_cast<std::uint64_t>(source.getCapacityFrames()),
-            static_cast<std::uint64_t>(source.getLogicalLengthFrames()),
-            startPosition,
-            playbackRate,
-            grainLengthFrames
-        ))
-    {
-        return false;
-    }
-
-    if (!isConservativelyCausal(
-            startPosition,
-            playbackRate,
-            grainLengthFrames,
-            source.getAbsoluteWritePosition(),
-            causalMarginSamples
-        ))
-    {
-        return false;
-    }
-
-    const auto last = grainLengthFrames - 1;
-    const auto first = positionAt(startPosition, playbackRate, 0);
-    const auto end = positionAt(startPosition, playbackRate, last);
-    const auto logical = source.getLogicalFrameRange();
-    const auto oldest = static_cast<double>(logical.oldest);
-    return std::floor(std::min(first, end)) >= oldest;
-}
-
-bool CausalReadPlanBuilder::isFutureRangeValid(
-    CircularAudioBuffer::AbsoluteFrame writeExclusive,
-    std::uint64_t capacityFrames,
-    std::uint64_t logicalLengthFrames,
-    double startPosition,
-    double playbackRate,
-    std::uint32_t grainLengthFrames
-) noexcept
-{
-    if (capacityFrames == 0 || logicalLengthFrames == 0
-        || logicalLengthFrames > capacityFrames
-        || grainLengthFrames == 0
-        || !finiteAndRepresentable(startPosition)
-        || !std::isfinite(playbackRate))
-    {
-        return false;
-    }
-
-    const auto last = grainLengthFrames - 1;
-    const auto checkOffset = [&](std::uint64_t offset) noexcept
-    {
-        const auto position = positionAt(
-            startPosition,
-            playbackRate,
-            static_cast<std::uint32_t>(offset)
-        );
-        if (!finiteAndRepresentable(position))
-            return false;
-
-        std::uint64_t physicalOldest = 0;
-        std::uint64_t logicalOldest = 0;
-        if (!lowerBoundAtOffset(
-                writeExclusive,
-                capacityFrames,
-                logicalLengthFrames,
-                offset,
-                physicalOldest,
-                logicalOldest
-            ))
-        {
-            return false;
-        }
-
-        const auto first = std::floor(position);
-        return first >= static_cast<double>(physicalOldest)
-            && first >= static_cast<double>(logicalOldest);
-    };
-
-    if (!checkOffset(0) || !checkOffset(last))
-        return false;
-
-    const auto firstBoundary = writeExclusive < capacityFrames
-        ? capacityFrames - writeExclusive
-        : 0;
-    const auto logicalBoundary = writeExclusive < logicalLengthFrames
-        ? logicalLengthFrames - writeExclusive
-        : 0;
-
-    for (const auto boundary : { firstBoundary, logicalBoundary })
-    {
-        if (boundary > 0 && boundary <= last
-            && (!checkOffset(boundary - 1) || !checkOffset(boundary)))
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
 
 }

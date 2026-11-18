@@ -254,7 +254,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
 
     CausalEventSnapshot event;
     if (!CausalReadPlanBuilder::captureEventSnapshot(
-            CausalSourcePolicy::historyOnly,
+            parameters.sourcePolicy,
             source.getGeneration(),
             currentSample,
             request.positionNormalized,
@@ -504,7 +504,7 @@ GrainSchedulerStepResult GrainScheduler::launchPlannedGrain(
     if (!plan.isValid())
         return GrainSchedulerStepResult::invalidTrajectory;
 
-    const GrainInit init {
+    auto init = GrainInit {
         plan.historyRegion,
         plan.anchor,
         plan.playbackRate,
@@ -512,6 +512,9 @@ GrainSchedulerStepResult GrainScheduler::launchPlannedGrain(
         request.envelope,
         request.pan
     };
+    init.sourceKind = plan.sourceKind;
+    init.sourceGeneration = plan.generation;
+    init.causalMarginSamples = plan.causalMarginSamples;
 
     switch (pool.tryStart(init, source))
     {

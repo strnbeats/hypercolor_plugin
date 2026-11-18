@@ -1114,7 +1114,7 @@ HypercolorAudioProcessor::readGranularParameters(double hostBpm) const noexcept
         hypercolor::density::maximumGrainsPerSecond
     );
 
-    return {
+    auto result = hypercolor::dsp::granular::GranularEngineParameters {
         effectiveDensity,
         static_cast<double>(
             grainSizeParameter->load(std::memory_order_relaxed)
@@ -1148,6 +1148,9 @@ HypercolorAudioProcessor::readGranularParameters(double hostBpm) const noexcept
             grainEnvelopeParameter->load(std::memory_order_relaxed)
         )
     };
+    result.sourcePolicy = hypercolor::dsp::granular::CausalSourcePolicy::
+        livePreferredHistoryFallback;
+    return result;
 }
 
 hypercolor::dsp::fx::SpaceReverbParameters

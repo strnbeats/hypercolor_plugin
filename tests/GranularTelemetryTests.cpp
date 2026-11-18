@@ -194,6 +194,7 @@ bool payloadMatches(
 
         if (!exactlyEqual(left.readPosition, right.readPosition)
             || !exactlyEqual(left.playbackRate, right.playbackRate)
+            || left.sourceKind != right.sourceKind
             || left.sourceOldest != right.sourceOldest
             || left.sourceNewestExclusive != right.sourceNewestExclusive
             || left.durationFrames != right.durationFrames

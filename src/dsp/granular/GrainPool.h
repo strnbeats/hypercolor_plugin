@@ -50,6 +50,22 @@ public:
         return grain.getSourceRegion();
     }
 
+    [[nodiscard]] CausalSourceKind getSourceKind() const noexcept
+    {
+        return grain.getSourceKind();
+    }
+
+    [[nodiscard]] CircularAudioBuffer::Generation
+        getSourceGeneration() const noexcept
+    {
+        return grain.getSourceGeneration();
+    }
+
+    [[nodiscard]] std::uint32_t getCausalMarginSamples() const noexcept
+    {
+        return grain.getCausalMarginSamples();
+    }
+
     [[nodiscard]] double getReadPosition() const noexcept
     {
         return grain.getReadPosition();

@@ -182,6 +182,36 @@ if(BUILD_TESTING)
         COMMAND HYPERCOLORCausalReadPlanTests
     )
 
+    add_executable(HYPERCOLORGranularLiveReaderTests
+        src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/CausalReadPlan.cpp
+        src/dsp/granular/GranularCharacter.cpp
+        src/dsp/granular/GranularRandom.cpp
+        src/dsp/granular/Grain.cpp
+        src/dsp/granular/GrainPool.cpp
+        src/dsp/granular/GrainRenderer.cpp
+        src/dsp/granular/GrainScheduler.cpp
+        tests/GranularLiveReaderTests.cpp
+    )
+
+    target_include_directories(HYPERCOLORGranularLiveReaderTests
+        PRIVATE
+            src
+    )
+
+    target_compile_features(HYPERCOLORGranularLiveReaderTests PRIVATE cxx_std_20)
+
+    target_link_libraries(HYPERCOLORGranularLiveReaderTests
+        PRIVATE
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+    )
+
+    add_test(
+        NAME HYPERCOLOR.GranularLiveReader
+        COMMAND HYPERCOLORGranularLiveReaderTests
+    )
+
     add_executable(HYPERCOLORGrainTests
         src/dsp/granular/CircularAudioBuffer.cpp
         src/dsp/granular/Grain.cpp
@@ -253,6 +283,7 @@ if(BUILD_TESTING)
 
     add_executable(HYPERCOLORGranularEngineTests
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/CausalReadPlan.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
         src/dsp/granular/GranularRandom.cpp
@@ -283,6 +314,7 @@ if(BUILD_TESTING)
 
     add_executable(HYPERCOLORGranularLatencyTests
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/CausalReadPlan.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularEngine.cpp
         src/dsp/granular/GranularRandom.cpp
@@ -342,6 +374,7 @@ if(BUILD_TESTING)
 
     add_executable(HYPERCOLORGrainSchedulerTests
         src/dsp/granular/CircularAudioBuffer.cpp
+        src/dsp/granular/CausalReadPlan.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularRandom.cpp
         src/dsp/granular/Grain.cpp

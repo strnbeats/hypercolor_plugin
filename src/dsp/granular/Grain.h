@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dsp/granular/CircularAudioBuffer.h"
+#include "dsp/granular/CausalReadPlan.h"
 
 #include <cstdint>
 
@@ -29,6 +30,10 @@ struct GrainInit
     std::uint32_t durationFrames = 0;
     GrainWindow window = GrainWindow::hann;
     double pan = 0.0;
+    CausalSourceKind sourceKind = CausalSourceKind::history;
+    CircularAudioBuffer::Generation sourceGeneration = 0;
+    std::uint32_t causalMarginSamples
+        = CausalReadPlanBuilder::defaultCausalMarginSamples;
 };
 
 enum class GrainInitResult : std::uint8_t
@@ -67,6 +72,10 @@ public:
 
     [[nodiscard]] const CircularAudioBuffer::SourceRegion&
         getSourceRegion() const noexcept;
+    [[nodiscard]] CausalSourceKind getSourceKind() const noexcept;
+    [[nodiscard]] CircularAudioBuffer::Generation
+        getSourceGeneration() const noexcept;
+    [[nodiscard]] std::uint32_t getCausalMarginSamples() const noexcept;
     [[nodiscard]] double getReadPosition() const noexcept;
     [[nodiscard]] double getPlaybackRate() const noexcept;
     [[nodiscard]] std::uint32_t getDurationFrames() const noexcept;
@@ -79,6 +88,10 @@ public:
 
 private:
     CircularAudioBuffer::SourceRegion sourceRegion;
+    CausalSourceKind sourceKind = CausalSourceKind::history;
+    CircularAudioBuffer::Generation sourceGeneration = 0;
+    std::uint32_t causalMarginSamples
+        = CausalReadPlanBuilder::defaultCausalMarginSamples;
     double startPosition = 0.0;
     double readPosition = 0.0;
     double playbackRate = 1.0;

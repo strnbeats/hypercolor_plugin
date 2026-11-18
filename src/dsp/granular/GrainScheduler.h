@@ -26,6 +26,9 @@ struct GrainSchedulerParameters
     double stereoSpreadAmount = 0.0;
     double panRandomAmount = 0.0;
     GrainWindow envelope = GrainWindow::hann;
+    // Production can explicitly prefer causal live capture while retaining
+    // History as a launch-time fallback. Tests/clients may request History.
+    CausalSourcePolicy sourcePolicy = CausalSourcePolicy::historyOnly;
 };
 
 enum class GrainSchedulerStepResult : std::uint8_t

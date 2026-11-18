@@ -101,6 +101,25 @@ public:
         float& result
     ) const noexcept;
 
+    // Reads from the moving live stream. Unlike tryReadLinear(), no captured
+    // SourceRegion is used; generation and both taps are checked against the
+    // current logical/physical bounds and causal write head.
+    [[nodiscard]] bool tryReadCausalLive(
+        Generation expectedGeneration,
+        std::uint32_t channel,
+        double absolutePosition,
+        std::uint32_t causalMarginSamples,
+        float& result
+    ) const noexcept;
+
+    [[nodiscard]] bool isCausalLiveTrajectoryValid(
+        Generation expectedGeneration,
+        double startPosition,
+        double playbackRate,
+        std::uint32_t frameCount,
+        std::uint32_t causalMarginSamples
+    ) const noexcept;
+
     [[nodiscard]] bool isLinearReadPositionValid(
         const SourceRegion& sourceRegion,
         double absolutePosition

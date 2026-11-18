@@ -20,6 +20,17 @@ bool isKnownWindow(GrainWindow window) noexcept
 
     return false;
 }
+
+bool isKnownSourceKind(CausalSourceKind kind) noexcept
+{
+    switch (kind)
+    {
+        case CausalSourceKind::history:
+        case CausalSourceKind::causalLive:
+            return true;
+    }
+    return false;
+}
 }
 
 GrainInitResult Grain::initialise(
@@ -34,26 +45,47 @@ GrainInitResult Grain::initialise(
         || init.pan < -1.0
         || init.pan > 1.0
         || init.durationFrames < minimumDurationFrames
-        || !isKnownWindow(init.window))
+        || !isKnownWindow(init.window)
+        || !isKnownSourceKind(init.sourceKind))
     {
         return GrainInitResult::invalidParameters;
     }
 
-    if (init.sourceRegion.isEmpty()
-        || !source.isSourceRegionCurrent(init.sourceRegion)
-        || !source.isLinearTrajectoryValid(
+    const auto generationForInit = init.sourceGeneration != 0
+        ? init.sourceGeneration
+        : init.sourceRegion.generation;
+    const auto validHistory = init.sourceKind == CausalSourceKind::history
+        && !init.sourceRegion.isEmpty()
+        && source.isSourceRegionCurrent(init.sourceRegion)
+        && source.isLinearTrajectoryValid(
             init.sourceRegion,
             init.startPosition,
             init.playbackRate,
             init.durationFrames
-        ))
+        );
+    const auto validLive = init.sourceKind == CausalSourceKind::causalLive
+        && generationForInit != 0
+        && generationForInit == source.getGeneration()
+        && source.isCausalLiveTrajectoryValid(
+            generationForInit,
+            init.startPosition,
+            init.playbackRate,
+            init.durationFrames,
+            init.causalMarginSamples
+        );
+    if (!validHistory && !validLive)
     {
         return GrainInitResult::invalidSourceTrajectory;
     }
 
     // Commit only after every check succeeds, keeping failed initialisation
     // transactional and leaving this grain inactive.
-    sourceRegion = init.sourceRegion;
+    sourceRegion = init.sourceKind == CausalSourceKind::history
+        ? init.sourceRegion
+        : CircularAudioBuffer::SourceRegion {};
+    sourceKind = init.sourceKind;
+    this->sourceGeneration = generationForInit;
+    causalMarginSamples = init.causalMarginSamples;
     startPosition = init.startPosition;
     readPosition = init.startPosition;
     playbackRate = init.playbackRate;
@@ -97,6 +129,9 @@ void Grain::markFinished() noexcept
 void Grain::reset() noexcept
 {
     sourceRegion = {};
+    sourceKind = CausalSourceKind::history;
+    sourceGeneration = 0;
+    causalMarginSamples = CausalReadPlanBuilder::defaultCausalMarginSamples;
     startPosition = 0.0;
     readPosition = 0.0;
     playbackRate = 1.0;
@@ -126,6 +161,21 @@ const CircularAudioBuffer::SourceRegion&
 Grain::getSourceRegion() const noexcept
 {
     return sourceRegion;
+}
+
+CausalSourceKind Grain::getSourceKind() const noexcept
+{
+    return sourceKind;
+}
+
+CircularAudioBuffer::Generation Grain::getSourceGeneration() const noexcept
+{
+    return sourceGeneration;
+}
+
+std::uint32_t Grain::getCausalMarginSamples() const noexcept
+{
+    return causalMarginSamples;
 }
 
 double Grain::getReadPosition() const noexcept
