@@ -74,14 +74,17 @@ using hypercolor::dsp::granular::GrainScheduler;
 using hypercolor::dsp::granular::GrainSchedulerParameters;
 using hypercolor::dsp::granular::GrainSchedulerStepResult;
 using hypercolor::dsp::granular::GrainPool;
+using hypercolor::dsp::granular::CausalSourceKind;
+using hypercolor::dsp::granular::CausalSourcePolicy;
 
 constexpr double kEpsilon = 1.0e-12;
-constexpr double kMeaningfulFraction = 1.0e-3;
+constexpr double kMeaningfulFraction = 1.0e-2;
 
 enum class SignalKind
 {
     impulse,
     drumTransient,
+    multipleTransients,
     ramp,
     periodic,
     silenceThenSignal
@@ -99,11 +102,34 @@ struct MirrorCounts
     std::size_t lastEvent = std::numeric_limits<std::size_t>::max();
     std::size_t firstEventToStart = std::numeric_limits<std::size_t>::max();
     std::size_t maximumEventToStart = 0;
+    std::size_t liveGrainsStarted = 0;
+    std::size_t historyGrainsStarted = 0;
+    std::size_t liveReadFrames = 0;
+    std::size_t historyReadFrames = 0;
+    std::size_t liveTransientReadFrames = 0;
+    std::size_t historyTransientReadFrames = 0;
+    std::size_t firstTransientRead = std::numeric_limits<std::size_t>::max();
+    std::size_t firstTransientOutputNonzero =
+        std::numeric_limits<std::size_t>::max();
+    std::array<std::size_t, 4> transientReadFrames {};
+    std::array<std::size_t, 4> firstTransientReadSamples {
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max()
+    };
+    double liveAgeMinimumFrames = std::numeric_limits<double>::infinity();
+    double liveAgeMaximumFrames = 0.0;
+    double liveAgeSumFrames = 0.0;
+    double historyAgeMinimumFrames = std::numeric_limits<double>::infinity();
+    double historyAgeMaximumFrames = 0.0;
+    double historyAgeSumFrames = 0.0;
 };
 
 struct Measurement
 {
     std::string signal;
+    std::string sourcePolicy;
     double sampleRate = 0.0;
     std::size_t blockSize = 0;
     std::size_t channels = 0;
@@ -127,6 +153,36 @@ struct Measurement
     std::size_t firstInsufficient = std::numeric_limits<std::size_t>::max();
     std::size_t firstEventToStart = std::numeric_limits<std::size_t>::max();
     std::size_t maximumEventToStart = 0;
+    std::size_t liveGrainsStarted = 0;
+    std::size_t historyGrainsStarted = 0;
+    std::size_t liveReadFrames = 0;
+    std::size_t historyReadFrames = 0;
+    std::size_t liveTransientReadFrames = 0;
+    std::size_t historyTransientReadFrames = 0;
+    std::size_t firstTransientRead = std::numeric_limits<std::size_t>::max();
+    std::size_t firstMeaningfulAfterTransient =
+        std::numeric_limits<std::size_t>::max();
+    std::array<std::size_t, 4> transientReadFrames {};
+    std::array<std::size_t, 4> firstTransientReadSamples {
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max()
+    };
+    std::array<std::size_t, 4> firstMeaningfulAfterEachTransient {
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max(),
+        std::numeric_limits<std::size_t>::max()
+    };
+    double liveAgeMinimumSeconds = std::numeric_limits<double>::quiet_NaN();
+    double liveAgeMeanSeconds = std::numeric_limits<double>::quiet_NaN();
+    double liveAgeMaximumSeconds = std::numeric_limits<double>::quiet_NaN();
+    double historyAgeMinimumSeconds = std::numeric_limits<double>::quiet_NaN();
+    double historyAgeMeanSeconds = std::numeric_limits<double>::quiet_NaN();
+    double historyAgeMaximumSeconds = std::numeric_limits<double>::quiet_NaN();
+    std::size_t eventToMeaningfulOutput =
+        std::numeric_limits<std::size_t>::max();
     std::uint64_t pendingOverflow = 0;
     std::uint64_t pendingExpired = 0;
     std::uint64_t pendingStale = 0;
@@ -159,9 +215,25 @@ std::string_view signalName(SignalKind signal) noexcept
     {
         case SignalKind::impulse: return "impulse";
         case SignalKind::drumTransient: return "drum";
+        case SignalKind::multipleTransients: return "multiple_transients";
         case SignalKind::ramp: return "ramp";
         case SignalKind::periodic: return "periodic";
         case SignalKind::silenceThenSignal: return "silence_then_signal";
+    }
+
+    return "unknown";
+}
+
+std::string_view sourcePolicyName(CausalSourcePolicy policy) noexcept
+{
+    switch (policy)
+    {
+        case CausalSourcePolicy::causalLiveOnly: return "LiveOnly";
+        case CausalSourcePolicy::livePreferredHistoryFallback:
+            return "LivePreferredHistoryFallback";
+        case CausalSourcePolicy::historyOnly: return "HistoryOnly";
+        case CausalSourcePolicy::historyThenLiveFallback:
+            return "HistoryThenLiveFallback";
     }
 
     return "unknown";
@@ -189,6 +261,29 @@ float makeSignalSample(
             const auto body = std::sin(2.0 * std::numbers::pi * 173.0 * time);
             const auto click = sample < 5 ? 0.8 : 0.0;
             return static_cast<float>(envelope * (0.8 * body + click));
+        }
+
+        case SignalKind::multipleTransients:
+        {
+            constexpr std::array onsetSeconds { 0.0, 0.053, 0.099, 0.120 };
+            constexpr std::array amplitudes { 1.0, 0.55, 0.8, 0.35 };
+            auto value = 0.0;
+            for (std::size_t index = 0; index < onsetSeconds.size(); ++index)
+            {
+                const auto localTime = time - onsetSeconds[index];
+                if (localTime < 0.0 || localTime > 0.012)
+                    continue;
+                const auto envelope = std::exp(-210.0 * localTime);
+                const auto body = std::sin(
+                    2.0 * std::numbers::pi * 173.0 * localTime);
+                const auto click = sample
+                        >= static_cast<std::size_t>(onsetSeconds[index] * sampleRate)
+                    && sample
+                        < static_cast<std::size_t>(onsetSeconds[index] * sampleRate) + 5
+                    ? 0.8 : 0.0;
+                value += amplitudes[index] * envelope * (0.8 * body + click);
+            }
+            return static_cast<float>(value);
         }
 
         case SignalKind::ramp:
@@ -222,7 +317,8 @@ GranularEngineParameters makeParameters(
     double density,
     double position,
     double pitch,
-    bool reverse
+    bool reverse,
+    CausalSourcePolicy sourcePolicy = CausalSourcePolicy::historyOnly
 )
 {
     GranularEngineParameters parameters;
@@ -231,6 +327,7 @@ GranularEngineParameters makeParameters(
     parameters.positionNormalized = position;
     parameters.pitchSemitones = pitch;
     parameters.reverse = reverse;
+    parameters.sourcePolicy = sourcePolicy;
     return parameters;
 }
 
@@ -376,11 +473,54 @@ void updateTelemetryAge(
     }
 }
 
+std::uint8_t sourcePositionTransientMask(
+    SignalKind signal,
+    double position,
+    double sampleRate
+) noexcept
+{
+    if (!std::isfinite(position) || position < 0.0)
+        return 0;
+
+    const auto firstTap = static_cast<std::uint64_t>(std::floor(position));
+    const auto secondTap = firstTap + 1;
+    const auto tapIsInRange = [firstTap, secondTap](
+        std::uint64_t start, std::uint64_t end) noexcept
+    {
+        return (firstTap >= start && firstTap <= end)
+            || (secondTap >= start && secondTap <= end);
+    };
+
+    if (signal == SignalKind::impulse)
+        return firstTap == 0 ? 0x1 : 0;
+    if (signal == SignalKind::drumTransient)
+        return firstTap <= static_cast<std::uint64_t>(0.12 * sampleRate)
+            ? 0x1 : 0;
+    if (signal != SignalKind::multipleTransients)
+        return 0;
+
+    constexpr std::array onsetSeconds { 0.0, 0.053, 0.099, 0.120 };
+    auto mask = std::uint8_t { 0 };
+    for (std::size_t index = 0; index < onsetSeconds.size(); ++index)
+    {
+        const auto start = static_cast<std::uint64_t>(
+            onsetSeconds[index] * sampleRate);
+        const auto end = start
+            + static_cast<std::uint64_t>(0.012 * sampleRate);
+        if (tapIsInRange(start, end))
+            mask |= static_cast<std::uint8_t>(1u << index);
+    }
+
+    return mask;
+}
+
 void mirrorOneSample(
     double sampleRate,
     std::size_t sample,
     std::size_t channels,
     const std::array<float, 2>& input,
+    float actualEngineOutput,
+    SignalKind signal,
     const GrainSchedulerParameters& parameters,
     GrainScheduler& scheduler,
     CircularAudioBuffer& source,
@@ -429,6 +569,91 @@ void mirrorOneSample(
         ++counts.rejected;
     }
 
+    const auto writeExclusive = source.getAbsoluteWritePosition();
+    pool.forEachActive(
+        [&](hypercolor::dsp::granular::GrainRenderAccess& access) noexcept
+        {
+            const auto sourceKind = access.getSourceKind();
+            const auto readPosition = access.getReadPosition();
+            if (!std::isfinite(readPosition))
+                return;
+
+            const auto age = static_cast<double>(writeExclusive) - readPosition;
+            const auto transientMask = sourcePositionTransientMask(
+                signal, readPosition, sampleRate);
+            const auto touchesTransient = transientMask != 0;
+            if (sourceKind == CausalSourceKind::causalLive)
+            {
+                if (access.getRenderedFrames() == 0)
+                    ++counts.liveGrainsStarted;
+                ++counts.liveReadFrames;
+                if (age >= 0.0 && std::isfinite(age))
+                {
+                    counts.liveAgeMinimumFrames = std::min(
+                        counts.liveAgeMinimumFrames, age);
+                    counts.liveAgeMaximumFrames = std::max(
+                        counts.liveAgeMaximumFrames, age);
+                    counts.liveAgeSumFrames += age;
+                }
+                if (touchesTransient)
+                {
+                    ++counts.liveTransientReadFrames;
+                    counts.firstTransientRead = std::min(
+                        counts.firstTransientRead, sample);
+                    for (std::size_t transient = 0; transient < 4; ++transient)
+                    {
+                        if ((transientMask & (1u << transient)) != 0)
+                        {
+                            ++counts.transientReadFrames[transient];
+                            counts.firstTransientReadSamples[transient]
+                                = std::min(
+                                    counts.firstTransientReadSamples[transient],
+                                    sample);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                if (access.getRenderedFrames() == 0)
+                    ++counts.historyGrainsStarted;
+                ++counts.historyReadFrames;
+                if (age >= 0.0 && std::isfinite(age))
+                {
+                    counts.historyAgeMinimumFrames = std::min(
+                        counts.historyAgeMinimumFrames, age);
+                    counts.historyAgeMaximumFrames = std::max(
+                        counts.historyAgeMaximumFrames, age);
+                    counts.historyAgeSumFrames += age;
+                }
+                if (touchesTransient)
+                {
+                    ++counts.historyTransientReadFrames;
+                    counts.firstTransientRead = std::min(
+                        counts.firstTransientRead, sample);
+                    for (std::size_t transient = 0; transient < 4; ++transient)
+                    {
+                        if ((transientMask & (1u << transient)) != 0)
+                        {
+                            ++counts.transientReadFrames[transient];
+                            counts.firstTransientReadSamples[transient]
+                                = std::min(
+                                    counts.firstTransientReadSamples[transient],
+                                    sample);
+                        }
+                    }
+                }
+            }
+
+            if (touchesTransient
+                && std::abs(actualEngineOutput) >= 1.0e-6f)
+            {
+                counts.firstTransientOutputNonzero = std::min(
+                    counts.firstTransientOutputNonzero, sample);
+            }
+        }
+    );
+
     std::array<float, 2> mirrorOutput {};
     static_cast<void>(renderer.renderSample(
         source,
@@ -460,6 +685,8 @@ Measurement runScenario(
 
     Measurement measurement;
     measurement.signal = std::string(signalName(signal));
+    measurement.sourcePolicy = std::string(
+        sourcePolicyName(parameters.sourcePolicy));
     measurement.sampleRate = sampleRate;
     measurement.blockSize = blockSize;
     measurement.channels = channels;
@@ -571,6 +798,8 @@ Measurement runScenario(
                 absoluteSample,
                 channels,
                 inputFrame,
+                output[0][absoluteSample],
+                signal,
                 blockParameters,
                 mirrorScheduler,
                 mirrorSource,
@@ -604,7 +833,8 @@ Measurement runScenario(
          ++sample)
         peak = std::max(peak, absSample(output, sample));
 
-    const auto meaningfulThreshold = peak * kMeaningfulFraction;
+    const auto meaningfulThreshold = std::max(
+        kEpsilon, peak * kMeaningfulFraction);
     for (std::size_t sample = observationStart;
          sample < observationEnd;
          ++sample)
@@ -651,6 +881,74 @@ Measurement runScenario(
     measurement.firstInsufficient = mirrorCounts.firstInsufficient;
     measurement.firstEventToStart = mirrorCounts.firstEventToStart;
     measurement.maximumEventToStart = mirrorCounts.maximumEventToStart;
+    measurement.liveGrainsStarted = mirrorCounts.liveGrainsStarted;
+    measurement.historyGrainsStarted = mirrorCounts.historyGrainsStarted;
+    measurement.liveReadFrames = mirrorCounts.liveReadFrames;
+    measurement.historyReadFrames = mirrorCounts.historyReadFrames;
+    measurement.liveTransientReadFrames = mirrorCounts.liveTransientReadFrames;
+    measurement.historyTransientReadFrames = mirrorCounts.historyTransientReadFrames;
+    measurement.firstTransientRead = mirrorCounts.firstTransientRead;
+    measurement.transientReadFrames = mirrorCounts.transientReadFrames;
+    measurement.firstTransientReadSamples
+        = mirrorCounts.firstTransientReadSamples;
+    for (std::size_t transient = 0; transient < 4; ++transient)
+    {
+        const auto firstRead = mirrorCounts.firstTransientReadSamples[transient];
+        if (firstRead == std::numeric_limits<std::size_t>::max())
+            continue;
+        for (std::size_t sample = firstRead; sample < output[0].size(); ++sample)
+        {
+            if (absSample(output, sample) >= meaningfulThreshold)
+            {
+                measurement.firstMeaningfulAfterEachTransient[transient] = sample;
+                break;
+            }
+        }
+    }
+    if (mirrorCounts.firstTransientRead
+        != std::numeric_limits<std::size_t>::max())
+    {
+        for (std::size_t sample = mirrorCounts.firstTransientRead;
+             sample < output[0].size();
+             ++sample)
+        {
+            if (absSample(output, sample) >= meaningfulThreshold)
+            {
+                measurement.firstMeaningfulAfterTransient = sample;
+                break;
+            }
+        }
+    }
+    if (prefillSamples == 0
+        && mirrorCounts.firstEvent != std::numeric_limits<std::size_t>::max()
+        && measurement.firstMeaningful != std::numeric_limits<std::size_t>::max()
+        && measurement.firstMeaningful >= mirrorCounts.firstEvent)
+    {
+        measurement.eventToMeaningfulOutput
+            = measurement.firstMeaningful - mirrorCounts.firstEvent;
+    }
+    if (mirrorCounts.liveReadFrames > 0)
+    {
+        measurement.liveAgeMinimumSeconds
+            = mirrorCounts.liveAgeMinimumFrames / sampleRate;
+        measurement.liveAgeMeanSeconds
+            = mirrorCounts.liveAgeSumFrames
+                / static_cast<double>(mirrorCounts.liveReadFrames)
+                / sampleRate;
+        measurement.liveAgeMaximumSeconds
+            = mirrorCounts.liveAgeMaximumFrames / sampleRate;
+    }
+    if (mirrorCounts.historyReadFrames > 0)
+    {
+        measurement.historyAgeMinimumSeconds
+            = mirrorCounts.historyAgeMinimumFrames / sampleRate;
+        measurement.historyAgeMeanSeconds
+            = mirrorCounts.historyAgeSumFrames
+                / static_cast<double>(mirrorCounts.historyReadFrames)
+                / sampleRate;
+        measurement.historyAgeMaximumSeconds
+            = mirrorCounts.historyAgeMaximumFrames / sampleRate;
+    }
     measurement.pendingOverflow = mirrorScheduler.getPendingOverflowCount();
     measurement.pendingExpired = mirrorScheduler.getPendingExpiredCount();
     measurement.pendingStale = mirrorScheduler.getPendingStaleCount();
@@ -664,24 +962,41 @@ std::string csvValue(std::size_t value)
         : std::to_string(value);
 }
 
+std::string csvDouble(double value)
+{
+    return std::isfinite(value) ? std::to_string(value) : std::string {};
+}
+
 void writeCsv(
     const std::string& path,
     const std::vector<Measurement>& measurements
 )
 {
     std::ofstream csv(path);
-    csv << "signal,sample_rate,block_size,channels,grain_size_ms,density,"
+    csv << "signal,source_policy,sample_rate,block_size,channels,grain_size_ms,density,"
            "position,pitch,reverse,samples,first_nonzero,first_meaningful,"
-           "correlation_lag,correlation,source_age_seconds,event_attempts,"
+           "correlation_lag,correlation,event_attempts,"
            "started_grains,insufficient_history,rejected_events,first_event,"
            "first_started,first_insufficient,first_event_to_start,"
            "maximum_event_to_start,pending_overflow,pending_expired,pending_stale,"
-           "allocations_after_prepare,"
-           "finite,process_succeeded\n";
+           "live_grains_started,history_grains_started,live_read_frames,"
+           "history_read_frames,live_age_min_s,live_age_mean_s,live_age_max_s,"
+           "history_age_min_s,history_age_mean_s,history_age_max_s,"
+           "event_to_meaningful_output_samples,first_transient_read_sample,"
+           "first_meaningful_after_transient_sample,"
+           "live_transient_read_frames,history_transient_read_frames,";
+    for (std::size_t transient = 0; transient < 4; ++transient)
+    {
+        csv << "transient" << transient << "_reads,transient" << transient
+            << "_first_read,transient" << transient
+            << "_first_meaningful,";
+    }
+    csv << "allocations_after_prepare,finite,process_succeeded\n";
     csv << std::setprecision(12);
     for (const auto& measurement : measurements)
     {
         csv << measurement.signal << ','
+            << measurement.sourcePolicy << ','
             << measurement.sampleRate << ','
             << measurement.blockSize << ','
             << measurement.channels << ','
@@ -695,8 +1010,6 @@ void writeCsv(
             << csvValue(measurement.firstMeaningful) << ','
             << csvValue(measurement.correlationLag) << ','
             << measurement.correlation << ','
-            << (std::isfinite(measurement.sourceAgeSeconds)
-                    ? std::to_string(measurement.sourceAgeSeconds) : "") << ','
             << measurement.eventAttempts << ','
             << measurement.startedGrains << ','
             << measurement.insufficientHistory << ','
@@ -709,7 +1022,29 @@ void writeCsv(
             << measurement.pendingOverflow << ','
             << measurement.pendingExpired << ','
             << measurement.pendingStale << ','
-            << measurement.allocationsAfterPrepare << ','
+            << measurement.liveGrainsStarted << ','
+            << measurement.historyGrainsStarted << ','
+            << measurement.liveReadFrames << ','
+            << measurement.historyReadFrames << ','
+            << csvDouble(measurement.liveAgeMinimumSeconds) << ','
+            << csvDouble(measurement.liveAgeMeanSeconds) << ','
+            << csvDouble(measurement.liveAgeMaximumSeconds) << ','
+            << csvDouble(measurement.historyAgeMinimumSeconds) << ','
+            << csvDouble(measurement.historyAgeMeanSeconds) << ','
+            << csvDouble(measurement.historyAgeMaximumSeconds) << ','
+            << csvValue(measurement.eventToMeaningfulOutput) << ','
+            << csvValue(measurement.firstTransientRead) << ','
+            << csvValue(measurement.firstMeaningfulAfterTransient) << ','
+            << measurement.liveTransientReadFrames << ','
+            << measurement.historyTransientReadFrames << ',';
+        for (std::size_t transient = 0; transient < 4; ++transient)
+        {
+            csv << measurement.transientReadFrames[transient] << ','
+                << csvValue(measurement.firstTransientReadSamples[transient]) << ','
+                << csvValue(measurement.firstMeaningfulAfterEachTransient[transient])
+                << ',';
+        }
+        csv << measurement.allocationsAfterPrepare << ','
             << (measurement.finite ? 1 : 0) << ','
             << (measurement.processSucceeded ? 1 : 0) << '\n';
     }
@@ -835,6 +1170,106 @@ void appendCoreCases(std::vector<Measurement>& measurements)
     measurements.push_back(std::move(dynamicRamp));
 }
 
+void appendSourcePolicyAndTransientCases(
+    std::vector<Measurement>& measurements
+)
+{
+    constexpr std::array policies {
+        CausalSourcePolicy::causalLiveOnly,
+        CausalSourcePolicy::livePreferredHistoryFallback,
+        CausalSourcePolicy::historyOnly
+    };
+
+    for (const auto policy : policies)
+    {
+        for (const auto density : { 5.0, 20.0, 120.0 })
+        {
+            auto measurement = runScenario(
+                48000.0,
+                density == 5.0 ? 257 : 64,
+                1,
+                makeParameters(100.0, density, 0.0, 0.0, false, policy),
+                SignalKind::multipleTransients,
+                density == 5.0 ? 0.7 : 0.25
+            );
+            measurement.signal = "multi_transient_density_"
+                + std::to_string(static_cast<int>(density));
+            measurements.push_back(std::move(measurement));
+        }
+
+        auto isolatedImpulse = runScenario(
+            48000.0,
+            64,
+            1,
+            makeParameters(100.0, 20.0, 0.0, 0.0, false, policy),
+            SignalKind::impulse,
+            0.3
+        );
+        isolatedImpulse.signal = "isolated_impulse_on_start";
+        measurements.push_back(std::move(isolatedImpulse));
+
+        auto activeGrainTransient = runScenario(
+            48000.0,
+            7,
+            1,
+            makeParameters(100.0, 20.0, 0.0, 0.0, false, policy),
+            SignalKind::multipleTransients,
+            0.25
+        );
+        activeGrainTransient.signal = "transients_around_density_events";
+        measurements.push_back(std::move(activeGrainTransient));
+    }
+
+    struct MatrixCase
+    {
+        double sampleRate;
+        std::size_t blockSize;
+        double grainSizeMs;
+        double density;
+        double position;
+        double pitch;
+        bool reverse;
+        double prefillSeconds;
+    };
+    constexpr std::array matrix {
+        MatrixCase { 44100.0, 1,   10.0,   5.0, 0.0, -24.0, false, 0.20 },
+        MatrixCase { 48000.0, 7,   50.0,  20.0, 0.5, -12.0, false, 0.25 },
+        MatrixCase { 96000.0, 32, 100.0,  60.0, 1.0,   0.0, false, 0.50 },
+        MatrixCase { 48000.0, 257,250.0, 120.0, 0.5,  12.0, false, 0.75 },
+        MatrixCase { 96000.0, 512,500.0,  20.0, 1.0,  24.0, false, 2.50 },
+        MatrixCase { 48000.0, 64,  10.0,  60.0, 0.0, -24.0, true,  0.10 },
+        MatrixCase { 44100.0, 257,100.0,  20.0, 0.5,   0.0, true,  0.30 },
+        MatrixCase { 96000.0, 7,  500.0, 120.0, 1.0,  24.0, true,  3.00 }
+    };
+
+    for (const auto policy : policies)
+    {
+        for (std::size_t index = 0; index < matrix.size(); ++index)
+        {
+            const auto& item = matrix[index];
+            auto measurement = runScenario(
+                item.sampleRate,
+                item.blockSize,
+                1,
+                makeParameters(
+                    item.grainSizeMs,
+                    item.density,
+                    item.position,
+                    item.pitch,
+                    item.reverse,
+                    policy
+                ),
+                SignalKind::ramp,
+                0.25,
+                item.prefillSeconds
+            );
+            measurement.signal = "trajectory_matrix_"
+                + std::to_string(index);
+            measurements.push_back(std::move(measurement));
+        }
+    }
+}
+
 void printSummary(const std::vector<Measurement>& measurements)
 {
     auto count = std::size_t { 0 };
@@ -869,6 +1304,7 @@ int main(int argc, char** argv)
 
     std::vector<Measurement> measurements;
     appendCoreCases(measurements);
+    appendSourcePolicyAndTransientCases(measurements);
     writeCsv(csvPath, measurements);
     printSummary(measurements);
     std::cout << "CSV: " << csvPath << '\n';

@@ -379,7 +379,14 @@ void testParameterChangeLatchesPendingEvent(TestContext& context)
     for (std::size_t sample = 0; sample < 2400; ++sample)
         static_cast<void>(processSample(scheduler, source, pool, original));
 
-    const auto changed = makeParameters(0.0, 10.0);
+    auto changed = makeParameters(0.0, 10.0);
+    changed.sourcePolicy
+        = hypercolor::dsp::granular::CausalSourcePolicy::causalLiveOnly;
+    hypercolor::dsp::granular::CausalEventSnapshot pendingSnapshot;
+    context.expect(scheduler.getPendingEventSnapshot(0, pendingSnapshot)
+                       && pendingSnapshot.sourcePolicy
+                           == hypercolor::dsp::granular::CausalSourcePolicy::historyOnly,
+                   "pending event should retain its Event-Time source policy");
     auto started = false;
     for (std::size_t sample = 2400; sample < 30000; ++sample)
     {
@@ -400,6 +407,127 @@ void testParameterChangeLatchesPendingEvent(TestContext& context)
         scheduler.getPendingEventCount() == 0,
         "confirmed pending event must be removed exactly once"
     );
+}
+
+void testPermanentlyImpossibleTrajectoryDoesNotEnterPending(TestContext& context)
+{
+    const auto spec = makeSpec();
+    CircularAudioBuffer source;
+    GrainScheduler scheduler;
+    GrainPool pool;
+    context.expect(source.prepare(spec, 0.1, 0.1),
+                   "small physical source should prepare");
+    context.expect(scheduler.prepare(spec),
+                   "impossible-trajectory scheduler should prepare");
+
+    auto parameters = makeParameters(120.0, 500.0);
+    parameters.pitchSemitones = 24.0;
+    parameters.sourcePolicy
+        = hypercolor::dsp::granular::CausalSourcePolicy::historyOnly;
+
+    auto sawPermanentRejection = false;
+    for (std::size_t sample = 0; sample < 500; ++sample)
+    {
+        const auto result = processSample(scheduler, source, pool, parameters);
+        if (result == GrainSchedulerStepResult::invalidTrajectory)
+        {
+            sawPermanentRejection = true;
+            break;
+        }
+    }
+
+    context.expect(sawPermanentRejection,
+                   "trajectory exceeding maximum logical history should be rejected");
+    context.expect(scheduler.getPendingEventCount() == 0,
+                   "permanently impossible trajectory must not be retained in Pending");
+}
+
+void testMixedPoliciesKeepOneFifoAndDropStaleGeneration(TestContext& context)
+{
+    const auto spec = makeSpec();
+    CircularAudioBuffer source;
+    GrainScheduler scheduler;
+    GrainPool pool;
+    context.expect(prepare(source, spec), "mixed-policy source should prepare");
+    context.expect(scheduler.prepare(spec), "mixed-policy scheduler should prepare");
+
+    auto history = makeParameters(120.0, 500.0);
+    history.sourcePolicy
+        = hypercolor::dsp::granular::CausalSourcePolicy::historyOnly;
+    auto live = history;
+    live.sourcePolicy
+        = hypercolor::dsp::granular::CausalSourcePolicy::causalLiveOnly;
+
+    for (std::size_t sample = 0; sample < 1000; ++sample)
+        static_cast<void>(processSample(
+            scheduler, source, pool, sample < 500 ? history : live));
+
+    hypercolor::dsp::granular::CausalEventSnapshot first;
+    hypercolor::dsp::granular::CausalEventSnapshot second;
+    context.expect(scheduler.getPendingEventCount() >= 2,
+                   "both mode events should share the pending queue");
+    context.expect(scheduler.getPendingEventSnapshot(0, first)
+                       && scheduler.getPendingEventSnapshot(1, second),
+                   "two ordered pending snapshots should be observable");
+    context.expect(first.sourcePolicy
+                       == hypercolor::dsp::granular::CausalSourcePolicy::historyOnly
+                       && second.sourcePolicy
+                           == hypercolor::dsp::granular::CausalSourcePolicy::causalLiveOnly,
+                   "mixed policies must retain their Event-Time FIFO order");
+    context.expect(first.eventSample == 399 && second.eventSample == 799,
+                   "mode changes must not reset Density phase or event spacing");
+
+    source.reset();
+    const auto resetResult = processSample(
+        scheduler, source, pool, makeParameters(0.0, 500.0));
+    context.expect(resetResult == GrainSchedulerStepResult::sourceUnavailable,
+                   "generation mismatch should be reported as stale source");
+    for (std::size_t attempt = 0; attempt < 500; ++attempt)
+    {
+        if (scheduler.getPendingEventCount() == 0)
+            break;
+        static_cast<void>(processSample(
+            scheduler, source, pool, makeParameters(0.0, 500.0)));
+    }
+    context.expect(scheduler.getPendingEventCount() == 0,
+                   "old-generation pending events must be removed, not rebound");
+}
+
+void testPendingLiveKeepsPolicyAfterHistorySwitch(TestContext& context)
+{
+    const auto spec = makeSpec();
+    CircularAudioBuffer source;
+    GrainScheduler scheduler;
+    GrainPool pool;
+    context.expect(prepare(source, spec), "Live pending source should prepare");
+    context.expect(scheduler.prepare(spec), "Live pending scheduler should prepare");
+
+    auto live = makeParameters(120.0, 500.0);
+    live.reverse = true;
+    live.sourcePolicy
+        = hypercolor::dsp::granular::CausalSourcePolicy::causalLiveOnly;
+    for (std::size_t sample = 0; sample < 500; ++sample)
+        static_cast<void>(processSample(scheduler, source, pool, live));
+
+    hypercolor::dsp::granular::CausalEventSnapshot pending;
+    context.expect(scheduler.getPendingEventCount() > 0
+                       && scheduler.getPendingEventSnapshot(0, pending),
+                   "Reverse Live should queue while causal prehistory grows");
+    context.expect(pending.sourcePolicy
+                       == hypercolor::dsp::granular::CausalSourcePolicy::causalLiveOnly,
+                   "queued Live event should capture strict Live policy");
+
+    auto history = makeParameters(0.0, 500.0);
+    history.sourcePolicy
+        = hypercolor::dsp::granular::CausalSourcePolicy::historyOnly;
+    for (std::size_t sample = 0; sample < 1000; ++sample)
+        static_cast<void>(processSample(scheduler, source, pool, history));
+
+    hypercolor::dsp::granular::CausalEventSnapshot afterSwitch;
+    context.expect(scheduler.getPendingEventSnapshot(0, afterSwitch)
+                       && afterSwitch.sourcePolicy
+                           == hypercolor::dsp::granular::CausalSourcePolicy::causalLiveOnly,
+                   "switching to History must not rewrite a pending Live snapshot");
 }
 
 void testNoAudioPathAllocations(TestContext& context)
@@ -656,6 +784,9 @@ int main()
     test120DensityOverflow(context);
     testExpiration(context);
     testParameterChangeLatchesPendingEvent(context);
+    testPermanentlyImpossibleTrajectoryDoesNotEnterPending(context);
+    testMixedPoliciesKeepOneFifoAndDropStaleGeneration(context);
+    testPendingLiveKeepsPolicyAfterHistorySwitch(context);
     testNoAudioPathAllocations(context);
     testTemporalSchedulerIntegrity(context);
     testTemporalParameterTransitions(context);

@@ -18,7 +18,7 @@ static_assert(
 
 constexpr auto stateTreeType = "HYPERCOLOR_STATE";
 constexpr auto stateSchemaProperty = "schemaVersion";
-constexpr int currentStateSchemaVersion = 3;
+constexpr int currentStateSchemaVersion = 4;
 // Large enough to leave room for future bounded preset/state data while still
 // rejecting clearly unreasonable input before parsing it as XML.
 constexpr int maxStateSizeBytes = 64 * 1024 * 1024;
@@ -51,6 +51,9 @@ constexpr int grainEnvelopeDefaultIndex = 0;
 constexpr int grainDensityModeMinimumIndex = 0;
 constexpr int grainDensityModeMaximumIndex = 1;
 constexpr int grainDensityModeDefaultIndex = 0;
+constexpr int granularSourceModeMinimumIndex = 0;
+constexpr int granularSourceModeMaximumIndex = 1;
+constexpr int granularSourceModeLiveIndex = 0;
 constexpr int grainDensityDivisionMinimumIndex = static_cast<int>(
     hypercolor::density::Division::quarter
 );
@@ -310,6 +313,9 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     grainDensityDivisionParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainDensityDivision
     );
+    granularSourceModeParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::granularSourceMode
+    );
     grainSizeParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainSize
     );
@@ -425,6 +431,7 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     jassert(grainDensityParameter != nullptr);
     jassert(grainDensityModeParameter != nullptr);
     jassert(grainDensityDivisionParameter != nullptr);
+    jassert(granularSourceModeParameter != nullptr);
     jassert(grainSizeParameter != nullptr);
     jassert(grainPositionParameter != nullptr);
     jassert(grainPitchParameter != nullptr);
@@ -647,6 +654,13 @@ HypercolorAudioProcessor::createParameterLayout()
             "1/16T", "1/32", "1/32T", "1/64", "1/64T"
         },
         grainDensityDivisionDefaultIndex
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID { hypercolor::ParameterIDs::granularSourceMode, 1 },
+        "Granular Source Mode",
+        juce::StringArray { "Live", "History" },
+        granularSourceModeLiveIndex
     ));
 
     layout.add(std::make_unique<juce::AudioParameterFloat>(
@@ -1148,8 +1162,16 @@ HypercolorAudioProcessor::readGranularParameters(double hostBpm) const noexcept
             grainEnvelopeParameter->load(std::memory_order_relaxed)
         )
     };
-    result.sourcePolicy = hypercolor::dsp::granular::CausalSourcePolicy::
-        livePreferredHistoryFallback;
+    const auto rawSourceMode = granularSourceModeParameter->load(
+        std::memory_order_relaxed
+    );
+    const auto sourceMode = std::isfinite(rawSourceMode)
+        ? std::clamp(rawSourceMode, 0.0f,
+                     static_cast<float>(granularSourceModeMaximumIndex))
+        : static_cast<float>(granularSourceModeLiveIndex);
+    result.sourcePolicy = sourceMode >= 0.5f
+        ? hypercolor::dsp::granular::CausalSourcePolicy::historyOnly
+        : hypercolor::dsp::granular::CausalSourcePolicy::causalLiveOnly;
     return result;
 }
 
@@ -1457,6 +1479,12 @@ void HypercolorAudioProcessor::setStateInformation(
         || !addDefaultParameterIfMissing(
             restoredState,
             parameterTemplateState,
+            hypercolor::ParameterIDs::granularSourceMode,
+            granularSourceModeLiveIndex
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState,
+            parameterTemplateState,
             hypercolor::ParameterIDs::grainDensityDivision,
             grainDensityDivisionDefaultIndex
         )
@@ -1648,6 +1676,12 @@ void HypercolorAudioProcessor::setStateInformation(
             hypercolor::ParameterIDs::grainDensityMode,
             grainDensityModeMinimumIndex,
             grainDensityModeMaximumIndex
+        )
+        || !hasValidChoiceParameterValue(
+            restoredState,
+            hypercolor::ParameterIDs::granularSourceMode,
+            granularSourceModeMinimumIndex,
+            granularSourceModeMaximumIndex
         )
         || !hasValidChoiceParameterValue(
             restoredState,

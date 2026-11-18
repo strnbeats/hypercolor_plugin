@@ -70,6 +70,7 @@ private:
     hypercolor::ui::PremiumRotaryKnob pitchSlider;
     juce::TextButton reverseButton;
     juce::ComboBox densityModeSelector;
+    juce::ComboBox sourceModeSelector;
 
     juce::Label dryWetLabel;
     juce::Label outputGainLabel;
@@ -102,10 +103,12 @@ private:
     SliderAttachment pitchAttachment;
     ButtonAttachment reverseAttachment;
     std::unique_ptr<ComboBoxAttachment> densityModeAttachment;
+    std::unique_ptr<ComboBoxAttachment> sourceModeAttachment;
 
     std::atomic<int> pendingDensityMode { -1 };
     DensityMode appliedDensityMode = DensityMode::free;
     bool densityRebindDeferred = false;
+    juce::TooltipWindow tooltipWindow;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(
         HypercolorAudioProcessorEditor

@@ -28,6 +28,7 @@ enum class CausalReadFeasibility : std::uint8_t
     invalidEventTimestamp,
     generationMismatch,
     insufficientHistory,
+    trajectoryExceedsLogicalCapacity,
     logicalRangeInvalid,
     physicalRangeInvalid,
     causalViolation,

@@ -88,6 +88,7 @@ private:
     std::atomic<float>* grainDensityParameter = nullptr;
     std::atomic<float>* grainDensityModeParameter = nullptr;
     std::atomic<float>* grainDensityDivisionParameter = nullptr;
+    std::atomic<float>* granularSourceModeParameter = nullptr;
     std::atomic<float>* grainSizeParameter = nullptr;
     std::atomic<float>* grainPositionParameter = nullptr;
     std::atomic<float>* grainPitchParameter = nullptr;

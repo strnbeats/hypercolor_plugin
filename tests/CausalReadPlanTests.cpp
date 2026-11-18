@@ -601,6 +601,79 @@ void testHistoryGeometryMatchesProduction(TestContext& context)
         tooShortPlan.feasibility == CausalReadFeasibility::insufficientHistory,
         "too-short Capture-Time region must not produce an anchor");
 }
+
+void testFeasibilityDistinguishesGrowingAndImpossibleRanges(TestContext& context)
+{
+    CircularAudioBuffer history;
+    context.expect(history.prepare(makeSpec(), 0.1, 0.1),
+                   "short logical history should prepare");
+    context.expect(fill(history, 3), "history should begin with short valid region");
+    const auto initialRegion = history.captureSourceRegion();
+
+    CausalEventSnapshot growingHistory;
+    context.expect(CausalReadPlanBuilder::captureEventSnapshot(
+                       CausalSourcePolicy::historyOnly,
+                       initialRegion.generation,
+                       2, 0.5, 2.0, 3, growingHistory),
+                   "History event snapshot should be valid");
+    auto plan = CausalReadPlanBuilder::buildAtLaunch(
+        history, growingHistory, initialRegion);
+    context.expect(plan.feasibility == CausalReadFeasibility::insufficientHistory,
+                   "currently short but eventually feasible History remains temporary");
+
+    context.expect(fill(history, 100), "History range should grow");
+    const auto grownRegion = history.captureSourceRegion();
+    plan = CausalReadPlanBuilder::buildAtLaunch(history, growingHistory, grownRegion);
+    context.expect(plan.feasibility == CausalReadFeasibility::valid,
+                   "same Event-Time History trajectory should become valid after capture grows");
+
+    CausalEventSnapshot impossibleHistory;
+    context.expect(CausalReadPlanBuilder::captureEventSnapshot(
+                       CausalSourcePolicy::historyOnly,
+                       grownRegion.generation,
+                       grownRegion.newestExclusive - 1,
+                       0.5, 4.0, 10000, impossibleHistory),
+                   "oversized History request metadata should remain structurally valid");
+    plan = CausalReadPlanBuilder::buildAtLaunch(
+        history, impossibleHistory, grownRegion);
+    context.expect(plan.feasibility
+                       == CausalReadFeasibility::trajectoryExceedsLogicalCapacity,
+                   "History trajectory larger than maximum logical range is permanent");
+
+    CircularAudioBuffer live;
+    context.expect(live.prepare(makeSpec(), 0.1, 0.1),
+                   "Live source should prepare");
+    context.expect(fill(live, 3), "Live source should start with short prehistory");
+    const auto liveGeneration = live.getGeneration();
+    CausalEventSnapshot reverseLive;
+    context.expect(CausalReadPlanBuilder::captureEventSnapshot(
+                       CausalSourcePolicy::causalLiveOnly,
+                       liveGeneration, 2, 0.5, -1.0, 3, reverseLive),
+                   "Reverse Live snapshot should be structurally valid");
+    plan = CausalReadPlanBuilder::buildAtLaunch(
+        live, reverseLive, live.captureSourceRegion());
+    context.expect(plan.feasibility == CausalReadFeasibility::insufficientHistory,
+                   "Reverse Live may await enough causal prehistory");
+
+    context.expect(fill(live, 100), "Live prehistory should accumulate");
+    plan = CausalReadPlanBuilder::buildAtLaunch(
+        live, reverseLive, live.captureSourceRegion());
+    context.expect(plan.feasibility == CausalReadFeasibility::valid,
+                   "Reverse Live should become valid once prehistory is sufficient");
+
+    CausalEventSnapshot impossibleLive;
+    context.expect(CausalReadPlanBuilder::captureEventSnapshot(
+                       CausalSourcePolicy::causalLiveOnly,
+                       liveGeneration,
+                       live.getAbsoluteWritePosition() - 1,
+                       0.5, 4.0, 10000, impossibleLive),
+                   "oversized Live request metadata should be valid");
+    plan = CausalReadPlanBuilder::buildAtLaunch(
+        live, impossibleLive, live.captureSourceRegion());
+    context.expect(plan.feasibility
+                       == CausalReadFeasibility::trajectoryExceedsLogicalCapacity,
+                   "Live trajectory outside maximum logical range is permanent");
+}
 }
 
 int main()
@@ -617,6 +690,7 @@ int main()
     testSupportedSampleRates(context);
     testContractValidationAndDelayedSnapshots(context);
     testHistoryGeometryMatchesProduction(context);
+    testFeasibilityDistinguishesGrowingAndImpossibleRanges(context);
 
     if (context.getFailures() != 0)
     {

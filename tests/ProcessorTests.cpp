@@ -285,6 +285,14 @@ void testGranularParameterContracts(TestContext& context)
         9.0f,
         6.0f
     );
+    expectParameterContract(
+        context,
+        processor,
+        hypercolor::ParameterIDs::granularSourceMode,
+        0.0f,
+        1.0f,
+        0.0f
+    );
     const auto* densityMode = dynamic_cast<const juce::AudioParameterChoice*>(
         processor.getValueTreeState().getParameter(
             hypercolor::ParameterIDs::grainDensityMode
@@ -295,9 +303,15 @@ void testGranularParameterContracts(TestContext& context)
             hypercolor::ParameterIDs::grainDensityDivision
         )
     );
+    const auto* sourceMode = dynamic_cast<const juce::AudioParameterChoice*>(
+        processor.getValueTreeState().getParameter(
+            hypercolor::ParameterIDs::granularSourceMode
+        )
+    );
     context.expect(
-        densityMode != nullptr && densityDivision != nullptr,
-        "Density mode and division should be AudioParameterChoice parameters"
+        densityMode != nullptr && densityDivision != nullptr
+            && sourceMode != nullptr,
+        "Density and source modes should use AudioParameterChoice parameters"
     );
     if (densityMode != nullptr && densityDivision != nullptr)
     {
@@ -313,6 +327,14 @@ void testGranularParameterContracts(TestContext& context)
                 "1/16T", "1/32", "1/32T", "1/64", "1/64T"
             },
             "Density division should expose all ten musical choices in frequency order"
+        );
+    }
+    if (sourceMode != nullptr)
+    {
+        context.expect(
+            sourceMode->getAllValueStrings()
+                == juce::StringArray { "Live", "History" },
+            "granular source mode should expose strict Live and History choices"
         );
     }
     expectParameterContract(
@@ -1344,6 +1366,178 @@ void processTelemetryBlock(
     processor.processBlock(buffer, midi);
 }
 
+bool telemetryContainsSourceKind(
+    HypercolorAudioProcessor& processor,
+    hypercolor::dsp::granular::CausalSourceKind requested
+)
+{
+    hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+    auto found = false;
+    while (processor.tryPopGranularTelemetry(snapshot))
+    {
+        for (std::size_t index = 0;
+             index < std::min<std::size_t>(
+                 snapshot.activeGrainCount, snapshot.grains.size());
+             ++index)
+        {
+            found = found || snapshot.grains[index].sourceKind == requested;
+        }
+    }
+    return found;
+}
+
+void configureLiveSourceMeasurement(
+    HypercolorAudioProcessor& processor,
+    float grainSize,
+    bool reverse
+)
+{
+    (void) processor.setBusesLayout({
+        juce::AudioChannelSet::mono(),
+        juce::AudioChannelSet::mono()
+    });
+    setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+    setParameter(processor, hypercolor::ParameterIDs::outputGain, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainDensity, 120.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainSize, grainSize);
+    setParameter(processor, hypercolor::ParameterIDs::grainPosition, 0.0f);
+    setParameter(processor, hypercolor::ParameterIDs::grainPitch, 0.0f);
+    setParameter(
+        processor,
+        hypercolor::ParameterIDs::grainReverse,
+        reverse ? 1.0f : 0.0f
+    );
+}
+
+void testProcessorStrictLiveHistoryModes(TestContext& context)
+{
+    using hypercolor::dsp::granular::CausalSourceKind;
+
+    HypercolorAudioProcessor liveProcessor;
+    configureLiveSourceMeasurement(liveProcessor, 100.0f, false);
+    liveProcessor.prepareToPlay(sampleRate, 1600);
+    processTelemetryBlock(liveProcessor, 1600);
+    context.expect(
+        telemetryContainsSourceKind(liveProcessor, CausalSourceKind::causalLive),
+        "real Processor path should launch and publish a Live grain at 100% Wet"
+    );
+    setParameter(liveProcessor, hypercolor::ParameterIDs::granularSourceMode, 1.0f);
+    processTelemetryBlock(liveProcessor, 1600);
+    context.expect(
+        telemetryContainsSourceKind(liveProcessor, CausalSourceKind::causalLive),
+        "an active Live grain should retain its source after switching to History"
+    );
+
+    HypercolorAudioProcessor historyProcessor;
+    configureLiveSourceMeasurement(historyProcessor, 50.0f, true);
+    setParameter(
+        historyProcessor,
+        hypercolor::ParameterIDs::granularSourceMode,
+        1.0f
+    );
+    historyProcessor.prepareToPlay(sampleRate, 1600);
+    processTelemetryBlock(historyProcessor, 1600);
+    processTelemetryBlock(historyProcessor, 1600);
+    processTelemetryBlock(historyProcessor, 1600);
+    context.expect(
+        telemetryContainsSourceKind(historyProcessor, CausalSourceKind::history),
+        "explicit History mode should launch History grains through the Processor"
+    );
+    setParameter(historyProcessor, hypercolor::ParameterIDs::granularSourceMode, 0.0f);
+    processTelemetryBlock(historyProcessor, 1600);
+    context.expect(
+        telemetryContainsSourceKind(historyProcessor, CausalSourceKind::history),
+        "an active History grain should retain its source after switching to Live"
+    );
+
+    HypercolorAudioProcessor transientProcessor;
+    configureLiveSourceMeasurement(transientProcessor, 100.0f, false);
+    setParameter(
+        transientProcessor,
+        hypercolor::ParameterIDs::grainDensity,
+        20.0f
+    );
+    transientProcessor.prepareToPlay(sampleRate, 257);
+    constexpr int transientScenarioSamples = 12000;
+    std::array<float, transientScenarioSamples> transientOutput {};
+    auto sawLive = false;
+    juce::MidiBuffer midi;
+    for (int blockStart = 0;
+         blockStart < transientScenarioSamples;
+         blockStart += 257)
+    {
+        const auto blockLength = juce::jmin(
+            257, transientScenarioSamples - blockStart);
+        juce::AudioBuffer<float> block(1, blockLength);
+        for (int offset = 0; offset < blockLength; ++offset)
+        {
+            const auto sample = static_cast<std::size_t>(blockStart + offset);
+            const auto time = static_cast<double>(sample) / sampleRate;
+            constexpr std::array onsets { 0.0, 0.053, 0.099, 0.120 };
+            constexpr std::array amplitudes { 1.0, 0.55, 0.8, 0.35 };
+            auto input = 0.0;
+            for (std::size_t index = 0; index < onsets.size(); ++index)
+            {
+                const auto localTime = time - onsets[index];
+                if (localTime < 0.0 || localTime > 0.012)
+                    continue;
+                const auto onsetSample = static_cast<std::size_t>(
+                    onsets[index] * sampleRate);
+                const auto click = sample >= onsetSample
+                        && sample < onsetSample + 5
+                    ? 0.8 : 0.0;
+                input += amplitudes[index] * std::exp(-210.0 * localTime)
+                    * (0.8 * std::sin(
+                            2.0 * juce::MathConstants<double>::pi
+                            * 173.0 * localTime)
+                        + click);
+            }
+            block.setSample(0, offset, static_cast<float>(input));
+        }
+        transientProcessor.processBlock(block, midi);
+        for (int offset = 0; offset < blockLength; ++offset)
+        {
+            transientOutput[static_cast<std::size_t>(blockStart + offset)]
+                = block.getSample(0, offset);
+        }
+        hypercolor::dsp::granular::GranularTelemetrySnapshot snapshot;
+        while (transientProcessor.tryPopGranularTelemetry(snapshot))
+        {
+            for (std::size_t index = 0;
+                 index < std::min<std::size_t>(
+                     snapshot.activeGrainCount, snapshot.grains.size());
+                 ++index)
+            {
+                sawLive = sawLive
+                    || snapshot.grains[index].sourceKind
+                        == CausalSourceKind::causalLive;
+            }
+        }
+    }
+    auto transientPeak = 0.0f;
+    for (const auto sample : transientOutput)
+        transientPeak = juce::jmax(transientPeak, std::abs(sample));
+    const auto threshold = transientPeak * 0.01f;
+    auto firstMeaningful = transientOutput.size();
+    for (std::size_t sample = 0; sample < transientOutput.size(); ++sample)
+    {
+        if (std::abs(transientOutput[sample]) >= threshold && threshold > 0.0f)
+        {
+            firstMeaningful = sample;
+            break;
+        }
+    }
+    context.expect(sawLive, "Processor transient run should use Live source");
+    context.expect(
+        firstMeaningful >= 2500 && firstMeaningful < 3500,
+        "Processor transient response should be measured above the 1% peak threshold"
+    );
+    std::cout << "Processor transient measurement: Live=" << (sawLive ? 1 : 0)
+              << ", first meaningful output=" << firstMeaningful
+              << " samples, threshold=" << threshold
+              << " (1% of peak)\n";
+}
+
 bool processAndReadAppliedDensity(
     HypercolorAudioProcessor& processor,
     double& density
@@ -1936,7 +2130,7 @@ void testDensitySyncStateMigration(TestContext& context)
         );
         context.expect(
             migratedXml != nullptr
-                && migratedXml->getIntAttribute("schemaVersion") == 3,
+                && migratedXml->getIntAttribute("schemaVersion") == 4,
             "Migrated state should be saved with the current schema version"
         );
 
@@ -2095,6 +2289,104 @@ void testDensitySyncStateMigration(TestContext& context)
     }
 }
 
+void testGranularSourceModeStateMigration(TestContext& context)
+{
+    HypercolorAudioProcessor fresh;
+    context.expect(
+        getParameterValue(fresh, hypercolor::ParameterIDs::granularSourceMode)
+            == 0.0f,
+        "new projects should default to Live source mode"
+    );
+
+    for (const auto mode : { 0.0f, 1.0f })
+    {
+        HypercolorAudioProcessor source;
+        setParameter(source, hypercolor::ParameterIDs::granularSourceMode, mode);
+        juce::MemoryBlock state;
+        source.getStateInformation(state);
+        HypercolorAudioProcessor restored;
+        restored.setStateInformation(state.getData(),
+                                     static_cast<int>(state.getSize()));
+        context.expect(
+            std::abs(getParameterValue(
+                restored, hypercolor::ParameterIDs::granularSourceMode
+            ) - mode) < 0.01f,
+            "Live and History modes should round-trip independently"
+        );
+    }
+
+    HypercolorAudioProcessor activeProcessor;
+    configureLiveSourceMeasurement(activeProcessor, 100.0f, false);
+    activeProcessor.prepareToPlay(sampleRate, 1600);
+    processTelemetryBlock(activeProcessor, 1600);
+    context.expect(
+        telemetryContainsSourceKind(
+            activeProcessor,
+            hypercolor::dsp::granular::CausalSourceKind::causalLive
+        ),
+        "Live voice should exist before loading a new mode state"
+    );
+    HypercolorAudioProcessor historyStateSource;
+    setParameter(historyStateSource,
+                 hypercolor::ParameterIDs::granularSourceMode, 1.0f);
+    juce::MemoryBlock historyState;
+    historyStateSource.getStateInformation(historyState);
+    activeProcessor.setStateInformation(historyState.getData(),
+                                        static_cast<int>(historyState.getSize()));
+    processTelemetryBlock(activeProcessor, 1600);
+    context.expect(
+        getParameterValue(activeProcessor,
+                          hypercolor::ParameterIDs::granularSourceMode) == 1.0f
+            && telemetryContainsSourceKind(
+                activeProcessor,
+                hypercolor::dsp::granular::CausalSourceKind::causalLive
+            ),
+        "state loading should change future mode without resetting active Live voices"
+    );
+
+    HypercolorAudioProcessor legacySource;
+    setParameter(legacySource, hypercolor::ParameterIDs::granularSourceMode, 1.0f);
+    juce::MemoryBlock currentState;
+    legacySource.getStateInformation(currentState);
+    auto legacyXml = juce::AudioProcessor::getXmlFromBinary(
+        currentState.getData(), static_cast<int>(currentState.getSize()));
+    context.expect(legacyXml != nullptr,
+                   "legacy-mode state fixture should be readable");
+    if (legacyXml == nullptr)
+        return;
+
+    legacyXml->setAttribute("schemaVersion", 3);
+    context.expect(
+        removeParameterFromXml(*legacyXml,
+                               hypercolor::ParameterIDs::granularSourceMode),
+        "schema 3 fixture should omit the newly introduced source mode"
+    );
+    juce::MemoryBlock legacyState;
+    juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacyState);
+
+    HypercolorAudioProcessor restoredLegacy;
+    setParameter(restoredLegacy, hypercolor::ParameterIDs::granularSourceMode, 1.0f);
+    restoredLegacy.setStateInformation(legacyState.getData(),
+                                       static_cast<int>(legacyState.getSize()));
+    context.expect(
+        getParameterValue(
+            restoredLegacy, hypercolor::ParameterIDs::granularSourceMode
+        ) == 0.0f,
+        "legacy state without source mode should migrate to Live"
+    );
+
+    juce::MemoryBlock migratedState;
+    restoredLegacy.getStateInformation(migratedState);
+    HypercolorAudioProcessor reloaded;
+    reloaded.setStateInformation(migratedState.getData(),
+                                 static_cast<int>(migratedState.getSize()));
+    context.expect(
+        getParameterValue(reloaded, hypercolor::ParameterIDs::granularSourceMode)
+            == 0.0f,
+        "migrated Live mode should survive another save/load without remapping"
+    );
+}
+
 void testFxEnableStateMigration(TestContext& context)
 {
     constexpr std::array fxEnableIDs {
@@ -2218,13 +2510,13 @@ void testFxEnableStateMigration(TestContext& context)
         currentState.getData(),
         static_cast<int>(currentState.getSize())
     );
-    context.expect(currentXml != nullptr, "Schema 3 state fixture should be readable");
+    context.expect(currentXml != nullptr, "Schema 4 state fixture should be readable");
 
     if (currentXml != nullptr)
     {
         context.expect(
-            currentXml->getIntAttribute("schemaVersion") == 3,
-            "Newly saved states should use schema 3"
+            currentXml->getIntAttribute("schemaVersion") == 4,
+            "Newly saved states should use schema 4"
         );
 
         HypercolorAudioProcessor currentRestored;
@@ -2237,7 +2529,7 @@ void testFxEnableStateMigration(TestContext& context)
                 currentRestored,
                 hypercolor::ParameterIDs::grainDensityDivision
             ) == 1.0f,
-            "Schema 3 should not apply legacy Density remapping"
+            "Schema 4 should not apply legacy Density remapping"
         );
         for (std::size_t index = 0; index < fxEnableIDs.size(); ++index)
         {
@@ -2246,7 +2538,7 @@ void testFxEnableStateMigration(TestContext& context)
                     getParameterValue(currentRestored, fxEnableIDs[index])
                         - (index % 2 == 0 ? 1.0f : 0.0f)
                 ) < 0.01f,
-                "Schema 3 explicit FX enable values should round-trip"
+                "Schema 4 explicit FX enable values should round-trip"
             );
         }
 
@@ -2280,12 +2572,36 @@ void renderVisualizerForTest(GranularVisualizer& visualizer);
 
 void testEditorControlsStateAndResize(TestContext& context)
 {
+    HypercolorAudioProcessor defaultProcessor;
+    std::unique_ptr<juce::AudioProcessorEditor> defaultEditor(
+        defaultProcessor.createEditor()
+    );
+    auto* defaultSourceMode = defaultEditor != nullptr
+        ? dynamic_cast<juce::ComboBox*>(defaultEditor->findChildWithID(
+              hypercolor::ParameterIDs::granularSourceMode
+          ))
+        : nullptr;
+    context.expect(defaultSourceMode != nullptr,
+                   "new editor should expose Live / History selector");
+    if (defaultSourceMode != nullptr)
+    {
+        context.expect(
+            defaultSourceMode->getSelectedId() == 1
+                && getParameterValue(
+                       defaultProcessor,
+                       hypercolor::ParameterIDs::granularSourceMode
+                   ) == 0.0f,
+            "new editor should show the default Live mode"
+        );
+    }
+
     HypercolorAudioProcessor source;
     setParameter(source, hypercolor::ParameterIDs::grainDensity, 55.5f);
     setParameter(source, hypercolor::ParameterIDs::grainSize, 222.2f);
     setParameter(source, hypercolor::ParameterIDs::grainPosition, 0.75f);
     setParameter(source, hypercolor::ParameterIDs::grainPitch, -5.5f);
     setParameter(source, hypercolor::ParameterIDs::grainReverse, 1.0f);
+    setParameter(source, hypercolor::ParameterIDs::granularSourceMode, 1.0f);
 
     juce::MemoryBlock state;
     source.getStateInformation(state);
@@ -2320,6 +2636,9 @@ void testEditorControlsStateAndResize(TestContext& context)
     auto* pitch = findSlider(hypercolor::ParameterIDs::grainPitch);
     auto* dryWet = findSlider(hypercolor::ParameterIDs::dryWet);
     auto* outputGain = findSlider(hypercolor::ParameterIDs::outputGain);
+    auto* sourceMode = dynamic_cast<juce::ComboBox*>(
+        editor->findChildWithID(hypercolor::ParameterIDs::granularSourceMode)
+    );
     auto* reverse = dynamic_cast<juce::Button*>(
         editor->findChildWithID(hypercolor::ParameterIDs::grainReverse)
     );
@@ -2334,6 +2653,7 @@ void testEditorControlsStateAndResize(TestContext& context)
     context.expect(reverse != nullptr, "editor should expose Reverse control");
     context.expect(dryWet != nullptr, "editor should retain Dry/Wet control");
     context.expect(outputGain != nullptr, "editor should retain Output Gain control");
+    context.expect(sourceMode != nullptr, "editor should expose Live / History selector");
     context.expect(visualizer != nullptr, "editor should contain granular visualizer");
 
     if (visualizer != nullptr)
@@ -2398,6 +2718,29 @@ void testEditorControlsStateAndResize(TestContext& context)
         );
     }
 
+    if (sourceMode != nullptr)
+    {
+        context.expect(
+            sourceMode->getSelectedId() == 2
+                && sourceMode->getText() == "HISTORY",
+            "source selector should reflect History restored from state"
+        );
+
+        sourceMode->setSelectedId(1, juce::sendNotificationSync);
+        context.expect(
+            getParameterValue(
+                restored, hypercolor::ParameterIDs::granularSourceMode
+            ) == 0.0f,
+            "selector change should update the existing Live / History parameter"
+        );
+
+        setParameter(restored, hypercolor::ParameterIDs::granularSourceMode, 1.0f);
+        context.expect(
+            sourceMode->getSelectedId() == 2,
+            "parameter automation should update the attached source selector"
+        );
+    }
+
     if (const auto* constrainer = editor->getConstrainer())
     {
         context.expect(
@@ -2416,12 +2759,13 @@ void testEditorControlsStateAndResize(TestContext& context)
         context.expect(false, "resizable editor should have a bounds constrainer");
     }
 
-    const auto controls = std::array<juce::Component*, 7> {
+    const auto controls = std::array<juce::Component*, 8> {
         density,
         size,
         position,
         pitch,
         reverse,
+        sourceMode,
         dryWet,
         outputGain
     };
@@ -2505,6 +2849,21 @@ void testEditorControlsStateAndResize(TestContext& context)
         juce::Graphics editorGraphics(renderedEditor);
         editor->paintEntireComponent(editorGraphics, true);
     }
+
+    editor.reset();
+    std::unique_ptr<juce::AudioProcessorEditor> reopenedEditor(
+        restored.createEditor()
+    );
+    auto* reopenedSourceMode = reopenedEditor != nullptr
+        ? dynamic_cast<juce::ComboBox*>(reopenedEditor->findChildWithID(
+              hypercolor::ParameterIDs::granularSourceMode
+          ))
+        : nullptr;
+    context.expect(
+        reopenedSourceMode != nullptr
+            && reopenedSourceMode->getSelectedId() == 2,
+        "recreated editor should restore the current History selection"
+    );
 }
 
 GranularVisualizer* findGranularVisualizer(
@@ -2753,6 +3112,7 @@ void testStateRoundTrip(TestContext& context)
     setParameter(source, hypercolor::ParameterIDs::grainDensity, 73.5f);
     setParameter(source, hypercolor::ParameterIDs::grainDensityMode, 1.0f);
     setParameter(source, hypercolor::ParameterIDs::grainDensityDivision, 6.0f);
+    setParameter(source, hypercolor::ParameterIDs::granularSourceMode, 1.0f);
     setParameter(source, hypercolor::ParameterIDs::grainSize, 321.5f);
     setParameter(source, hypercolor::ParameterIDs::grainPosition, 0.731f);
     setParameter(source, hypercolor::ParameterIDs::grainPitch, -7.25f);
@@ -2816,6 +3176,13 @@ void testStateRoundTrip(TestContext& context)
             hypercolor::ParameterIDs::grainDensityDivision
         ) == 6.0f,
         "Grain Density division should survive state round-trip"
+    );
+    context.expect(
+        getParameterValue(
+            restored,
+            hypercolor::ParameterIDs::granularSourceMode
+        ) == 1.0f,
+        "Granular source mode should survive state round-trip"
     );
     context.expect(
         std::abs(getParameterValue(
@@ -3082,7 +3449,7 @@ void testStateRoundTrip(TestContext& context)
 
     if (futureXml != nullptr)
     {
-        futureXml->setAttribute("schemaVersion", 4);
+        futureXml->setAttribute("schemaVersion", 5);
         juce::MemoryBlock futureState;
         juce::AudioProcessor::copyXmlToBinary(*futureXml, futureState);
 
@@ -3118,6 +3485,7 @@ int main()
     testStereoGranularProcessing(context);
     testFallbackResetAndReprepare(context);
     testNonFiniteInputAndRealtimeAllocations(context);
+    testProcessorStrictLiveHistoryModes(context);
     testBlockRateGranularAutomation(context);
     testDensitySyncProcessing(context);
     testTelemetryPublicationAndSequence(context);
@@ -3126,6 +3494,7 @@ int main()
     testTelemetryConsumerDoesNotChangeAudio(context);
     testStateRoundTrip(context);
     testDensitySyncStateMigration(context);
+    testGranularSourceModeStateMigration(context);
     testFxEnableStateMigration(context);
     testEditorControlsStateAndResize(context);
     testGranularVisualizerTelemetry(context);

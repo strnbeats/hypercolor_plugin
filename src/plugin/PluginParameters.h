@@ -9,6 +9,7 @@ inline constexpr auto outputGain = "master.outputGain";
 inline constexpr auto grainDensity = "grainDensity";
 inline constexpr auto grainDensityMode = "grainDensityMode";
 inline constexpr auto grainDensityDivision = "grainDensityDivision";
+inline constexpr auto granularSourceMode = "granularSourceMode";
 inline constexpr auto grainSize = "grainSize";
 inline constexpr auto grainPosition = "grainPosition";
 inline constexpr auto grainPitch = "grainPitch";

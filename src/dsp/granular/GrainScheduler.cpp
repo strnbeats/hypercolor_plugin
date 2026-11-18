@@ -547,6 +547,12 @@ GrainSchedulerStepResult GrainScheduler::checkGrainStartAvailability(
     if (!source.isSourceRegionCurrent(sourceRegion))
         return GrainSchedulerStepResult::sourceUnavailable;
 
+    // A reset can produce an empty current region in a new generation. Check
+    // the event generation before treating that empty region as temporary
+    // history starvation, otherwise stale events remain pending until expiry.
+    if (event.generation != source.getGeneration())
+        return GrainSchedulerStepResult::sourceUnavailable;
+
     if (sourceRegion.isEmpty())
         return GrainSchedulerStepResult::insufficientHistory;
 
@@ -561,6 +567,8 @@ GrainSchedulerStepResult GrainScheduler::checkGrainStartAvailability(
             return GrainSchedulerStepResult::started;
         case CausalReadFeasibility::insufficientHistory:
             return GrainSchedulerStepResult::insufficientHistory;
+        case CausalReadFeasibility::trajectoryExceedsLogicalCapacity:
+            return GrainSchedulerStepResult::invalidTrajectory;
         case CausalReadFeasibility::notPrepared:
         case CausalReadFeasibility::generationMismatch:
             return GrainSchedulerStepResult::sourceUnavailable;

@@ -460,7 +460,8 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
           processorToEdit.getValueTreeState(),
           hypercolor::ParameterIDs::grainReverse,
           reverseButton
-      )
+      ),
+      tooltipWindow(this, 500)
 {
     setLookAndFeel(&lookAndFeel);
 
@@ -605,6 +606,43 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     );
     addAndMakeVisible(densityModeSelector);
 
+    sourceModeSelector.setComponentID(
+        hypercolor::ParameterIDs::granularSourceMode
+    );
+    sourceModeSelector.addItem("LIVE", 1);
+    sourceModeSelector.addItem("HISTORY", 2);
+    sourceModeSelector.setTextWhenNothingSelected("LIVE");
+    sourceModeSelector.setJustificationType(juce::Justification::centred);
+    sourceModeSelector.setColour(
+        juce::ComboBox::backgroundColourId,
+        hypercolor::ui::palette::background().brighter(0.04f)
+    );
+    sourceModeSelector.setColour(
+        juce::ComboBox::outlineColourId,
+        hypercolor::ui::palette::border()
+    );
+    sourceModeSelector.setColour(
+        juce::ComboBox::textColourId,
+        hypercolor::ui::palette::text()
+    );
+    sourceModeSelector.setColour(
+        juce::ComboBox::arrowColourId,
+        hypercolor::ui::palette::space()
+    );
+    sourceModeSelector.setColour(
+        juce::ComboBox::focusedOutlineColourId,
+        hypercolor::ui::palette::space()
+    );
+    sourceModeSelector.setTooltip(
+        "Live — читает причинно доступный входящий сигнал. Положение Position "
+        "и параметры гранулы определяют участок доступного Live-сигнала.\n\n"
+        "History — читает накопленную историю входящего сигнала. Источник и "
+        "anchor фиксируются при запуске гранулы.\n\n"
+        "Режим применяется к новым гранулам. Уже активные и ожидающие гранулы "
+        "сохраняют исходный режим."
+    );
+    addAndMakeVisible(sourceModeSelector);
+
     densitySlider.onInteractionFinished = [this]
     {
         synchronizeDensityMode();
@@ -731,6 +769,11 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
         hypercolor::ParameterIDs::grainDensityMode,
         densityModeSelector
     );
+    sourceModeAttachment = std::make_unique<ComboBoxAttachment>(
+        state,
+        hypercolor::ParameterIDs::granularSourceMode,
+        sourceModeSelector
+    );
     densityModeSelector.onChange = [this]
     {
         triggerAsyncUpdate();
@@ -759,6 +802,7 @@ HypercolorAudioProcessorEditor::~HypercolorAudioProcessorEditor()
     densityModeSelector.onChange = nullptr;
     densityAttachment.reset();
     densityModeAttachment.reset();
+    sourceModeAttachment.reset();
     setLookAndFeel(nullptr);
 }
 
@@ -1311,6 +1355,7 @@ void HypercolorAudioProcessorEditor::resized()
              static_cast<juce::Component*>(&granularSectionLabel),
              static_cast<juce::Component*>(&densitySlider),
              static_cast<juce::Component*>(&densityModeSelector),
+             static_cast<juce::Component*>(&sourceModeSelector),
              static_cast<juce::Component*>(&sizeSlider),
              static_cast<juce::Component*>(&positionSlider),
              static_cast<juce::Component*>(&pitchSlider),
@@ -1365,7 +1410,12 @@ void HypercolorAudioProcessorEditor::resized()
         );
         granularControlsArea = inspectorArea.removeFromTop(primaryHeight);
         auto primaryArea = granularControlsArea.reduced(10, 8);
-        granularSectionLabel.setBounds(primaryArea.removeFromTop(21));
+        auto sectionHeader = primaryArea.removeFromTop(21);
+        auto sourceSelectorBounds = sectionHeader.removeFromRight(
+            juce::jmin(112, juce::jmax(96, sectionHeader.getWidth() / 3))
+        );
+        granularSectionLabel.setBounds(sectionHeader);
+        sourceModeSelector.setBounds(sourceSelectorBounds.reduced(1, 1));
         primaryArea.removeFromTop(4);
 
         std::array<juce::Component*, 5> granularControls {

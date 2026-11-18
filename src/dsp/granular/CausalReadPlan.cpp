@@ -59,6 +59,53 @@ bool checkedIncrement(std::uint64_t value, std::uint64_t& result) noexcept
     result = value + 1;
     return true;
 }
+
+bool historyFitsMaximumAvailableRange(
+    const CircularAudioBuffer& source,
+    const CausalEventSnapshot& event
+) noexcept
+{
+    // The logical duration can be changed at runtime up to physical capacity.
+    // Classifying against the current logical length would incorrectly drop
+    // events that become feasible after that supported reconfiguration.
+    const auto maximumFrames = source.getCapacityFrames();
+    if (maximumFrames == 0)
+        return false;
+
+    const CircularAudioBuffer::SourceRegion maximumRegion {
+        event.generation, 0, static_cast<std::uint64_t>(maximumFrames)
+    };
+    const auto travel = std::abs(static_cast<long double>(event.playbackRate))
+        * static_cast<long double>(event.grainLengthFrames - 1);
+    const auto oldestEndpoint = travel;
+    const auto freshestEndpoint
+        = CausalReadPlanBuilder::calculateHistoryFreshEndpoint(maximumRegion);
+    return std::isfinite(travel)
+        && std::isfinite(oldestEndpoint)
+        && static_cast<long double>(freshestEndpoint) >= oldestEndpoint;
+}
+
+bool liveFitsMaximumAvailableRange(
+    const CircularAudioBuffer& source,
+    const CausalEventSnapshot& event,
+    std::uint32_t margin
+) noexcept
+{
+    const auto maximumFrames = source.getCapacityFrames();
+    if (maximumFrames <= margin)
+        return false;
+
+    const auto last = static_cast<long double>(event.grainLengthFrames - 1);
+    const auto rate = static_cast<long double>(event.playbackRate);
+    const auto oldestAnchor
+        = std::max(0.0L, 1.0L - rate) * last;
+    const auto freshestAnchor
+        = static_cast<long double>(maximumFrames) - margin
+            - std::max(0.0L, rate - 1.0L) * last;
+    return std::isfinite(oldestAnchor)
+        && std::isfinite(freshestAnchor)
+        && freshestAnchor >= oldestAnchor;
+}
 }
 
 bool CausalReadPlanBuilder::isKnownPolicy(CausalSourcePolicy policy) noexcept
@@ -270,7 +317,9 @@ CausalReadFeasibility CausalReadPlanBuilder::buildHistoryPlan(
     if (!std::isfinite(travel) || !std::isfinite(oldestEndpoint)
         || static_cast<long double>(freshestEndpoint) < oldestEndpoint)
     {
-        return CausalReadFeasibility::insufficientHistory;
+        return historyFitsMaximumAvailableRange(source, event)
+            ? CausalReadFeasibility::insufficientHistory
+            : CausalReadFeasibility::trajectoryExceedsLogicalCapacity;
     }
 
     const auto selected = static_cast<long double>(freshestEndpoint)
@@ -332,7 +381,9 @@ CausalReadFeasibility CausalReadPlanBuilder::buildLivePlan(
     if (write < plan.causalMarginSamples
         || write >= static_cast<CircularAudioBuffer::AbsoluteFrame>(maximumExactDoubleInteger))
     {
-        return CausalReadFeasibility::insufficientHistory;
+        return write < plan.causalMarginSamples
+            ? CausalReadFeasibility::insufficientHistory
+            : CausalReadFeasibility::causalViolation;
     }
 
     // Position interpolates the complete range of causal launch anchors.
@@ -348,7 +399,10 @@ CausalReadFeasibility CausalReadPlanBuilder::buildLivePlan(
         || !std::isfinite(freshestAnchorExact)
         || freshestAnchorExact < oldestAnchorExact)
     {
-        return CausalReadFeasibility::insufficientHistory;
+        return liveFitsMaximumAvailableRange(
+                source, event, plan.causalMarginSamples)
+            ? CausalReadFeasibility::insufficientHistory
+            : CausalReadFeasibility::trajectoryExceedsLogicalCapacity;
     }
 
     auto oldestAnchor = static_cast<double>(oldestAnchorExact);
@@ -363,7 +417,7 @@ CausalReadFeasibility CausalReadPlanBuilder::buildLivePlan(
         || !finiteAndRepresentable(freshestAnchor)
         || freshestAnchor < oldestAnchor)
     {
-        return CausalReadFeasibility::insufficientHistory;
+        return CausalReadFeasibility::causalViolation;
     }
 
     const auto selected = static_cast<long double>(freshestAnchor)
