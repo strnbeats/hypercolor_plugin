@@ -8,8 +8,6 @@ namespace hypercolor::dsp::granular
 {
 namespace
 {
-constexpr auto maximumExactDoubleInteger = std::uint64_t { 1 }
-    << std::numeric_limits<double>::digits;
 constexpr std::uint64_t timingSeedStream = 0x54494D494E47524EULL;
 constexpr std::uint64_t panSeedStream = 0x50414E52414E444FULL;
 
@@ -126,12 +124,19 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     // first grain is not discarded merely because the source became valid a
     // few samples after its freshness window.  Once playback has started,
     // stale coalescing prevents an accumulated queue from becoming a burst.
+    auto pendingWasPrechecked = false;
+    auto precheckedPendingResult = GrainSchedulerStepResult::noEvent;
+    CausalReadPlan precheckedPendingPlan;
     while (hasSuccessfulStart && pendingCount > 1)
     {
         const auto& pending = pendingEventAt(0);
+        const auto region = source.captureSourceRegion();
+        CausalReadPlan plan;
         const auto availability = checkGrainStartAvailability(
-            pending.request,
-            source
+            pending.event,
+            source,
+            region,
+            plan
         );
 
         if (availability == GrainSchedulerStepResult::started
@@ -143,6 +148,9 @@ GrainSchedulerStepResult GrainScheduler::processSample(
             continue;
         }
 
+        pendingWasPrechecked = true;
+        precheckedPendingResult = availability;
+        precheckedPendingPlan = plan;
         break;
     }
 
@@ -158,11 +166,13 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         const auto& pending = pendingEventAt(0);
         if (canStartPendingAtSample(pending, currentSample))
         {
-            const auto pendingResult = attemptGrainStart(
-                pending.request,
-                source,
-                pool
-            );
+            const auto pendingResult = pendingWasPrechecked
+                ? (precheckedPendingResult == GrainSchedulerStepResult::started
+                    ? launchPlannedGrain(
+                        pending.request, precheckedPendingPlan, source, pool)
+                    : precheckedPendingResult)
+                : attemptGrainStart(
+                    pending.request, pending.event, source, pool);
 
             switch (pendingResult)
             {
@@ -242,6 +252,20 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         maximumDensityGrainsPerSecond
     );
 
+    CausalEventSnapshot event;
+    if (!CausalReadPlanBuilder::captureEventSnapshot(
+            CausalSourcePolicy::historyOnly,
+            source.getGeneration(),
+            currentSample,
+            request.positionNormalized,
+            request.playbackRate,
+            request.durationFrames,
+            event
+        ))
+    {
+        return finish(GrainSchedulerStepResult::invalidTrajectory);
+    }
+
     // Preserve global chronology. A current event is queued whenever an older
     // pending event was present, even if that older event was rejected for a
     // deterministic reason on this sample.
@@ -249,8 +273,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     {
         if (!enqueuePendingEvent(
                 request,
-                source,
-                currentSample,
+                event,
                 minimumSpacingSamples
             ))
         {
@@ -264,8 +287,7 @@ GrainSchedulerStepResult GrainScheduler::processSample(
     {
         if (!enqueuePendingEvent(
                 request,
-                source,
-                currentSample,
+                event,
                 minimumSpacingSamples
             ))
         {
@@ -275,13 +297,12 @@ GrainSchedulerStepResult GrainScheduler::processSample(
         return finish(result);
     }
 
-    const auto currentResult = attemptGrainStart(request, source, pool);
+    const auto currentResult = attemptGrainStart(request, event, source, pool);
     if (currentResult == GrainSchedulerStepResult::insufficientHistory)
     {
         if (!enqueuePendingEvent(
                 request,
-                source,
-                currentSample,
+                event,
                 minimumSpacingSamples
             ))
         {
@@ -336,12 +357,7 @@ bool GrainScheduler::getPendingEventSnapshot(
 {
     if (offset >= pendingCount)
         return false;
-
-    const auto& event = pendingEventAt(offset);
-    if (!event.hasCausalSnapshot)
-        return false;
-
-    result = event.causalSnapshot;
+    result = pendingEventAt(offset).event;
     return true;
 }
 
@@ -459,36 +475,40 @@ GrainSchedulerStepResult GrainScheduler::prepareGrainRequest(
 
 GrainSchedulerStepResult GrainScheduler::attemptGrainStart(
     const PreparedGrainRequest& request,
+    const CausalEventSnapshot& event,
     const CircularAudioBuffer& source,
     GrainPool& pool
 ) noexcept
 {
-    const auto availability = checkGrainStartAvailability(request, source);
+    const auto sourceRegion = source.captureSourceRegion();
+    CausalReadPlan plan;
+    const auto availability = checkGrainStartAvailability(
+        event,
+        source,
+        sourceRegion,
+        plan
+    );
     if (availability != GrainSchedulerStepResult::started)
         return availability;
 
-    const auto sourceRegion = source.captureSourceRegion();
-    double startPosition = 0.0;
-    const auto positionResult = calculateStartPosition(
-        sourceRegion,
-        request.durationFrames,
-        request.playbackRate,
-        request.positionNormalized,
-        startPosition
-    );
+    return launchPlannedGrain(request, plan, source, pool);
+}
 
-    if (positionResult != StartPositionResult::success)
-    {
-        return positionResult == StartPositionResult::insufficientHistory
-            ? GrainSchedulerStepResult::insufficientHistory
-            : GrainSchedulerStepResult::invalidTrajectory;
-    }
+GrainSchedulerStepResult GrainScheduler::launchPlannedGrain(
+    const PreparedGrainRequest& request,
+    const CausalReadPlan& plan,
+    const CircularAudioBuffer& source,
+    GrainPool& pool
+) noexcept
+{
+    if (!plan.isValid())
+        return GrainSchedulerStepResult::invalidTrajectory;
 
     const GrainInit init {
-        sourceRegion,
-        startPosition,
-        request.playbackRate,
-        request.durationFrames,
+        plan.historyRegion,
+        plan.anchor,
+        plan.playbackRate,
+        plan.grainLengthFrames,
         request.envelope,
         request.pan
     };
@@ -509,8 +529,10 @@ GrainSchedulerStepResult GrainScheduler::attemptGrainStart(
 }
 
 GrainSchedulerStepResult GrainScheduler::checkGrainStartAvailability(
-    const PreparedGrainRequest& request,
-    const CircularAudioBuffer& source
+    const CausalEventSnapshot& event,
+    const CircularAudioBuffer& source,
+    const CircularAudioBuffer::SourceRegion& sourceRegion,
+    CausalReadPlan& plan
 ) const noexcept
 {
     if (!source.isPrepared()
@@ -519,45 +541,41 @@ GrainSchedulerStepResult GrainScheduler::checkGrainStartAvailability(
         return GrainSchedulerStepResult::sourceUnavailable;
     }
 
-    const auto sourceRegion = source.captureSourceRegion();
     if (!source.isSourceRegionCurrent(sourceRegion))
         return GrainSchedulerStepResult::sourceUnavailable;
 
     if (sourceRegion.isEmpty())
         return GrainSchedulerStepResult::insufficientHistory;
 
-    double startPosition = 0.0;
-    const auto positionResult = calculateStartPosition(
-        sourceRegion,
-        request.durationFrames,
-        request.playbackRate,
-        request.positionNormalized,
-        startPosition
+    plan = CausalReadPlanBuilder::buildAtLaunch(
+        source,
+        event,
+        sourceRegion
     );
-
-    if (positionResult == StartPositionResult::insufficientHistory)
-        return GrainSchedulerStepResult::insufficientHistory;
-
-    if (positionResult == StartPositionResult::invalidRepresentation)
-        return GrainSchedulerStepResult::invalidTrajectory;
-
-    if (!source.isLinearTrajectoryValid(
-            sourceRegion,
-            startPosition,
-            request.playbackRate,
-            request.durationFrames
-        ))
+    switch (plan.feasibility)
     {
-        return GrainSchedulerStepResult::invalidTrajectory;
+        case CausalReadFeasibility::valid:
+            return GrainSchedulerStepResult::started;
+        case CausalReadFeasibility::insufficientHistory:
+            return GrainSchedulerStepResult::insufficientHistory;
+        case CausalReadFeasibility::notPrepared:
+        case CausalReadFeasibility::generationMismatch:
+            return GrainSchedulerStepResult::sourceUnavailable;
+        case CausalReadFeasibility::physicalRangeInvalid:
+        case CausalReadFeasibility::logicalRangeInvalid:
+        case CausalReadFeasibility::causalViolation:
+        case CausalReadFeasibility::invalidEventSnapshot:
+        case CausalReadFeasibility::invalidEventTimestamp:
+        case CausalReadFeasibility::fallbackNotAllowed:
+        case CausalReadFeasibility::expired:
+            return GrainSchedulerStepResult::invalidTrajectory;
     }
-
-    return GrainSchedulerStepResult::started;
+    return GrainSchedulerStepResult::invalidTrajectory;
 }
 
 bool GrainScheduler::enqueuePendingEvent(
     const PreparedGrainRequest& request,
-    const CircularAudioBuffer& source,
-    std::uint64_t generationSample,
+    const CausalEventSnapshot& event,
     std::uint64_t minimumSpacingSamples
 ) noexcept
 {
@@ -577,18 +595,7 @@ bool GrainScheduler::enqueuePendingEvent(
 
     const auto index = (pendingHead + pendingCount) % pendingEventCapacity;
     pendingEvents[index].request = request;
-    pendingEvents[index].hasCausalSnapshot =
-        CausalReadPlanBuilder::captureDelayedEventSnapshot(
-            source,
-            source.captureSourceRegion(),
-            CausalSourcePolicy::historyThenLiveFallback,
-            generationSample,
-            request.positionNormalized,
-            request.playbackRate,
-            request.durationFrames,
-            pendingEvents[index].causalSnapshot
-        );
-    pendingEvents[index].generationSample = generationSample;
+    pendingEvents[index].event = event;
     pendingEvents[index].minimumSpacingSamples
         = std::max<std::uint64_t>(1, minimumSpacingSamples);
     ++pendingCount;
@@ -616,8 +623,8 @@ void GrainScheduler::ageAndExpirePendingEvents(
     ));
 
     while (pendingCount > 0
-           && (currentSample < pendingEventAt(0).generationSample
-               || currentSample - pendingEventAt(0).generationSample
+           && (currentSample < pendingEventAt(0).event.eventSample
+               || currentSample - pendingEventAt(0).event.eventSample
                    >= maximumAge))
     {
         removePendingHead();
@@ -631,10 +638,10 @@ bool GrainScheduler::isPendingEventTooLate(
     std::uint64_t currentSample
 ) const noexcept
 {
-    if (currentSample < event.generationSample)
+    if (currentSample < event.event.eventSample)
         return true;
 
-    const auto elapsed = currentSample - event.generationSample;
+    const auto elapsed = currentSample - event.event.eventSample;
     const auto minimumSpacing = std::max<std::uint64_t>(
         1,
         event.minimumSpacingSamples
@@ -666,17 +673,17 @@ bool GrainScheduler::canStartPendingAtSample(
     std::uint64_t currentSample
 ) const noexcept
 {
-    if (currentSample < event.generationSample)
+    if (currentSample < event.event.eventSample)
         return false;
 
     const auto spacing = std::max<std::uint64_t>(
         1,
         event.minimumSpacingSamples
     );
-    const auto earliestStart = event.generationSample >
+    const auto earliestStart = event.event.eventSample >
             (std::numeric_limits<std::uint64_t>::max() - spacing)
         ? std::numeric_limits<std::uint64_t>::max()
-        : event.generationSample + spacing;
+        : event.event.eventSample + spacing;
 
     return currentSample >= earliestStart
         && canStartAtSample(currentSample, spacing);
@@ -801,116 +808,5 @@ bool GrainScheduler::calculateDurationFrames(
     return true;
 }
 
-GrainScheduler::StartPositionResult
-GrainScheduler::calculateStartPosition(
-    const CircularAudioBuffer::SourceRegion& sourceRegion,
-    std::uint32_t durationFrames,
-    double playbackRate,
-    double positionNormalized,
-    double& result
-) const noexcept
-{
-    result = 0.0;
 
-    if (sourceRegion.isEmpty()
-        || durationFrames < Grain::minimumDurationFrames
-        || !std::isfinite(playbackRate)
-        || !std::isfinite(positionNormalized))
-    {
-        return StartPositionResult::invalidRepresentation;
-    }
-
-    const auto oldest = static_cast<long double>(sourceRegion.oldest);
-    const auto newestExclusive = static_cast<long double>(
-        sourceRegion.newestExclusive
-    );
-    const auto travel = std::abs(static_cast<long double>(playbackRate))
-        * static_cast<long double>(durationFrames - 1);
-    const auto oldestFreshEndpoint = oldest + travel;
-    const auto upperFreshEndpointExclusive = newestExclusive - 1.0L;
-
-    if (!std::isfinite(travel)
-        || !std::isfinite(oldestFreshEndpoint)
-        || !std::isfinite(upperFreshEndpointExclusive)
-        || oldestFreshEndpoint >= upperFreshEndpointExclusive)
-    {
-        return StartPositionResult::insufficientHistory;
-    }
-
-    const auto upperAsDouble = static_cast<double>(
-        upperFreshEndpointExclusive
-    );
-
-    if (!std::isfinite(upperAsDouble))
-        return StartPositionResult::invalidRepresentation;
-
-    auto freshestEndpoint = std::nextafter(
-        upperAsDouble,
-        -std::numeric_limits<double>::infinity()
-    );
-
-    if (!std::isfinite(freshestEndpoint)
-        || static_cast<long double>(freshestEndpoint)
-            >= upperFreshEndpointExclusive
-        || static_cast<long double>(freshestEndpoint)
-            < oldestFreshEndpoint)
-    {
-        return StartPositionResult::invalidRepresentation;
-    }
-
-    const auto selectedEndpoint = static_cast<long double>(freshestEndpoint)
-        - static_cast<long double>(positionNormalized)
-            * (static_cast<long double>(freshestEndpoint)
-                - oldestFreshEndpoint);
-    auto representableEndpoint = static_cast<double>(selectedEndpoint);
-
-    if (!std::isfinite(representableEndpoint))
-        return StartPositionResult::invalidRepresentation;
-
-    if (static_cast<long double>(representableEndpoint)
-        < oldestFreshEndpoint)
-    {
-        representableEndpoint = std::nextafter(
-            representableEndpoint,
-            std::numeric_limits<double>::infinity()
-        );
-    }
-
-    if (!std::isfinite(representableEndpoint)
-        || representableEndpoint > freshestEndpoint
-        || static_cast<long double>(representableEndpoint)
-            < oldestFreshEndpoint
-        || static_cast<long double>(representableEndpoint)
-            >= upperFreshEndpointExclusive)
-    {
-        return StartPositionResult::invalidRepresentation;
-    }
-
-    const auto startAsLongDouble = playbackRate < 0.0
-        ? static_cast<long double>(representableEndpoint)
-        : static_cast<long double>(representableEndpoint) - travel;
-    auto start = static_cast<double>(startAsLongDouble);
-
-    if (!std::isfinite(start))
-        return StartPositionResult::invalidRepresentation;
-
-    if (static_cast<long double>(start) < oldest)
-    {
-        start = std::nextafter(
-            start,
-            std::numeric_limits<double>::infinity()
-        );
-    }
-
-    if (!std::isfinite(start)
-        || start < 0.0
-        || start >= static_cast<double>(maximumExactDoubleInteger)
-        || static_cast<long double>(start) < oldest)
-    {
-        return StartPositionResult::invalidRepresentation;
-    }
-
-    result = start;
-    return StartPositionResult::success;
-}
 }

@@ -87,22 +87,13 @@ public:
     [[nodiscard]] std::uint64_t getPendingOverflowCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingExpiredCount() const noexcept;
     [[nodiscard]] std::uint64_t getPendingStaleCount() const noexcept;
-
-    // Copies immutable Event-Time metadata for a pending event. This bridge
-    // does not alter launch timing or production rendering.
     [[nodiscard]] bool getPendingEventSnapshot(
         std::size_t offset,
         CausalEventSnapshot& result
     ) const noexcept;
 
-private:
-    enum class StartPositionResult : std::uint8_t
-    {
-        success,
-        insufficientHistory,
-        invalidRepresentation
-    };
 
+private:
     struct PreparedGrainRequest
     {
         double positionNormalized = 0.0;
@@ -115,9 +106,7 @@ private:
     struct PendingEvent
     {
         PreparedGrainRequest request {};
-        CausalEventSnapshot causalSnapshot {};
-        bool hasCausalSnapshot = false;
-        std::uint64_t generationSample = 0;
+        CausalEventSnapshot event {};
         std::uint64_t minimumSpacingSamples = 1;
     };
 
@@ -128,19 +117,28 @@ private:
 
     [[nodiscard]] GrainSchedulerStepResult attemptGrainStart(
         const PreparedGrainRequest& request,
+        const CausalEventSnapshot& event,
+        const CircularAudioBuffer& source,
+        GrainPool& pool
+    ) noexcept;
+
+    [[nodiscard]] GrainSchedulerStepResult launchPlannedGrain(
+        const PreparedGrainRequest& request,
+        const CausalReadPlan& plan,
         const CircularAudioBuffer& source,
         GrainPool& pool
     ) noexcept;
 
     [[nodiscard]] GrainSchedulerStepResult checkGrainStartAvailability(
-        const PreparedGrainRequest& request,
-        const CircularAudioBuffer& source
+        const CausalEventSnapshot& event,
+        const CircularAudioBuffer& source,
+        const CircularAudioBuffer::SourceRegion& captureRegion,
+        CausalReadPlan& plan
     ) const noexcept;
 
     [[nodiscard]] bool enqueuePendingEvent(
         const PreparedGrainRequest& request,
-        const CircularAudioBuffer& source,
-        std::uint64_t generationSample,
+        const CausalEventSnapshot& event,
         std::uint64_t minimumSpacingSamples
     ) noexcept;
 
@@ -178,14 +176,6 @@ private:
     [[nodiscard]] bool calculateDurationFrames(
         double grainSizeMilliseconds,
         std::uint32_t& result
-    ) const noexcept;
-
-    [[nodiscard]] StartPositionResult calculateStartPosition(
-        const CircularAudioBuffer::SourceRegion& sourceRegion,
-        std::uint32_t durationFrames,
-        double playbackRate,
-        double positionNormalized,
-        double& result
     ) const noexcept;
 
     void resetRandomState() noexcept;

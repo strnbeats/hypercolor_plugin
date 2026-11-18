@@ -1,10 +1,12 @@
 #include "core/ProcessSpec.h"
 #include "dsp/granular/CircularAudioBuffer.h"
+#include "dsp/granular/CausalReadPlan.h"
 #include "dsp/granular/GrainScheduler.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -51,8 +53,6 @@ using hypercolor::dsp::granular::GrainRenderAccess;
 using hypercolor::dsp::granular::GrainScheduler;
 using hypercolor::dsp::granular::GrainSchedulerParameters;
 using hypercolor::dsp::granular::GrainSchedulerStepResult;
-using hypercolor::dsp::granular::CausalEventSnapshot;
-using hypercolor::dsp::granular::CausalReadPlanBuilder;
 
 class TestContext
 {
@@ -148,6 +148,11 @@ void test100MsDensity20(TestContext& context)
     auto sawPending = false;
     auto started = std::size_t { 0 };
     auto firstStart = std::size_t { 0 };
+    auto capturedPendingSnapshot = false;
+    hypercolor::dsp::granular::CausalEventSnapshot eventSnapshot;
+    auto snapshotStayedImmutable = true;
+    auto launchRegionWasCurrent = false;
+    auto launchAnchorMatchesPlan = false;
     for (std::size_t sample = 0; sample < 11000; ++sample)
     {
         const auto result = processSample(
@@ -159,15 +164,63 @@ void test100MsDensity20(TestContext& context)
         sawPending = sawPending
             || scheduler.getPendingEventCount() > 0
             || result == GrainSchedulerStepResult::insufficientHistory;
+        if (scheduler.getPendingEventCount() > 0)
+        {
+            if (!capturedPendingSnapshot)
+            {
+                capturedPendingSnapshot = scheduler.getPendingEventSnapshot(
+                    0, eventSnapshot);
+            }
+            else
+            {
+                hypercolor::dsp::granular::CausalEventSnapshot current;
+                const auto available = scheduler.getPendingEventSnapshot(0, current);
+                snapshotStayedImmutable = snapshotStayedImmutable && available
+                    && current.generation == eventSnapshot.generation
+                    && current.eventSample == eventSnapshot.eventSample
+                    && std::bit_cast<std::uint64_t>(current.positionNormalized)
+                        == std::bit_cast<std::uint64_t>(eventSnapshot.positionNormalized)
+                    && std::bit_cast<std::uint64_t>(current.playbackRate)
+                        == std::bit_cast<std::uint64_t>(eventSnapshot.playbackRate)
+                    && current.grainLengthFrames == eventSnapshot.grainLengthFrames;
+            }
+        }
         if (result == GrainSchedulerStepResult::started)
         {
             if (started == 0)
+            {
                 firstStart = sample;
+                const_cast<GrainPool&>(pool).forEachActive(
+                    [&](GrainRenderAccess& access) noexcept
+                    {
+                        launchRegionWasCurrent = access.getSourceRegion().newestExclusive
+                            == source.getAbsoluteWritePosition();
+                        const auto plan
+                            = hypercolor::dsp::granular::CausalReadPlanBuilder::buildAtLaunch(
+                                source, eventSnapshot, access.getSourceRegion());
+                        launchAnchorMatchesPlan = plan.isValid()
+                            && std::bit_cast<std::uint64_t>(access.getReadPosition())
+                                == std::bit_cast<std::uint64_t>(plan.anchor)
+                            && std::bit_cast<std::uint64_t>(access.getPlaybackRate())
+                                == std::bit_cast<std::uint64_t>(eventSnapshot.playbackRate)
+                            && access.getDurationFrames()
+                                == eventSnapshot.grainLengthFrames;
+                    }
+                );
+            }
             ++started;
         }
     }
 
     context.expect(sawPending, "100 ms event should enter pending state");
+    context.expect(capturedPendingSnapshot,
+                   "pending event should retain Event-Time metadata");
+    context.expect(snapshotStayedImmutable,
+                   "pending retries must not alter Event-Time snapshot");
+    context.expect(launchRegionWasCurrent,
+                   "successful launch must use the current Capture-Time region");
+    context.expect(launchAnchorMatchesPlan,
+                   "Grain launch must use the checked plan anchor and Event-Time trajectory");
     context.expect(started == 1, "100 ms event should start exactly once");
     context.expect(
         firstStart >= 4800 && firstStart < 5000,
@@ -593,65 +646,6 @@ void testTemporalParameterTransitions(TestContext& context)
         );
 }
 
-void testPendingEventTimeSnapshot(TestContext& context)
-{
-    const auto spec = makeSpec();
-    CircularAudioBuffer source;
-    GrainScheduler scheduler;
-    GrainPool pool;
-    context.expect(prepare(source, spec), "Event-Time source prepare");
-    context.expect(scheduler.prepare(spec), "Event-Time scheduler prepare");
-
-    const auto parameters = makeParameters(20.0, 100.0);
-    CausalEventSnapshot captured;
-    auto found = false;
-    std::uint64_t pendingNewest = 0;
-
-    for (std::size_t sample = 0; sample < 3000 && !found; ++sample)
-    {
-        context.expect(writeSilence(source), "Event-Time source write");
-        static_cast<void>(scheduler.processSample(parameters, source, pool));
-        if (scheduler.getPendingEventCount() != 0)
-        {
-            found = scheduler.getPendingEventSnapshot(0, captured);
-            if (found)
-                pendingNewest = captured.historyRegion.newestExclusive;
-        }
-    }
-
-    context.expect(found, "pending event must expose Event-Time snapshot");
-    context.expect(
-        found && captured.eventSample + 1 == pendingNewest,
-        "snapshot timestamp must match post-write Event-Time head");
-
-    const auto original = captured;
-    for (std::size_t sample = 0; sample < 256; ++sample)
-    {
-        context.expect(writeSilence(source), "retry source write");
-        static_cast<void>(scheduler.processSample(parameters, source, pool));
-    }
-
-    CausalEventSnapshot retried;
-    context.expect(
-        scheduler.getPendingEventSnapshot(0, retried),
-        "pending snapshot must survive retry");
-    context.expect(
-        retried.eventSample == original.eventSample
-            && retried.historyRegion.oldest == original.historyRegion.oldest
-            && retried.historyRegion.newestExclusive
-                == original.historyRegion.newestExclusive
-            && std::abs(retried.positionNormalized - original.positionNormalized)
-                <= std::numeric_limits<double>::epsilon()
-            && std::abs(retried.playbackRate - original.playbackRate)
-                <= std::numeric_limits<double>::epsilon()
-            && retried.grainLengthFrames == original.grainLengthFrames,
-        "retry must not replace Event-Time metadata");
-
-    const auto plan = CausalReadPlanBuilder::buildAtLaunch(source, retried);
-    context.expect(
-        plan.historyRegion.newestExclusive == original.historyRegion.newestExclusive,
-        "CausalReadPlan must receive the original SourceRegion");
-}
 }
 
 int main()
@@ -665,7 +659,6 @@ int main()
     testNoAudioPathAllocations(context);
     testTemporalSchedulerIntegrity(context);
     testTemporalParameterTransitions(context);
-    testPendingEventTimeSnapshot(context);
 
     if (context.failureCount() != 0)
         return 1;
