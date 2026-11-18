@@ -14,7 +14,8 @@
 class HypercolorAudioProcessorEditor final
     : public juce::AudioProcessorEditor,
       private juce::AudioProcessorValueTreeState::Listener,
-      private juce::AsyncUpdater
+      private juce::AsyncUpdater,
+      private juce::Timer
 {
 public:
     explicit HypercolorAudioProcessorEditor(
@@ -38,6 +39,8 @@ private:
     void rebindDensityControl(DensityMode mode);
     [[nodiscard]] DensityMode readDensityMode() const noexcept;
     void synchronizeDensityMode();
+    void updateEffectVisualTargets(bool snapToTarget);
+    void timerCallback() override;
     void parameterChanged(const juce::String& parameterID,
                           float newValue) override;
     void handleAsyncUpdate() override;
@@ -91,8 +94,11 @@ private:
     std::array<juce::TextButton, 8> effectButtons;
     std::array<juce::TextButton, 8> fxEnableButtons;
     std::array<juce::Slider, 9> inspectorSliders;
+    std::array<hypercolor::ui::PremiumRotaryKnob, 9> fxRotaryKnobs;
     std::array<juce::Label, 9> inspectorLabels;
     std::array<std::unique_ptr<SliderAttachment>, 9> inspectorAttachments;
+    std::array<float, 9> effectVisualCurrent {};
+    std::array<float, 9> effectVisualTarget {};
     std::size_t selectedEffect = 0;
     int selectedModule = -1;
 

@@ -41,6 +41,13 @@ constexpr std::array<const char*, 8> effectEnableParameterIDs {
     hypercolor::ParameterIDs::delayEnabled
 };
 
+constexpr float fxLineOpacityScale = 1.10f;
+
+float fxLineAlpha(float alpha) noexcept
+{
+    return juce::jlimit(0.0f, 1.0f, alpha * fxLineOpacityScale);
+}
+
 juce::Colour effectAccent(std::size_t effectIndex)
 {
     using namespace hypercolor::ui::palette;
@@ -121,7 +128,8 @@ void fillTechnicalSurface(
 void drawDriveBackdrop(
     juce::Graphics& graphics,
     juce::Rectangle<int> integerBounds,
-    juce::Colour accent
+    juce::Colour accent,
+    const std::array<float, 9>& visualDeltas
 )
 {
     auto bounds = integerBounds.toFloat().reduced(2.0f);
@@ -146,25 +154,42 @@ void drawDriveBackdrop(
     graphics.setGradientFill(wash);
     graphics.fillRect(bounds);
 
+    const auto amountDelta = visualDeltas[1];
+    const auto toneDelta = visualDeltas[2];
+    const auto mixDelta = visualDeltas[3];
+    const auto outputDelta = visualDeltas[4];
+    const auto modeDelta = visualDeltas[0];
+    const auto glowIntensity = juce::jlimit(0.012f, 0.10f,
+        0.035f + amountDelta * 0.032f + mixDelta * 0.018f
+            + outputDelta * 0.010f);
     const auto focus = bounds.withSizeKeepingCentre(
-        bounds.getWidth() * 0.78f,
+        bounds.getWidth() * 0.78f * (1.0f + toneDelta * 0.14f
+                                     + modeDelta * 0.035f),
         bounds.getHeight() * 0.68f
     );
-    graphics.setColour(accent.withAlpha(0.035f));
+    graphics.setColour(accent.withAlpha(fxLineAlpha(glowIntensity)));
     graphics.fillEllipse(focus);
-    graphics.setColour(accent.withAlpha(0.10f));
+    graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+        0.04f, 0.24f, 0.10f + amountDelta * 0.12f
+    ))));
     graphics.drawEllipse(focus.reduced(1.0f), 1.0f);
 
     const auto axisY = bounds.getCentreY();
-    graphics.setColour(accent.withAlpha(0.16f));
+    graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+        0.08f, 0.32f, 0.16f + amountDelta * 0.12f
+    ))));
     graphics.drawLine(bounds.getX() + 26.0f, axisY, bounds.getRight() - 26.0f, axisY, 1.0f);
-    graphics.setColour(hypercolor::ui::palette::grid().withAlpha(0.45f));
+    graphics.setColour(hypercolor::ui::palette::grid().withAlpha(fxLineAlpha(0.45f)));
     graphics.drawLine(bounds.getX() + 26.0f, axisY - 1.0f, bounds.getRight() - 26.0f, axisY - 1.0f, 1.0f);
 
     const auto railX = bounds.getX() + bounds.getWidth() * 0.72f;
-    graphics.setColour(accent.withAlpha(0.18f));
+    graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+        0.08f, 0.34f, 0.18f + amountDelta * 0.14f
+    ))));
     graphics.fillRect(railX, bounds.getY() + 18.0f, 2.0f, bounds.getHeight() - 36.0f);
-    graphics.setColour(accent.withAlpha(0.42f));
+    graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+        0.18f, 0.70f, 0.42f + amountDelta * 0.24f
+    ))));
     graphics.fillRect(railX - 5.0f, bounds.getCentreY() - 1.0f, 12.0f, 2.0f);
 
     const auto corner = juce::Rectangle<float>(
@@ -173,9 +198,9 @@ void drawDriveBackdrop(
         92.0f,
         1.0f
     );
-    graphics.setColour(accent.withAlpha(0.55f));
+    graphics.setColour(accent.withAlpha(fxLineAlpha(0.55f)));
     graphics.fillRect(corner);
-    graphics.setColour(hypercolor::ui::palette::text().withAlpha(0.18f));
+    graphics.setColour(hypercolor::ui::palette::text().withAlpha(fxLineAlpha(0.18f)));
     graphics.fillRect(corner.withX(corner.getX() + 102.0f).withWidth(32.0f));
 }
 
@@ -183,12 +208,13 @@ void drawEffectBackdrop(
     juce::Graphics& graphics,
     juce::Rectangle<int> integerBounds,
     std::size_t effectIndex,
-    juce::Colour accent
+    juce::Colour accent,
+    const std::array<float, 9>& visualDeltas
 )
 {
     if (effectIndex == 2)
     {
-        drawDriveBackdrop(graphics, integerBounds, accent);
+        drawDriveBackdrop(graphics, integerBounds, accent, visualDeltas);
         return;
     }
 
@@ -214,22 +240,40 @@ void drawEffectBackdrop(
     const auto centre = bounds.getCentre();
     const auto pi = juce::MathConstants<float>::pi;
     const auto midY = bounds.getCentreY();
+    const auto delta = [&visualDeltas](std::size_t index)
+    {
+        return juce::jlimit(-1.0f, 1.0f, visualDeltas[index]);
+    };
 
     switch (effectIndex)
     {
         case 0: // SPACE: concentric depth fields and orbital reflections.
         {
             const auto spaceCentre = centre.translated(bounds.getWidth() * 0.08f, 0.0f);
+            const auto mixDelta = delta(0);
+            const auto sizeDelta = delta(1);
+            const auto decayDelta = delta(2);
+            const auto dampingDelta = delta(3);
+            const auto preDelayDelta = delta(4);
+            const auto widthDelta = delta(5);
             for (int ring = 0; ring < 5; ++ring)
             {
                 const auto scale = 0.18f + static_cast<float>(ring) * 0.14f;
                 const auto ellipse = juce::Rectangle<float>(
-                    bounds.getWidth() * scale,
+                    bounds.getWidth() * scale
+                        * (1.0f + sizeDelta * 0.24f + widthDelta * 0.14f),
                     bounds.getHeight() * scale * 0.62f
-                ).withCentre(spaceCentre);
-                graphics.setColour(accent.withAlpha(
-                    0.035f + static_cast<float>(ring) * 0.012f
+                        * (1.0f + sizeDelta * 0.14f)
+                ).withCentre(spaceCentre.translated(
+                    0.0f,
+                    preDelayDelta * bounds.getHeight() * 0.035f
                 ));
+                const auto ringAlpha = (0.035f + static_cast<float>(ring) * 0.012f)
+                    * (1.0f + decayDelta * 0.38f + dampingDelta * 0.20f
+                       + mixDelta * 0.16f);
+                graphics.setColour(accent.withAlpha(fxLineAlpha(
+                    juce::jlimit(0.0f, 0.22f, ringAlpha)
+                )));
                 graphics.drawEllipse(ellipse, ring == 4 ? 1.4f : 0.8f);
             }
 
@@ -237,20 +281,24 @@ void drawEffectBackdrop(
             {
                 juce::Path path;
                 const auto radius = bounds.getHeight()
-                    * (0.24f + static_cast<float>(arc) * 0.075f);
+                    * (0.24f + static_cast<float>(arc) * 0.075f)
+                    * (1.0f + sizeDelta * 0.16f);
                 path.addCentredArc(
                     spaceCentre.x,
                     spaceCentre.y,
                     radius * 1.35f,
-                    radius * 0.54f,
+                    radius * 0.54f * (1.0f + widthDelta * 0.18f),
                     0.0f,
                     -1.2f + static_cast<float>(arc) * 0.08f,
                     1.0f + static_cast<float>(arc) * 0.12f,
                     true
                 );
-                graphics.setColour(accent.withAlpha(
-                    0.10f - static_cast<float>(arc) * 0.012f
-                ));
+                const auto arcAlpha = (0.10f - static_cast<float>(arc) * 0.012f)
+                    * (1.0f + decayDelta * 0.45f + dampingDelta * 0.18f
+                       + mixDelta * 0.22f);
+                graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                    0.0f, 0.32f, arcAlpha
+                ))));
                 graphics.strokePath(path, juce::PathStrokeType(1.2f));
             }
             break;
@@ -258,37 +306,55 @@ void drawEffectBackdrop(
 
         case 1: // MODULATION: phase-shifted interference fields.
         {
+            const auto modeDelta = delta(0);
+            const auto rateDelta = delta(1);
+            const auto depthDelta = delta(2);
+            const auto delayDelta = delta(3);
+            const auto feedbackDelta = delta(4);
+            const auto mixDelta = delta(5);
+            const auto widthDelta = delta(6);
             for (int wave = 0; wave < 4; ++wave)
             {
                 juce::Path path;
-                const auto phase = static_cast<float>(wave) * 0.72f;
+                const auto phase = static_cast<float>(wave) * 0.72f
+                    + modeDelta * static_cast<float>(wave) * 0.12f;
                 const auto amplitude = bounds.getHeight()
-                    * (0.045f + static_cast<float>(wave) * 0.012f);
+                    * (0.045f + static_cast<float>(wave) * 0.012f)
+                    * (1.0f + depthDelta * 0.52f);
                 for (int sample = 0; sample <= 72; ++sample)
                 {
-                    const auto x = bounds.getX()
-                        + bounds.getWidth() * static_cast<float>(sample) / 72.0f;
+                    const auto x = bounds.getX() + bounds.getWidth()
+                        * (0.5f + (static_cast<float>(sample) / 72.0f - 0.5f)
+                           * (1.0f + widthDelta * 0.12f));
                     const auto t = static_cast<float>(sample) / 72.0f;
-                    const auto y = midY
-                        + std::sin(t * pi * 3.2f + phase) * amplitude
-                        + std::sin(t * pi * 7.0f - phase) * amplitude * 0.24f;
+                    const auto y = midY + delayDelta * bounds.getHeight() * 0.025f
+                        + std::sin(t * pi * 3.2f * (1.0f + rateDelta * 0.34f)
+                                   + phase) * amplitude
+                        + std::sin(t * pi * 7.0f * (1.0f + rateDelta * 0.24f)
+                                   - phase) * amplitude * 0.24f;
                     if (sample == 0)
                         path.startNewSubPath(x, y);
                     else
                         path.lineTo(x, y);
                 }
-                graphics.setColour(accent.withAlpha(
-                    0.08f - static_cast<float>(wave) * 0.012f
-                ));
+                const auto waveAlpha = (0.08f - static_cast<float>(wave) * 0.012f)
+                    * (1.0f + feedbackDelta * 0.34f + mixDelta * 0.30f);
+                graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                    0.0f, 0.24f, waveAlpha
+                ))));
                 graphics.strokePath(path, juce::PathStrokeType(wave == 0 ? 1.5f : 0.8f));
             }
-            graphics.setColour(accent.withAlpha(0.18f));
+            graphics.setColour(accent.withAlpha(fxLineAlpha(0.18f)));
             graphics.drawLine(bounds.getX() + 26.0f, midY, bounds.getRight() - 26.0f, midY, 1.0f);
             break;
         }
 
         case 3: // TAPE: slow, non-periodic magnetic drift lines.
         {
+            const auto wowDelta = delta(1);
+            const auto flutterDelta = delta(2);
+            const auto wearDelta = delta(3);
+            const auto driveDelta = delta(0);
             for (int line = 0; line < 5; ++line)
             {
                 juce::Path path;
@@ -303,31 +369,51 @@ void drawEffectBackdrop(
                             1.35f + static_cast<float>(line) * 0.08f
                         ) + static_cast<float>(line) * 0.55f)
                             * bounds.getHeight() * 0.025f
+                            * (1.0f + wowDelta * 0.55f)
                         + std::sin(t * pi * 4.0f + static_cast<float>(line))
-                            * bounds.getHeight() * 0.008f;
+                            * bounds.getHeight() * 0.008f
+                            * (1.0f + flutterDelta * 0.9f);
                     if (sample == 0)
                         path.startNewSubPath(x, y);
                     else
                         path.lineTo(x, y);
                 }
-                graphics.setColour(accent.withAlpha(0.07f + (line == 2 ? 0.05f : 0.0f)));
+                const auto lineAlpha = (0.07f + (line == 2 ? 0.05f : 0.0f))
+                    * (1.0f + wearDelta * 0.40f + driveDelta * 0.18f
+                       + delta(4) * 0.20f + delta(5) * 0.12f);
+                graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                    0.0f, 0.24f, lineAlpha
+                ))));
                 graphics.strokePath(path, juce::PathStrokeType(line == 2 ? 1.5f : 0.8f));
             }
-            graphics.setColour(accent.withAlpha(0.16f));
-            graphics.fillRect(bounds.getX() + 22.0f, bounds.getBottom() - 32.0f, bounds.getWidth() * 0.34f, 2.0f);
+            graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                0.06f, 0.34f, 0.16f + wearDelta * 0.14f
+            ))));
+            graphics.fillRect(bounds.getX() + 22.0f, bounds.getBottom() - 32.0f,
+                              bounds.getWidth() * 0.34f * (1.0f + driveDelta * 0.12f),
+                              2.0f);
             break;
         }
 
         case 4: // BITCRUSH: stepped quantisation lattice.
         {
             const auto steps = 12;
+            const auto degradation = juce::jlimit(
+                -0.7f, 0.9f, -delta(0) * 0.54f - delta(1) * 0.28f
+                    + delta(2) * 0.14f - delta(3) * 0.18f
+                    + delta(4) * 0.10f
+            );
             const auto stepWidth = bounds.getWidth() / static_cast<float>(steps);
             for (int step = 0; step < steps; ++step)
             {
                 const auto x = bounds.getX()
                     + static_cast<float>(step) * stepWidth;
-                const auto h = bounds.getHeight() * (0.12f + (step % 4) * 0.045f);
-                graphics.setColour(accent.withAlpha(0.035f));
+                const auto h = bounds.getHeight()
+                    * (0.12f + (step % 4) * 0.045f)
+                    * (1.0f + degradation * 0.42f);
+                graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                    0.0f, 0.12f, 0.035f * (1.0f + degradation * 0.72f)
+                ))));
                 graphics.fillRect(x, midY - h, stepWidth - 2.0f, h * 2.0f);
             }
 
@@ -337,38 +423,60 @@ void drawEffectBackdrop(
             {
                 const auto x = bounds.getX() + 20.0f
                     + static_cast<float>(step) * stepWidth;
-                const auto level = (step % 5) * bounds.getHeight() * 0.045f;
+                const auto level = (step % 5) * bounds.getHeight() * 0.045f
+                    * (1.0f + degradation * 0.55f);
                 staircase.lineTo(x, midY - level);
                 staircase.lineTo(x + stepWidth * 0.72f, midY - level);
             }
-            graphics.setColour(accent.withAlpha(0.18f));
+            graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                0.06f, 0.34f, 0.18f + degradation * 0.13f
+            ))));
             graphics.strokePath(staircase, juce::PathStrokeType(1.4f));
-            graphics.setColour(accent.withAlpha(0.23f));
+            graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                0.08f, 0.38f, 0.23f + degradation * 0.12f
+            ))));
             graphics.drawHorizontalLine(juce::roundToInt(midY), bounds.getX() + 20.0f, bounds.getRight() - 20.0f);
             break;
         }
 
         case 5: // FILTER: restrained frequency curve with a resonant peak.
         {
+            const auto cutoffDelta = delta(1);
+            const auto resonanceDelta = delta(2);
+            const auto peakCentre = juce::jlimit(
+                0.18f, 0.84f, 0.62f + cutoffDelta * 0.20f
+                    + delta(0) * 0.07f + delta(3) * 0.04f
+            );
+            const auto peakWidth = 0.12f * (1.0f + resonanceDelta * 0.48f
+                                            + delta(5) * 0.16f);
+            const auto peakHeight = 0.23f * (1.0f + resonanceDelta * 0.58f
+                + delta(3) * 0.32f + delta(4) * 0.22f);
             juce::Path curve;
             for (int sample = 0; sample <= 80; ++sample)
             {
                 const auto t = static_cast<float>(sample) / 80.0f;
                 const auto x = bounds.getX() + 22.0f + t * (bounds.getWidth() - 44.0f);
-                const auto peak = std::exp(-std::pow((t - 0.62f) / 0.12f, 2.0f));
+                const auto peak = std::exp(-std::pow(
+                    (t - peakCentre) / peakWidth, 2.0f
+                ));
                 const auto slope = 0.26f - t * 0.20f;
                 const auto y = bounds.getBottom() - 42.0f
-                    - (slope + peak * 0.23f) * bounds.getHeight();
+                    - (slope + peak * peakHeight) * bounds.getHeight();
                 if (sample == 0)
                     curve.startNewSubPath(x, y);
                 else
                     curve.lineTo(x, y);
             }
-            graphics.setColour(accent.withAlpha(0.19f));
+            graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                0.08f, 0.34f, 0.19f + resonanceDelta * 0.08f
+                    + delta(4) * 0.08f + delta(5) * 0.05f
+            ))));
             graphics.strokePath(curve, juce::PathStrokeType(1.7f));
-            graphics.setColour(accent.withAlpha(0.09f));
+            graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                0.04f, 0.24f, 0.09f + resonanceDelta * 0.08f
+            ))));
             graphics.drawVerticalLine(
-                juce::roundToInt(bounds.getX() + bounds.getWidth() * 0.62f),
+                juce::roundToInt(bounds.getX() + bounds.getWidth() * peakCentre),
                 bounds.getY() + 22.0f,
                 bounds.getBottom() - 30.0f
             );
@@ -377,29 +485,46 @@ void drawEffectBackdrop(
 
         case 6: // DYNAMICS: envelope, threshold and recovery curve.
         {
+            const auto thresholdDelta = delta(0);
+            const auto ratioDelta = delta(1);
+            const auto attackDelta = delta(2);
+            const auto releaseDelta = delta(3);
+            const auto compression = juce::jlimit(
+                -0.7f, 0.7f, ratioDelta * 0.48f - thresholdDelta * 0.28f
+                    + delta(4) * 0.18f + delta(5) * 0.14f
+            );
+            const auto attackX = 0.24f + attackDelta * 0.055f;
+            const auto recoveryX = 0.77f - releaseDelta * 0.055f;
+            const auto envelopeTop = 0.28f + compression * 0.08f;
             juce::Path envelope;
             envelope.startNewSubPath(bounds.getX() + 22.0f, bounds.getBottom() - 38.0f);
             envelope.cubicTo(
-                bounds.getX() + bounds.getWidth() * 0.24f,
+                bounds.getX() + bounds.getWidth() * attackX,
                 bounds.getBottom() - bounds.getHeight() * 0.60f,
-                bounds.getX() + bounds.getWidth() * 0.34f,
+                bounds.getX() + bounds.getWidth() * (0.34f + attackDelta * 0.04f),
                 bounds.getY() + bounds.getHeight() * 0.23f,
                 bounds.getX() + bounds.getWidth() * 0.52f,
-                bounds.getY() + bounds.getHeight() * 0.28f
+                bounds.getY() + bounds.getHeight() * envelopeTop
             );
             envelope.cubicTo(
-                bounds.getX() + bounds.getWidth() * 0.70f,
-                bounds.getY() + bounds.getHeight() * 0.30f,
-                bounds.getX() + bounds.getWidth() * 0.77f,
+                bounds.getX() + bounds.getWidth() * (0.70f + releaseDelta * 0.035f),
+                bounds.getY() + bounds.getHeight() * (envelopeTop + 0.02f),
+                bounds.getX() + bounds.getWidth() * recoveryX,
                 bounds.getBottom() - bounds.getHeight() * 0.36f,
                 bounds.getRight() - 22.0f,
                 bounds.getBottom() - 38.0f
             );
-            graphics.setColour(accent.withAlpha(0.18f));
+            graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                0.08f, 0.32f, 0.18f + std::abs(compression) * 0.06f
+                    + delta(6) * 0.05f + delta(7) * 0.03f
+            ))));
             graphics.strokePath(envelope, juce::PathStrokeType(1.8f));
-            const auto thresholdY = bounds.getY() + bounds.getHeight() * 0.46f;
+            const auto thresholdY = bounds.getY() + bounds.getHeight()
+                * (0.46f - thresholdDelta * 0.12f);
             constexpr float thresholdDashes[] { 5.0f, 4.0f };
-            graphics.setColour(accent.withAlpha(0.13f));
+            graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                0.05f, 0.26f, 0.13f + std::abs(thresholdDelta) * 0.09f
+            ))));
             graphics.drawDashedLine(
                 juce::Line<float>(bounds.getX() + 22.0f, thresholdY, bounds.getRight() - 22.0f, thresholdY),
                 thresholdDashes,
@@ -411,20 +536,46 @@ void drawEffectBackdrop(
 
         case 7: // DELAY: repeated echoes on a measured time rail.
         {
+            const auto timeDelta = delta(2);
+            const auto divisionDelta = delta(3);
+            const auto feedbackDelta = delta(4);
+            const auto lowCutDelta = delta(5);
+            const auto highCutDelta = delta(6);
+            const auto mixDelta = delta(7);
+            const auto widthDelta = delta(8);
+            const auto modeDelta = delta(0);
+            const auto syncDelta = delta(1);
+            const auto echoSpread = juce::jlimit(0.72f, 1.22f,
+                1.0f + timeDelta * 0.18f + divisionDelta * 0.08f
+                    + widthDelta * 0.06f + modeDelta * 0.035f
+                    + syncDelta * 0.025f);
             const auto railY = bounds.getBottom() - 48.0f;
-            graphics.setColour(accent.withAlpha(0.14f));
+            graphics.setColour(accent.withAlpha(fxLineAlpha(0.14f)));
             graphics.drawLine(bounds.getX() + 22.0f, railY, bounds.getRight() - 22.0f, railY, 1.0f);
             for (int echo = 0; echo < 8; ++echo)
             {
                 const auto t = static_cast<float>(echo + 1) / 9.0f;
-                const auto x = bounds.getX() + 32.0f + t * (bounds.getWidth() - 64.0f);
+                const auto baseX = bounds.getX() + 32.0f
+                    + t * (bounds.getWidth() - 64.0f);
+                const auto x = juce::jlimit(
+                    bounds.getX() + 20.0f,
+                    bounds.getRight() - 34.0f,
+                    centre.x + (baseX - centre.x) * echoSpread
+                );
                 const auto h = bounds.getHeight()
-                    * (0.32f - static_cast<float>(echo) * 0.028f);
-                graphics.setColour(accent.withAlpha(
-                    0.17f - static_cast<float>(echo) * 0.016f
-                ));
+                    * (0.32f - static_cast<float>(echo) * 0.028f)
+                    * (1.0f + feedbackDelta * 0.38f
+                       + (lowCutDelta + highCutDelta) * 0.08f);
+                graphics.setColour(accent.withAlpha(fxLineAlpha(
+                    juce::jlimit(0.0f, 0.36f,
+                        (0.17f - static_cast<float>(echo) * 0.016f)
+                            * (1.0f + feedbackDelta * 0.44f + mixDelta * 0.38f))
+                )));
                 graphics.fillRect(x, railY - h, echo == 0 ? 3.0f : 2.0f, h);
-                graphics.setColour(accent.withAlpha(0.08f));
+                graphics.setColour(accent.withAlpha(fxLineAlpha(juce::jlimit(
+                    0.0f, 0.22f, 0.08f * (1.0f + feedbackDelta * 0.46f
+                                             + mixDelta * 0.32f)
+                ))));
                 graphics.drawLine(x + 5.0f, railY - h * 0.55f, x + 30.0f, railY - h * 0.55f, 1.0f);
             }
             break;
@@ -767,7 +918,11 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
         );
         button.setColour(juce::TextButton::textColourOffId, text);
         button.setColour(juce::TextButton::textColourOnId, hypercolor::ui::palette::background());
-        button.onClick = [this, index] { selectEffect(index); };
+        button.onStateChange = [this, index]
+        {
+            if (effectButtons[index].getToggleState())
+                selectEffect(index);
+        };
         button.setComponentID("module." + juce::String(static_cast<int>(index)));
         addAndMakeVisible(button);
 
@@ -850,6 +1005,7 @@ HypercolorAudioProcessorEditor::~HypercolorAudioProcessorEditor()
         this
     );
     cancelPendingUpdate();
+    stopTimer();
     densitySlider.onInteractionFinished = nullptr;
     densityModeSelector.onChange = nullptr;
     densityAttachment.reset();
@@ -1182,7 +1338,8 @@ void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
             graphics,
             inspectorPanel,
             selectedEffect,
-            effectAccent(selectedEffect)
+            effectAccent(selectedEffect),
+            effectVisualCurrent
         );
     }
 }
@@ -1217,8 +1374,15 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
         attachment.reset();
     for (auto& slider : inspectorSliders)
     {
+        slider.onValueChange = nullptr;
         slider.setVisible(false);
         removeChildComponent(&slider);
+    }
+    for (auto& knob : fxRotaryKnobs)
+    {
+        knob.onValueChange = nullptr;
+        knob.setVisible(false);
+        removeChildComponent(&knob);
     }
     for (auto& label : inspectorLabels)
     {
@@ -1282,19 +1446,20 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
         if (parameter == nullptr)
             continue;
 
-        auto& slider = inspectorSliders[i];
+        const auto isEffect = selectedModule >= 0;
+        auto& slider = isEffect
+            ? static_cast<juce::Slider&>(fxRotaryKnobs[i])
+            : inspectorSliders[i];
         auto& label = inspectorLabels[i];
         const auto range = parameter->getNormalisableRange();
-        const auto isEffect = selectedModule >= 0;
         const auto isEffectMix = isEffect && i == effectMixIndices[selectedEffect];
         const auto accent = isEffect
             ? effectAccent(selectedEffect)
             : (i == 1 || i == 2 ? hypercolor::ui::palette::pink()
                                 : hypercolor::ui::palette::cyan());
-        slider.setSliderStyle(
-            isEffect ? juce::Slider::RotaryHorizontalVerticalDrag
-                     : juce::Slider::LinearHorizontal
-        );
+        slider.setSliderStyle(isEffect
+            ? juce::Slider::RotaryHorizontalVerticalDrag
+            : juce::Slider::LinearHorizontal);
         slider.setTextBoxStyle(
             isEffect ? juce::Slider::TextBoxBelow : juce::Slider::TextBoxRight,
             false,
@@ -1314,9 +1479,32 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
         slider.setColour(juce::Slider::textBoxTextColourId, hypercolor::ui::palette::text());
         slider.setColour(juce::Slider::textBoxBackgroundColourId, hypercolor::ui::palette::background());
         slider.setComponentID(parameterID);
-        auto displayName = isEffectMix
-            ? juce::String("MIX")
+        if (isEffect)
+        {
+            auto& knob = fxRotaryKnobs[i];
+            knob.setMouseDragSensitivity(180);
+            knob.setVisualScale(1.0f);
+            knob.setTargetPalette(
+                accent,
+                accent.darker(0.48f),
+                accent,
+                accent.brighter(0.42f),
+                accent.interpolatedWith(hypercolor::ui::palette::text(), 0.48f)
+            );
+            knob.onValueChange = [this]
+            {
+                updateEffectVisualTargets(false);
+            };
+        }
+        else
+        {
+            slider.setMouseDragSensitivity(140);
+        }
+        auto displayName = isEffect
+            ? parameter->getName(24).toUpperCase()
             : juce::String(parameterID).toUpperCase();
+        if (isEffectMix)
+            displayName = "MIX";
         if (selectedModule == 2)
         {
             if (std::strcmp(parameterID, hypercolor::ParameterIDs::driveMode) == 0)
@@ -1328,16 +1516,111 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
             else if (std::strcmp(parameterID, hypercolor::ParameterIDs::driveOutput) == 0)
                 displayName = "OUTPUT";
         }
+        label.setComponentID("inspector.label." + juce::String(static_cast<int>(i)));
         label.setText(displayName, juce::dontSendNotification);
         label.setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
-        label.setFont(juce::FontOptions(9.0f).withStyle("Bold"));
+        label.setFont(juce::FontOptions(10.0f).withStyle("Bold"));
         addAndMakeVisible(label);
         addAndMakeVisible(slider);
         inspectorAttachments[i] = std::make_unique<SliderAttachment>(
             audioProcessor.getValueTreeState(), parameterID, slider
         );
     }
+    updateEffectVisualTargets(true);
     resized();
+}
+
+void HypercolorAudioProcessorEditor::updateEffectVisualTargets(
+    bool snapToTarget
+)
+{
+    if (selectedModule < 0)
+    {
+        stopTimer();
+        effectVisualCurrent.fill(0.0f);
+        effectVisualTarget.fill(0.0f);
+        return;
+    }
+
+    const auto parameterCount = effectParameterCounts[selectedEffect];
+    for (std::size_t index = 0; index < effectVisualTarget.size(); ++index)
+    {
+        if (index >= parameterCount)
+        {
+            effectVisualTarget[index] = 0.0f;
+            continue;
+        }
+
+        const auto* parameter = audioProcessor.getValueTreeState().getParameter(
+            effectParameters[selectedEffect][index]
+        );
+        if (parameter == nullptr)
+        {
+            effectVisualTarget[index] = 0.0f;
+            continue;
+        }
+
+        const auto& knob = fxRotaryKnobs[index];
+        const auto range = knob.getNormalisableRange();
+        const auto normalized = range.convertTo0to1(
+            static_cast<float>(knob.getValue())
+        );
+        effectVisualTarget[index] = juce::jlimit(
+            -1.0f,
+            1.0f,
+            static_cast<float>(normalized) - parameter->getDefaultValue()
+        );
+    }
+
+    if (snapToTarget)
+    {
+        stopTimer();
+        effectVisualCurrent = effectVisualTarget;
+        repaint(inspectorPanel);
+        return;
+    }
+
+    auto needsSmoothing = false;
+    for (std::size_t index = 0; index < effectVisualCurrent.size(); ++index)
+    {
+        if (std::abs(effectVisualTarget[index] - effectVisualCurrent[index]) > 0.001f)
+        {
+            needsSmoothing = true;
+            break;
+        }
+    }
+
+    if (needsSmoothing && !isTimerRunning())
+        startTimerHz(30);
+}
+
+void HypercolorAudioProcessorEditor::timerCallback()
+{
+    if (selectedModule < 0)
+    {
+        stopTimer();
+        return;
+    }
+
+    auto stillMoving = false;
+    for (std::size_t index = 0; index < effectVisualCurrent.size(); ++index)
+    {
+        auto& current = effectVisualCurrent[index];
+        const auto target = effectVisualTarget[index];
+        const auto difference = target - current;
+        if (std::abs(difference) <= 0.001f)
+        {
+            current = target;
+            continue;
+        }
+
+        current += difference * 0.28f;
+        stillMoving = true;
+    }
+
+    repaint(inspectorPanel);
+    if (!stillMoving)
+        stopTimer();
 }
 
 void HypercolorAudioProcessorEditor::resized()
@@ -1538,7 +1821,7 @@ void HypercolorAudioProcessorEditor::resized()
     {
         grainControlPanel = {};
         granularControlsArea = {};
-        const auto mixWidth = juce::jlimit(116, 156, workspace.getWidth() / 6);
+        const auto mixWidth = juce::jlimit(136, 168, workspace.getWidth() / 6);
         // FX workspaces use one continuous surface.  Leaving a separate
         // spacer here exposed the editor background between the inspector
         // and the Mix panel, producing an unintended black vertical notch.
@@ -1551,7 +1834,19 @@ void HypercolorAudioProcessorEditor::resized()
         mixArea.removeFromTop(10);
         const auto mixIndex = effectMixIndices[selectedEffect];
         inspectorLabels[mixIndex].setBounds(mixArea.removeFromTop(22));
-        inspectorSliders[mixIndex].setBounds(mixArea.reduced(4, 0));
+        auto mixKnobArea = mixArea.reduced(4, 0);
+        const auto mixKnobWidth = juce::jmin(168, mixKnobArea.getWidth());
+        const auto mixKnobSize = juce::Point<int> {
+            mixKnobWidth,
+            juce::jmin(
+                196,
+                juce::jmin(mixKnobArea.getHeight(), mixKnobWidth + 28)
+            )
+        };
+        fxRotaryKnobs[mixIndex].setBounds(
+            juce::Rectangle<int>(mixKnobSize.x, mixKnobSize.y)
+                .withCentre(mixKnobArea.getCentre())
+        );
     }
 
     auto inspectorArea = inspectorPanel.reduced(16, 12);
@@ -1594,7 +1889,7 @@ void HypercolorAudioProcessorEditor::resized()
         std::size_t cellIndex = 0;
         for (std::size_t i = 0; i < parameterCount; ++i)
         {
-            if (i == mixIndex || !inspectorSliders[i].isVisible())
+            if (i == mixIndex || !fxRotaryKnobs[i].isVisible())
                 continue;
             const auto column = static_cast<int>(cellIndex % columns);
             const auto row = static_cast<int>(cellIndex / columns);
@@ -1607,9 +1902,18 @@ void HypercolorAudioProcessorEditor::resized()
                 row + 1 == static_cast<int>(rows)
                     ? inspectorArea.getBottom() - (inspectorArea.getY() + row * cellHeight)
                     : cellHeight
-            ).reduced(7, 4);
+            ).reduced(3, 4);
             inspectorLabels[i].setBounds(cell.removeFromTop(20));
-            inspectorSliders[i].setBounds(cell);
+            cell.removeFromTop(3);
+            const auto knobWidth = juce::jmin(168, cell.getWidth());
+            const auto knobSize = juce::Point<int> {
+                knobWidth,
+                juce::jmin(196, juce::jmin(cell.getHeight(), knobWidth + 28))
+            };
+            fxRotaryKnobs[i].setBounds(
+                juce::Rectangle<int>(knobSize.x, knobSize.y)
+                    .withCentre(cell.getCentre())
+            );
             ++cellIndex;
         }
     }

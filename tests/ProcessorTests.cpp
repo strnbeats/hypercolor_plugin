@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include "PluginEditor.h"
 #include "GranularVisualizer.h"
 #include "DensitySync.h"
 
@@ -2961,6 +2962,232 @@ void testEditorControlsStateAndResize(TestContext& context)
     );
 }
 
+void testFxRotaryPagesAndReactiveBackdrop(TestContext& context)
+{
+    constexpr std::array<std::array<const char*, 9>, 8> fxParameters {{
+        {{ hypercolor::ParameterIDs::reverbMix, hypercolor::ParameterIDs::reverbSize,
+           hypercolor::ParameterIDs::reverbDecay, hypercolor::ParameterIDs::reverbDamping,
+           hypercolor::ParameterIDs::reverbPreDelay, hypercolor::ParameterIDs::reverbWidth,
+           nullptr, nullptr, nullptr }},
+        {{ hypercolor::ParameterIDs::modulationMode, hypercolor::ParameterIDs::modulationRate,
+           hypercolor::ParameterIDs::modulationDepth, hypercolor::ParameterIDs::modulationBaseDelay,
+           hypercolor::ParameterIDs::modulationFeedback, hypercolor::ParameterIDs::modulationMix,
+           hypercolor::ParameterIDs::modulationWidth, nullptr, nullptr }},
+        {{ hypercolor::ParameterIDs::driveMode, hypercolor::ParameterIDs::driveAmount,
+           hypercolor::ParameterIDs::driveTone, hypercolor::ParameterIDs::driveMix,
+           hypercolor::ParameterIDs::driveOutput, nullptr, nullptr, nullptr, nullptr }},
+        {{ hypercolor::ParameterIDs::tapeDrive, hypercolor::ParameterIDs::tapeWow,
+           hypercolor::ParameterIDs::tapeFlutter, hypercolor::ParameterIDs::tapeWear,
+           hypercolor::ParameterIDs::tapeMix, hypercolor::ParameterIDs::tapeOutput,
+           nullptr, nullptr, nullptr }},
+        {{ hypercolor::ParameterIDs::bitcrushBits, hypercolor::ParameterIDs::bitcrushRate,
+           hypercolor::ParameterIDs::bitcrushMode, hypercolor::ParameterIDs::bitcrushMix,
+           hypercolor::ParameterIDs::bitcrushOutput, nullptr, nullptr, nullptr, nullptr }},
+        {{ hypercolor::ParameterIDs::filterMode, hypercolor::ParameterIDs::filterCutoff,
+           hypercolor::ParameterIDs::filterResonance, hypercolor::ParameterIDs::filterDrive,
+           hypercolor::ParameterIDs::filterMix, hypercolor::ParameterIDs::filterOutput,
+           nullptr, nullptr, nullptr }},
+        {{ hypercolor::ParameterIDs::compressorThreshold, hypercolor::ParameterIDs::compressorRatio,
+           hypercolor::ParameterIDs::compressorAttack, hypercolor::ParameterIDs::compressorRelease,
+           hypercolor::ParameterIDs::compressorKnee, hypercolor::ParameterIDs::compressorMakeup,
+           hypercolor::ParameterIDs::compressorMix, hypercolor::ParameterIDs::compressorStereoLink,
+           nullptr }},
+        {{ hypercolor::ParameterIDs::delayMode, hypercolor::ParameterIDs::delaySync,
+           hypercolor::ParameterIDs::delayTime, hypercolor::ParameterIDs::delayDivision,
+           hypercolor::ParameterIDs::delayFeedback, hypercolor::ParameterIDs::delayLowCut,
+           hypercolor::ParameterIDs::delayHighCut, hypercolor::ParameterIDs::delayMix,
+           hypercolor::ParameterIDs::delayWidth }}
+    }};
+    constexpr std::array<std::size_t, 8> parameterCounts { 6, 7, 5, 6, 5, 6, 8, 9 };
+    constexpr std::array<std::size_t, 8> visualParameterIndices { 1, 1, 1, 1, 0, 1, 0, 2 };
+    constexpr std::array<float, 8> visualParameterValues {
+        82.0f, 7.2f, 82.0f, 82.0f, 2.5f, 16000.0f, -5.0f, 800.0f
+    };
+
+    HypercolorAudioProcessor source;
+    for (std::size_t effect = 0; effect < parameterCounts.size(); ++effect)
+        setParameter(source, fxParameters[effect][visualParameterIndices[effect]],
+                     visualParameterValues[effect]);
+    juce::MemoryBlock state;
+    source.getStateInformation(state);
+
+    HypercolorAudioProcessor processor;
+    processor.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    std::unique_ptr<juce::AudioProcessorEditor> editorBase(processor.createEditor());
+    auto* editor = dynamic_cast<HypercolorAudioProcessorEditor*>(editorBase.get());
+    context.expect(editor != nullptr, "FX rotary test should create the project editor");
+    if (editor == nullptr)
+        return;
+
+    const auto captureBackdrop = [editor]
+    {
+        juce::Image image(juce::Image::ARGB, editor->getWidth(), editor->getHeight(), true);
+        juce::Graphics graphics(image);
+        editor->paint(graphics);
+        std::uint64_t hash = 1469598103934665603ull;
+        for (int y = 0; y < image.getHeight(); ++y)
+            for (int x = 0; x < image.getWidth(); ++x)
+            {
+                hash ^= image.getPixelAt(x, y).getARGB();
+                hash *= 1099511628211ull;
+            }
+        return hash;
+    };
+
+    constexpr std::array<juce::Point<int>, 5> sizes {{
+        { 760, 560 }, { 900, 620 }, { 1100, 700 }, { 1320, 840 }, { 1600, 1000 }
+    }};
+
+    for (std::size_t effect = 0; effect < parameterCounts.size(); ++effect)
+    {
+        auto* pageButton = dynamic_cast<juce::Button*>(editor->findChildWithID(
+            "module." + juce::String(static_cast<int>(effect))
+        ));
+        context.expect(pageButton != nullptr, "each FX page should have a selectable navigation button");
+        if (pageButton == nullptr)
+            continue;
+        pageButton->setToggleState(true, juce::sendNotificationSync);
+
+        std::array<hypercolor::ui::PremiumRotaryKnob*, 9> knobs {};
+        for (std::size_t index = 0; index < parameterCounts[effect]; ++index)
+        {
+            const auto* id = fxParameters[effect][index];
+            knobs[index] = dynamic_cast<hypercolor::ui::PremiumRotaryKnob*>(
+                editor->findChildWithID(id)
+            );
+            context.expect(knobs[index] != nullptr,
+                           "every FX parameter should use the existing Premium rotary control");
+            if (knobs[index] == nullptr)
+                continue;
+            context.expect(
+                knobs[index]->getSliderStyle() == juce::Slider::RotaryHorizontalVerticalDrag,
+                "FX parameter should use rotary mouse interaction"
+            );
+            context.expectNear(
+                knobs[index]->getValue(), getParameterValue(processor, id), 0.02,
+                "FX rotary attachment should restore the APVTS value"
+            );
+        }
+
+        for (std::size_t index = 0; index < parameterCounts[effect]; ++index)
+        {
+            auto& parameter = getParameter(processor, fxParameters[effect][index]);
+            setParameter(
+                processor,
+                fxParameters[effect][index],
+                parameter.convertFrom0to1(parameter.getDefaultValue())
+            );
+            context.expectNear(
+                knobs[index]->getValue(),
+                parameter.convertFrom0to1(parameter.getDefaultValue()),
+                0.02,
+                "FX rotary should return to the parameter's standard default"
+            );
+        }
+        for (int tick = 0; tick < 8; ++tick)
+        {
+            juce::Thread::sleep(35);
+            juce::Timer::callPendingTimersSynchronously();
+        }
+        const auto defaultBackdrop = captureBackdrop();
+
+        for (std::size_t index = 0; index < parameterCounts[effect]; ++index)
+        {
+            const auto* id = fxParameters[effect][index];
+            knobs[index]->setValue(knobs[index]->getMinimum(), juce::sendNotificationSync);
+            context.expectNear(
+                getParameterValue(processor, id), knobs[index]->getMinimum(), 0.02,
+                "moving an FX rotary should update its existing APVTS parameter"
+            );
+            for (int tick = 0; tick < 3; ++tick)
+            {
+                juce::Thread::sleep(35);
+                juce::Timer::callPendingTimersSynchronously();
+            }
+            const auto minimumBackdrop = captureBackdrop();
+
+            knobs[index]->setValue(knobs[index]->getMaximum(), juce::sendNotificationSync);
+            for (int tick = 0; tick < 3; ++tick)
+            {
+                juce::Thread::sleep(35);
+                juce::Timer::callPendingTimersSynchronously();
+            }
+            const auto maximumBackdrop = captureBackdrop();
+            context.expect(
+                minimumBackdrop != maximumBackdrop,
+                "each FX parameter should visibly react between its minimum and maximum"
+            );
+            context.expect(
+                defaultBackdrop != minimumBackdrop || defaultBackdrop != maximumBackdrop,
+                "standard FX parameter defaults should render between endpoint states"
+            );
+            setParameter(processor, id, static_cast<float>(knobs[index]->getMinimum()));
+            context.expectNear(
+                knobs[index]->getValue(), getParameterValue(processor, id), 0.02,
+                "APVTS automation should update the visible FX rotary"
+            );
+        }
+
+        for (const auto size : sizes)
+        {
+            editor->setSize(size.x, size.y);
+            std::array<juce::Rectangle<int>, 9> visibleBounds {};
+            std::size_t visibleCount = 0;
+            for (std::size_t index = 0; index < parameterCounts[effect]; ++index)
+            {
+                auto* knob = knobs[index];
+                if (knob == nullptr || !knob->isVisible())
+                    continue;
+                const auto bounds = knob->getBounds();
+                context.expect(!bounds.isEmpty() && editor->getLocalBounds().contains(bounds),
+                               "FX rotary should remain visible inside supported window sizes");
+                const auto paintWidth = static_cast<float>(bounds.getWidth() - 6);
+                const auto paintHeight = static_cast<float>(bounds.getHeight() - 6);
+                const auto compact = juce::jmin(paintWidth, paintHeight) < 90.0f;
+                const auto textReserve = juce::jmax(
+                    22.5f,
+                    juce::jmin(28.0f, paintHeight * 0.34f)
+                );
+                const auto topSafety = compact ? 8.0f : 10.0f;
+                const auto knobAreaHeight = paintHeight - topSafety - textReserve;
+                const auto radius = juce::jmax(
+                    10.0f,
+                    juce::jmin(paintWidth, knobAreaHeight) * 0.5f - 2.0f
+                );
+                const auto outerPaintExtent = radius + 8.675f;
+                context.expect(
+                    static_cast<float>(bounds.getWidth()) * 0.5f
+                        >= outerPaintExtent,
+                    "Premium rotary outer ticks and glow should fit inside each FX control"
+                );
+                visibleBounds[visibleCount++] = bounds;
+                auto* label = editor->findChildWithID(
+                    "inspector.label." + juce::String(static_cast<int>(index))
+                );
+                context.expect(label != nullptr && label->isVisible(),
+                               "each visible FX rotary should have its parameter label");
+                if (label != nullptr)
+                {
+                    context.expect(
+                        !label->getBounds().isEmpty()
+                            && editor->getLocalBounds().contains(label->getBounds()),
+                        "FX parameter labels should remain inside supported window sizes"
+                    );
+                    context.expect(
+                        !label->getBounds().intersects(bounds),
+                        "FX parameter labels should not overlap their rotary controls"
+                    );
+                }
+            }
+            for (std::size_t first = 0; first < visibleCount; ++first)
+                for (std::size_t second = first + 1; second < visibleCount; ++second)
+                    context.expect(!visibleBounds[first].intersects(visibleBounds[second]),
+                                   "FX rotary controls should not overlap at supported sizes");
+        }
+
+    }
+}
+
 GranularVisualizer* findGranularVisualizer(
     juce::AudioProcessorEditor& editor
 )
@@ -3592,6 +3819,7 @@ int main()
     testGranularSourceModeStateMigration(context);
     testFxEnableStateMigration(context);
     testEditorControlsStateAndResize(context);
+    testFxRotaryPagesAndReactiveBackdrop(context);
     testGranularVisualizerTelemetry(context);
     testGranularVisualizerGrainsAndLifecycle(context);
 
