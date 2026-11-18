@@ -342,7 +342,6 @@ if(BUILD_TESTING)
 
     add_executable(HYPERCOLORGrainSchedulerTests
         src/dsp/granular/CircularAudioBuffer.cpp
-        src/dsp/granular/CausalReadPlan.cpp
         src/dsp/granular/GranularCharacter.cpp
         src/dsp/granular/GranularRandom.cpp
         src/dsp/granular/Grain.cpp
