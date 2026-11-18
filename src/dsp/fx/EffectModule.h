@@ -20,8 +20,8 @@ class EffectModule
 public:
     // The owner must keep each module alive and at the same address from
     // addModule() until the chain is no longer used by the audio thread.
-    // EffectModule does not own the object and the chain composition is
-    // immutable after prepare().
+    // EffectModule does not own the object. Registration is immutable after
+    // prepare(); EffectChain may change its active order between blocks.
     virtual ~EffectModule() = default;
 
     [[nodiscard]] virtual bool prepare(

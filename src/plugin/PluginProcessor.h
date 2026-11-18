@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 
 #include "PluginParameters.h"
+#include "FxRackConfig.h"
 #include "dsp/granular/GranularEngine.h"
 #include "dsp/fx/EffectChain.h"
 #include "dsp/fx/SpaceReverb.h"
@@ -52,6 +53,11 @@ public:
 
     juce::AudioProcessorValueTreeState& getValueTreeState() noexcept;
     const juce::AudioProcessorValueTreeState& getValueTreeState() const noexcept;
+    [[nodiscard]] hypercolor::plugin::FxChainConfiguration
+        getFxChainConfiguration() const noexcept;
+    [[nodiscard]] bool setFxChainConfiguration(
+        const hypercolor::plugin::FxChainConfiguration& configuration
+    ) noexcept;
 
     // Single-consumer API for the message thread. Sequence numbers identify
     // publication attempts; gaps mean snapshots were dropped because the
@@ -80,6 +86,7 @@ private:
             granularParameters
     ) noexcept;
     void publishGranularTelemetry(int processedSamples) noexcept;
+    void applyFxChainConfiguration() noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
 
@@ -161,6 +168,16 @@ private:
     std::atomic<float>* compressorMixParameter = nullptr;
     std::atomic<float>* compressorStereoLinkParameter = nullptr;
 
+    struct FxRawParameterBank
+    {
+        std::atomic<float>* enabled = nullptr;
+        std::array<std::atomic<float>*, 9> values {};
+    };
+    std::array<std::array<FxRawParameterBank, hypercolor::plugin::maximumFxInstancesPerType>,
+                hypercolor::plugin::fxTypeCount> fxRawParameters {};
+    std::array<std::array<hypercolor::dsp::fx::EffectModule*, hypercolor::plugin::maximumFxInstancesPerType>,
+                hypercolor::plugin::fxTypeCount> fxModuleInstances {};
+
     juce::AudioBuffer<float> dryBuffer;
     hypercolor::dsp::granular::GranularEngine granularEngine;
     hypercolor::dsp::fx::SpaceReverb spaceReverb;
@@ -171,12 +188,24 @@ private:
     hypercolor::dsp::fx::BitcrushEffect bitcrushEffect;
     hypercolor::dsp::fx::FilterEffect filterEffect;
     hypercolor::dsp::fx::CompressorEffect compressorEffect;
+    std::array<hypercolor::dsp::fx::SpaceReverb, 2> extraSpaceReverbs;
+    std::array<hypercolor::dsp::fx::ModulationEffect, 2> extraModulationEffects;
+    std::array<hypercolor::dsp::fx::DriveEffect, 2> extraDriveEffects;
+    std::array<hypercolor::dsp::fx::TapeEffect, 2> extraTapeEffects;
+    std::array<hypercolor::dsp::fx::BitcrushEffect, 2> extraBitcrushEffects;
+    std::array<hypercolor::dsp::fx::FilterEffect, 2> extraFilterEffects;
+    std::array<hypercolor::dsp::fx::CompressorEffect, 2> extraCompressorEffects;
+    std::array<hypercolor::dsp::fx::DelayEffect, 2> extraDelayEffects;
     hypercolor::dsp::fx::EffectChain effectChain;
     hypercolor::dsp::granular::GranularTelemetryQueue granularTelemetryQueue;
     std::uint64_t telemetryPublishIntervalSamples = 0;
     std::uint64_t telemetrySamplesSincePublication = 0;
     std::uint64_t nextTelemetrySequence = 0;
     std::atomic<float> lastValidHostBpm { 120.0f };
+    std::atomic<std::uint32_t> fxConfigurationSequence { 0 };
+    std::atomic<std::uint8_t> fxConfigurationCount { 0 };
+    std::array<std::atomic<std::uint8_t>, hypercolor::plugin::maximumFxChainModules>
+        fxConfigurationPacked {};
     bool granularEnginePrepared = false;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         dryWetSmoother;

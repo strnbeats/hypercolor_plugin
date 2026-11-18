@@ -25,6 +25,9 @@ public:
 
     void paint(juce::Graphics& graphics) override;
     void resized() override;
+    void mouseDown(const juce::MouseEvent& event) override;
+    void mouseDrag(const juce::MouseEvent& event) override;
+    void mouseUp(const juce::MouseEvent& event) override;
 
 private:
     enum class DensityMode
@@ -34,7 +37,12 @@ private:
     };
 
     void selectGranular();
-    void selectEffect(std::size_t index);
+    void selectEffect(std::size_t rackIndex);
+    void showAddEffectMenu();
+    void addEffect(hypercolor::plugin::FxType type);
+    void removeEffect(std::size_t rackIndex);
+    void moveEffect(std::size_t from, std::size_t to);
+    void refreshFxRack();
     void rebuildInspector();
     void rebindDensityControl(DensityMode mode);
     [[nodiscard]] DensityMode readDensityMode() const noexcept;
@@ -91,8 +99,10 @@ private:
     juce::Label moduleSubtitleLabel;
 
     juce::TextButton granularNavButton;
-    std::array<juce::TextButton, 8> effectButtons;
-    std::array<juce::TextButton, 8> fxEnableButtons;
+    std::array<juce::TextButton, hypercolor::plugin::maximumFxChainModules> effectButtons;
+    std::array<juce::TextButton, hypercolor::plugin::maximumFxChainModules> fxEnableButtons;
+    std::array<juce::TextButton, hypercolor::plugin::maximumFxChainModules> fxRemoveButtons;
+    juce::TextButton addFxButton;
     std::array<juce::Slider, 9> inspectorSliders;
     std::array<hypercolor::ui::PremiumRotaryKnob, 9> fxRotaryKnobs;
     std::array<juce::Label, 9> inspectorLabels;
@@ -100,6 +110,10 @@ private:
     std::array<float, 9> effectVisualCurrent {};
     std::array<float, 9> effectVisualTarget {};
     std::size_t selectedEffect = 0;
+    std::uint8_t selectedEffectSlot = 0;
+    std::size_t selectedRackIndex = 0;
+    int draggingRackIndex = -1;
+    int dropRackIndex = -1;
     int selectedModule = -1;
 
     SliderAttachment dryWetAttachment;
@@ -109,7 +123,7 @@ private:
     SliderAttachment positionAttachment;
     SliderAttachment pitchAttachment;
     ButtonAttachment reverseAttachment;
-    std::array<std::unique_ptr<ButtonAttachment>, 8> fxEnableAttachments;
+    std::array<std::unique_ptr<ButtonAttachment>, hypercolor::plugin::maximumFxChainModules> fxEnableAttachments;
     std::unique_ptr<ComboBoxAttachment> densityModeAttachment;
     std::unique_ptr<ComboBoxAttachment> sourceModeAttachment;
 

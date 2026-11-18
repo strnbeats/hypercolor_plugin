@@ -1058,6 +1058,112 @@ void testFxEnableStateAndTransition(TestContext& context)
     );
 }
 
+void testDynamicFxRackAndInstanceState(TestContext& context)
+{
+    using namespace hypercolor::plugin;
+    HypercolorAudioProcessor source;
+    FxChainConfiguration configuration;
+    configuration.count = 4;
+    configuration.order[0] = { FxType::space, 0 };
+    configuration.order[1] = { FxType::drive, 0 };
+    configuration.order[2] = { FxType::space, 1 };
+    configuration.order[3] = { FxType::delay, 2 };
+    context.expect(source.setFxChainConfiguration(configuration), "valid dynamic chain accepted");
+
+    const auto secondSpaceSize = fxParameterID(FxType::space, 1, hypercolor::ParameterIDs::reverbSize);
+    const auto secondSpaceEnabled = fxEnabledParameterID(FxType::space, 1, hypercolor::ParameterIDs::reverbEnabled);
+    auto* sizeParameter = source.getValueTreeState().getParameter(secondSpaceSize);
+    auto* enableParameter = source.getValueTreeState().getParameter(secondSpaceEnabled);
+    context.expect(sizeParameter != nullptr && enableParameter != nullptr,
+                   "second FX instance has independent APVTS parameters");
+    if (sizeParameter != nullptr && enableParameter != nullptr)
+    {
+        sizeParameter->setValueNotifyingHost(sizeParameter->convertTo0to1(23.0f));
+        enableParameter->setValueNotifyingHost(1.0f);
+    }
+    setParameter(source, hypercolor::ParameterIDs::reverbSize, 81.0f);
+
+    juce::MemoryBlock state;
+    source.getStateInformation(state);
+    HypercolorAudioProcessor restored;
+    restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    const auto restoredChain = restored.getFxChainConfiguration();
+    context.expect(restoredChain.count == configuration.count, "chain length round-trips");
+    for (std::size_t i = 0; i < configuration.count; ++i)
+        context.expect(restoredChain.order[i] == configuration.order[i], "chain order and instance identity round-trip");
+    auto* restoredSize = restored.getValueTreeState().getParameter(secondSpaceSize);
+    auto* restoredEnabled = restored.getValueTreeState().getParameter(secondSpaceEnabled);
+    auto* originalSpaceEnabled = restored.getValueTreeState().getParameter(hypercolor::ParameterIDs::reverbEnabled);
+    context.expect(restoredSize != nullptr && restoredEnabled != nullptr,
+                   "instance parameters exist after restore");
+    context.expect(originalSpaceEnabled != nullptr, "legacy instance enable parameter remains present");
+    if (restoredSize != nullptr && restoredEnabled != nullptr)
+    {
+        context.expectNear(restoredSize->convertFrom0to1(restoredSize->getValue()), 23.0, 0.11,
+                           "additional instance value persists independently");
+        context.expectNear(restoredEnabled->convertFrom0to1(restoredEnabled->getValue()), 1.0, 0.01,
+                           "additional instance enabled state persists");
+    }
+    if (originalSpaceEnabled != nullptr && restoredEnabled != nullptr)
+        context.expect(originalSpaceEnabled->getValue() == 0.0f
+                           && restoredEnabled->getValue() >= 0.99f,
+                       "same-type FX instances retain independent ON/OFF state");
+    context.expectNear(getParameterValue(restored, hypercolor::ParameterIDs::reverbSize),
+                       81.0, 0.11, "legacy parameter slot stays independent");
+
+    std::unique_ptr<juce::AudioProcessorEditor> dynamicEditor(restored.createEditor());
+    auto* secondSpaceKnob = dynamicEditor != nullptr
+        ? dynamic_cast<juce::Slider*>(dynamicEditor->findChildWithID(secondSpaceSize))
+        : nullptr;
+    auto* secondSpaceSwitch = dynamicEditor != nullptr
+        ? dynamic_cast<juce::Button*>(dynamicEditor->findChildWithID(secondSpaceEnabled))
+        : nullptr;
+    context.expect(secondSpaceSwitch != nullptr,
+                   "duplicate FX instance exposes its own enable control");
+    if (dynamicEditor != nullptr)
+    {
+        auto* secondSpaceRow = dynamic_cast<juce::Button*>(dynamicEditor->findChildWithID("module.2"));
+        if (secondSpaceRow != nullptr)
+            secondSpaceRow->setToggleState(true, juce::sendNotificationSync);
+        context.expect(secondSpaceRow != nullptr, "duplicate FX instance has a visible rack row");
+        secondSpaceKnob = dynamic_cast<juce::Slider*>(dynamicEditor->findChildWithID(secondSpaceSize));
+        context.expect(secondSpaceKnob != nullptr, "duplicate FX page can be selected in the rack");
+        auto* removeSecondSpace = dynamic_cast<juce::Button*>(dynamicEditor->findChildWithID("fx.remove.2"));
+        context.expect(removeSecondSpace != nullptr, "rack exposes per-instance removal");
+        if (removeSecondSpace != nullptr)
+            removeSecondSpace->onClick();
+        context.expect(restored.getFxChainConfiguration().count == 3,
+                       "removing one duplicate removes only its chain entry");
+    }
+
+    auto invalid = configuration;
+    invalid.order[3] = invalid.order[2];
+    context.expect(!restored.setFxChainConfiguration(invalid), "duplicate stable instance ID is rejected");
+
+    auto legacyXml = juce::AudioProcessor::getXmlFromBinary(state.getData(), static_cast<int>(state.getSize()));
+    context.expect(legacyXml != nullptr, "saved state XML parses for migration test");
+    if (legacyXml != nullptr)
+    {
+        legacyXml->setAttribute("schemaVersion", 4);
+        for (auto* child = legacyXml->getFirstChildElement(); child != nullptr;)
+        {
+            auto* next = child->getNextElement();
+            if (child->hasTagName("FX_CHAIN"))
+                legacyXml->removeChildElement(child, true);
+            child = next;
+        }
+        juce::MemoryBlock legacyState;
+        juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacyState);
+        HypercolorAudioProcessor legacyRestored;
+        legacyRestored.setStateInformation(legacyState.getData(), static_cast<int>(legacyState.getSize()));
+        const auto migrated = legacyRestored.getFxChainConfiguration();
+        context.expect(migrated.count == 8, "legacy state restores original eight-module chain");
+        context.expect(migrated.order[0] == FxInstanceId { FxType::space, 0 }
+                           && migrated.order[7] == FxInstanceId { FxType::delay, 0 },
+                       "legacy chain order is preserved");
+    }
+}
+
 void testGranularParametersReachEngine(TestContext& context)
 {
     const auto noDensity = renderGranularParameters(
@@ -2131,7 +2237,7 @@ void testDensitySyncStateMigration(TestContext& context)
         );
         context.expect(
             migratedXml != nullptr
-                && migratedXml->getIntAttribute("schemaVersion") == 4,
+                && migratedXml->getIntAttribute("schemaVersion") == 5,
             "Migrated state should be saved with the current schema version"
         );
 
@@ -2511,13 +2617,13 @@ void testFxEnableStateMigration(TestContext& context)
         currentState.getData(),
         static_cast<int>(currentState.getSize())
     );
-    context.expect(currentXml != nullptr, "Schema 4 state fixture should be readable");
+    context.expect(currentXml != nullptr, "Schema 5 state fixture should be readable");
 
     if (currentXml != nullptr)
     {
         context.expect(
-            currentXml->getIntAttribute("schemaVersion") == 4,
-            "Newly saved states should use schema 4"
+            currentXml->getIntAttribute("schemaVersion") == 5,
+            "Newly saved states should use schema 5"
         );
 
         HypercolorAudioProcessor currentRestored;
@@ -3771,7 +3877,7 @@ void testStateRoundTrip(TestContext& context)
 
     if (futureXml != nullptr)
     {
-        futureXml->setAttribute("schemaVersion", 5);
+        futureXml->setAttribute("schemaVersion", 6);
         juce::MemoryBlock futureState;
         juce::AudioProcessor::copyXmlToBinary(*futureXml, futureState);
 
@@ -3803,6 +3909,7 @@ int main()
     testGranularDryWetMix(context);
     testFxEnableRuntimeIntegration(context);
     testFxEnableStateAndTransition(context);
+    testDynamicFxRackAndInstanceState(context);
     testGranularParametersReachEngine(context);
     testStereoGranularProcessing(context);
     testFallbackResetAndReprepare(context);

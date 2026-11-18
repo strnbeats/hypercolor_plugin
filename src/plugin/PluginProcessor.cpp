@@ -15,15 +15,39 @@ static_assert(
     std::atomic<float>::is_always_lock_free,
     "Host BPM cache must remain lock-free on the audio thread"
 );
+static_assert(std::atomic<std::uint8_t>::is_always_lock_free
+              && std::atomic<std::uint32_t>::is_always_lock_free,
+              "FX chain snapshots must remain lock-free on the audio thread");
 
 constexpr auto stateTreeType = "HYPERCOLOR_STATE";
 constexpr auto stateSchemaProperty = "schemaVersion";
-constexpr int currentStateSchemaVersion = 4;
+constexpr auto fxChainStateType = "FX_CHAIN";
+constexpr int currentStateSchemaVersion = 5;
 // Large enough to leave room for future bounded preset/state data while still
 // rejecting clearly unreasonable input before parsing it as XML.
 constexpr int maxStateSizeBytes = 64 * 1024 * 1024;
 constexpr double parameterSmoothingSeconds = 0.02;
 constexpr double telemetryUpdatesPerSecond = 30.0;
+constexpr std::array<const char*, 8> fxEnabledLegacyIDs {
+    hypercolor::ParameterIDs::reverbEnabled,
+    hypercolor::ParameterIDs::modulationEnabled,
+    hypercolor::ParameterIDs::driveEnabled,
+    hypercolor::ParameterIDs::tapeEnabled,
+    hypercolor::ParameterIDs::bitcrushEnabled,
+    hypercolor::ParameterIDs::filterEnabled,
+    hypercolor::ParameterIDs::compressorEnabled,
+    hypercolor::ParameterIDs::delayEnabled
+};
+constexpr std::array<std::array<const char*, 9>, 8> fxLegacyParameterIDs {{
+    {{ hypercolor::ParameterIDs::reverbMix, hypercolor::ParameterIDs::reverbSize, hypercolor::ParameterIDs::reverbDecay, hypercolor::ParameterIDs::reverbDamping, hypercolor::ParameterIDs::reverbPreDelay, hypercolor::ParameterIDs::reverbWidth, nullptr, nullptr, nullptr }},
+    {{ hypercolor::ParameterIDs::modulationMode, hypercolor::ParameterIDs::modulationRate, hypercolor::ParameterIDs::modulationDepth, hypercolor::ParameterIDs::modulationBaseDelay, hypercolor::ParameterIDs::modulationFeedback, hypercolor::ParameterIDs::modulationMix, hypercolor::ParameterIDs::modulationWidth, nullptr, nullptr }},
+    {{ hypercolor::ParameterIDs::driveMode, hypercolor::ParameterIDs::driveAmount, hypercolor::ParameterIDs::driveTone, hypercolor::ParameterIDs::driveMix, hypercolor::ParameterIDs::driveOutput, nullptr, nullptr, nullptr, nullptr }},
+    {{ hypercolor::ParameterIDs::tapeDrive, hypercolor::ParameterIDs::tapeWow, hypercolor::ParameterIDs::tapeFlutter, hypercolor::ParameterIDs::tapeWear, hypercolor::ParameterIDs::tapeMix, hypercolor::ParameterIDs::tapeOutput, nullptr, nullptr, nullptr }},
+    {{ hypercolor::ParameterIDs::bitcrushBits, hypercolor::ParameterIDs::bitcrushRate, hypercolor::ParameterIDs::bitcrushMode, hypercolor::ParameterIDs::bitcrushMix, hypercolor::ParameterIDs::bitcrushOutput, nullptr, nullptr, nullptr, nullptr }},
+    {{ hypercolor::ParameterIDs::filterMode, hypercolor::ParameterIDs::filterCutoff, hypercolor::ParameterIDs::filterResonance, hypercolor::ParameterIDs::filterDrive, hypercolor::ParameterIDs::filterMix, hypercolor::ParameterIDs::filterOutput, nullptr, nullptr, nullptr }},
+    {{ hypercolor::ParameterIDs::compressorThreshold, hypercolor::ParameterIDs::compressorRatio, hypercolor::ParameterIDs::compressorAttack, hypercolor::ParameterIDs::compressorRelease, hypercolor::ParameterIDs::compressorKnee, hypercolor::ParameterIDs::compressorMakeup, hypercolor::ParameterIDs::compressorMix, hypercolor::ParameterIDs::compressorStereoLink, nullptr }},
+    {{ hypercolor::ParameterIDs::delayMode, hypercolor::ParameterIDs::delaySync, hypercolor::ParameterIDs::delayTime, hypercolor::ParameterIDs::delayDivision, hypercolor::ParameterIDs::delayFeedback, hypercolor::ParameterIDs::delayLowCut, hypercolor::ParameterIDs::delayHighCut, hypercolor::ParameterIDs::delayMix, hypercolor::ParameterIDs::delayWidth }}
+}};
 
 constexpr float dryWetMinimum = 0.0f;
 constexpr float dryWetMaximum = 100.0f;
@@ -284,14 +308,65 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
           createParameterLayout()
       )
 {
-    (void) effectChain.addModule(&spaceReverb);
-    (void) effectChain.addModule(&modulationEffect);
-    (void) effectChain.addModule(&driveEffect);
-    (void) effectChain.addModule(&tapeEffect);
-    (void) effectChain.addModule(&bitcrushEffect);
-    (void) effectChain.addModule(&filterEffect);
-    (void) effectChain.addModule(&compressorEffect);
-    (void) effectChain.addModule(&delayEffect);
+    fxModuleInstances[0] = { &spaceReverb, &extraSpaceReverbs[0], &extraSpaceReverbs[1] };
+    fxModuleInstances[1] = { &modulationEffect, &extraModulationEffects[0], &extraModulationEffects[1] };
+    fxModuleInstances[2] = { &driveEffect, &extraDriveEffects[0], &extraDriveEffects[1] };
+    fxModuleInstances[3] = { &tapeEffect, &extraTapeEffects[0], &extraTapeEffects[1] };
+    fxModuleInstances[4] = { &bitcrushEffect, &extraBitcrushEffects[0], &extraBitcrushEffects[1] };
+    fxModuleInstances[5] = { &filterEffect, &extraFilterEffects[0], &extraFilterEffects[1] };
+    fxModuleInstances[6] = { &compressorEffect, &extraCompressorEffects[0], &extraCompressorEffects[1] };
+    fxModuleInstances[7] = { &delayEffect, &extraDelayEffects[0], &extraDelayEffects[1] };
+
+    for (auto& typeModules : fxModuleInstances)
+        for (auto* module : typeModules)
+            (void) effectChain.addModule(module);
+
+    // Keep the historical eight-effect signal order as the default chain.
+    constexpr std::array<std::uint8_t, 8> legacyOrder { 0, 3, 6, 9, 12, 15, 18, 21 };
+    (void) effectChain.setActiveOrder(legacyOrder);
+
+    hypercolor::plugin::FxChainConfiguration defaultFxConfiguration;
+    defaultFxConfiguration.count = 8;
+    constexpr std::array<hypercolor::plugin::FxType, 8> initialTypes {
+        hypercolor::plugin::FxType::space,
+        hypercolor::plugin::FxType::modulation,
+        hypercolor::plugin::FxType::drive,
+        hypercolor::plugin::FxType::tape,
+        hypercolor::plugin::FxType::bitcrush,
+        hypercolor::plugin::FxType::filter,
+        hypercolor::plugin::FxType::dynamics,
+        hypercolor::plugin::FxType::delay
+    };
+    for (std::size_t i = 0; i < initialTypes.size(); ++i)
+        defaultFxConfiguration.order[i] = { initialTypes[i], 0 };
+    (void) setFxChainConfiguration(defaultFxConfiguration);
+
+    for (std::size_t type = 0; type < hypercolor::plugin::fxTypeCount; ++type)
+    {
+        for (std::size_t slot = 0; slot < hypercolor::plugin::maximumFxInstancesPerType; ++slot)
+        {
+            auto& bank = fxRawParameters[type][slot];
+            bank.enabled = parameters.getRawParameterValue(
+                hypercolor::plugin::fxEnabledParameterID(
+                    static_cast<hypercolor::plugin::FxType>(type),
+                    static_cast<std::uint8_t>(slot),
+                    fxEnabledLegacyIDs[type]
+                )
+            );
+            for (std::size_t value = 0; value < fxLegacyParameterIDs[type].size(); ++value)
+            {
+                const auto* legacyID = fxLegacyParameterIDs[type][value];
+                if (legacyID != nullptr)
+                    bank.values[value] = parameters.getRawParameterValue(
+                        hypercolor::plugin::fxParameterID(
+                            static_cast<hypercolor::plugin::FxType>(type),
+                            static_cast<std::uint8_t>(slot),
+                            legacyID
+                        )
+                    );
+            }
+        }
+    }
     parameters.state.setProperty(
         stateSchemaProperty,
         currentStateSchemaVersion,
@@ -611,6 +686,130 @@ HypercolorAudioProcessor::createParameterLayout()
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorMix, 1 }, "Compressor Mix", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
     layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::ParameterIDs::compressorStereoLink, 1 }, "Compressor Stereo Link", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
 
+
+    // Fixed APVTS parameter banks for additional FX instances. Slot zero keeps
+    // every legacy parameter ID; these IDs remain stable for host automation.
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::space, 1, hypercolor::ParameterIDs::reverbEnabled), 1 }, "Reverb Enabled #2", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 1, hypercolor::ParameterIDs::reverbMix), 1 }, "Reverb Mix #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 1, hypercolor::ParameterIDs::reverbSize), 1 }, "Reverb Size #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 1, hypercolor::ParameterIDs::reverbDecay), 1 }, "Reverb Decay #2", juce::NormalisableRange<float> { 0.1f, 20.0f, 0.01f }, 4.0f, juce::AudioParameterFloatAttributes().withLabel("s")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 1, hypercolor::ParameterIDs::reverbDamping), 1 }, "Reverb Damping #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 40.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 1, hypercolor::ParameterIDs::reverbPreDelay), 1 }, "Reverb Pre-Delay #2", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 20.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 1, hypercolor::ParameterIDs::reverbWidth), 1 }, "Reverb Width #2", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::modulation, 1, hypercolor::ParameterIDs::modulationEnabled), 1 }, "Modulation Enabled #2", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 1, hypercolor::ParameterIDs::modulationMode), 1 }, "Modulation Mode #2", juce::StringArray { "Chorus", "Flanger" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 1, hypercolor::ParameterIDs::modulationRate), 1 }, "Modulation Rate #2", juce::NormalisableRange<float> { 0.01f, 10.0f, 0.01f }, 0.3f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 1, hypercolor::ParameterIDs::modulationDepth), 1 }, "Modulation Depth #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 1, hypercolor::ParameterIDs::modulationBaseDelay), 1 }, "Modulation Base Delay #2", juce::NormalisableRange<float> { 0.1f, 20.0f, 0.01f }, 7.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 1, hypercolor::ParameterIDs::modulationFeedback), 1 }, "Modulation Feedback #2", juce::NormalisableRange<float> { -95.0f, 95.0f, 0.1f }, 0.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 1, hypercolor::ParameterIDs::modulationMix), 1 }, "Modulation Mix #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 1, hypercolor::ParameterIDs::modulationWidth), 1 }, "Modulation Width #2", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::drive, 1, hypercolor::ParameterIDs::driveEnabled), 1 }, "Drive Enabled #2", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 1, hypercolor::ParameterIDs::driveMode), 1 }, "Drive Mode #2", juce::StringArray { "Soft Clip", "Hard Clip", "Tube" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 1, hypercolor::ParameterIDs::driveAmount), 1 }, "Drive #2", juce::NormalisableRange<float> { 0.0f, 36.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 1, hypercolor::ParameterIDs::driveTone), 1 }, "Drive Tone #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 1, hypercolor::ParameterIDs::driveMix), 1 }, "Drive Mix #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 1, hypercolor::ParameterIDs::driveOutput), 1 }, "Drive Output #2", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayEnabled), 1 }, "Delay Enabled #2", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayMode), 1 }, "Delay Mode #2", juce::StringArray { "Stereo", "Ping-Pong" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delaySync), 1 }, "Delay Sync #2", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayTime), 1 }, "Delay Time #2", juce::NormalisableRange<float> { 1.0f, 2000.0f, 0.1f }, 350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayDivision), 1 }, "Delay Division #2", juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16", "1/4 dotted", "1/8 dotted", "1/4 triplet", "1/8 triplet" }, 2));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayFeedback), 1 }, "Delay Feedback #2", juce::NormalisableRange<float> { 0.0f, 95.0f, 0.1f }, 35.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayLowCut), 1 }, "Delay Low Cut #2", juce::NormalisableRange<float> { 20.0f, 2000.0f, 1.0f }, 100.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayHighCut), 1 }, "Delay High Cut #2", juce::NormalisableRange<float> { 1000.0f, 20000.0f, 1.0f }, 12000.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayMix), 1 }, "Delay Mix #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 1, hypercolor::ParameterIDs::delayWidth), 1 }, "Delay Width #2", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::tape, 1, hypercolor::ParameterIDs::tapeEnabled), 1 }, "Tape Enabled #2", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 1, hypercolor::ParameterIDs::tapeDrive), 1 }, "Tape Drive #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 35.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 1, hypercolor::ParameterIDs::tapeWow), 1 }, "Tape Wow #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 15.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 1, hypercolor::ParameterIDs::tapeFlutter), 1 }, "Tape Flutter #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 10.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 1, hypercolor::ParameterIDs::tapeWear), 1 }, "Tape Wear #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 15.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 1, hypercolor::ParameterIDs::tapeMix), 1 }, "Tape Mix #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 1, hypercolor::ParameterIDs::tapeOutput), 1 }, "Tape Output #2", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::bitcrush, 1, hypercolor::ParameterIDs::bitcrushEnabled), 1 }, "Bitcrush Enabled #2", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 1, hypercolor::ParameterIDs::bitcrushBits), 1 }, "Bitcrush Bits #2", juce::NormalisableRange<float> { 4.0f, 24.0f, 1.0f }, 16.0f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 1, hypercolor::ParameterIDs::bitcrushRate), 1 }, "Bitcrush Rate #2", juce::NormalisableRange<float> { 500.0f, 44100.0f, 1.0f }, 22050.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 1, hypercolor::ParameterIDs::bitcrushMode), 1 }, "Bitcrush Mode #2", juce::StringArray { "Round", "Truncate" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 1, hypercolor::ParameterIDs::bitcrushMix), 1 }, "Bitcrush Mix #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 1, hypercolor::ParameterIDs::bitcrushOutput), 1 }, "Bitcrush Output #2", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::filter, 1, hypercolor::ParameterIDs::filterEnabled), 1 }, "Filter Enabled #2", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 1, hypercolor::ParameterIDs::filterMode), 1 }, "Filter Mode #2", juce::StringArray { "Low-Pass", "High-Pass", "Band-Pass", "Notch" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 1, hypercolor::ParameterIDs::filterCutoff), 1 }, "Filter Cutoff #2", juce::NormalisableRange<float> { 20.0f, 20000.0f, 1.0f, 0.35f }, 10000.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 1, hypercolor::ParameterIDs::filterResonance), 1 }, "Filter Resonance #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 20.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 1, hypercolor::ParameterIDs::filterDrive), 1 }, "Filter Drive #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 0.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 1, hypercolor::ParameterIDs::filterMix), 1 }, "Filter Mix #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 1, hypercolor::ParameterIDs::filterOutput), 1 }, "Filter Output #2", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorEnabled), 1 }, "Compressor Enabled #2", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorThreshold), 1 }, "Compressor Threshold #2", juce::NormalisableRange<float> { -60.0f, 0.0f, 0.1f }, -18.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorRatio), 1 }, "Compressor Ratio #2", juce::NormalisableRange<float> { 1.0f, 20.0f, 0.1f }, 4.0f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorAttack), 1 }, "Compressor Attack #2", juce::NormalisableRange<float> { 0.1f, 100.0f, 0.1f }, 10.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorRelease), 1 }, "Compressor Release #2", juce::NormalisableRange<float> { 10.0f, 1000.0f, 0.1f }, 100.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorKnee), 1 }, "Compressor Knee #2", juce::NormalisableRange<float> { 0.0f, 24.0f, 0.1f }, 6.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorMakeup), 1 }, "Compressor Makeup #2", juce::NormalisableRange<float> { 0.0f, 24.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorMix), 1 }, "Compressor Mix #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 1, hypercolor::ParameterIDs::compressorStereoLink), 1 }, "Compressor Stereo Link #2", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::space, 2, hypercolor::ParameterIDs::reverbEnabled), 1 }, "Reverb Enabled #3", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 2, hypercolor::ParameterIDs::reverbMix), 1 }, "Reverb Mix #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 2, hypercolor::ParameterIDs::reverbSize), 1 }, "Reverb Size #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 2, hypercolor::ParameterIDs::reverbDecay), 1 }, "Reverb Decay #3", juce::NormalisableRange<float> { 0.1f, 20.0f, 0.01f }, 4.0f, juce::AudioParameterFloatAttributes().withLabel("s")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 2, hypercolor::ParameterIDs::reverbDamping), 1 }, "Reverb Damping #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 40.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 2, hypercolor::ParameterIDs::reverbPreDelay), 1 }, "Reverb Pre-Delay #3", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 20.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 2, hypercolor::ParameterIDs::reverbWidth), 1 }, "Reverb Width #3", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::modulation, 2, hypercolor::ParameterIDs::modulationEnabled), 1 }, "Modulation Enabled #3", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 2, hypercolor::ParameterIDs::modulationMode), 1 }, "Modulation Mode #3", juce::StringArray { "Chorus", "Flanger" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 2, hypercolor::ParameterIDs::modulationRate), 1 }, "Modulation Rate #3", juce::NormalisableRange<float> { 0.01f, 10.0f, 0.01f }, 0.3f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 2, hypercolor::ParameterIDs::modulationDepth), 1 }, "Modulation Depth #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 2, hypercolor::ParameterIDs::modulationBaseDelay), 1 }, "Modulation Base Delay #3", juce::NormalisableRange<float> { 0.1f, 20.0f, 0.01f }, 7.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 2, hypercolor::ParameterIDs::modulationFeedback), 1 }, "Modulation Feedback #3", juce::NormalisableRange<float> { -95.0f, 95.0f, 0.1f }, 0.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 2, hypercolor::ParameterIDs::modulationMix), 1 }, "Modulation Mix #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::modulation, 2, hypercolor::ParameterIDs::modulationWidth), 1 }, "Modulation Width #3", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::drive, 2, hypercolor::ParameterIDs::driveEnabled), 1 }, "Drive Enabled #3", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 2, hypercolor::ParameterIDs::driveMode), 1 }, "Drive Mode #3", juce::StringArray { "Soft Clip", "Hard Clip", "Tube" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 2, hypercolor::ParameterIDs::driveAmount), 1 }, "Drive #3", juce::NormalisableRange<float> { 0.0f, 36.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 2, hypercolor::ParameterIDs::driveTone), 1 }, "Drive Tone #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 2, hypercolor::ParameterIDs::driveMix), 1 }, "Drive Mix #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, 2, hypercolor::ParameterIDs::driveOutput), 1 }, "Drive Output #3", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayEnabled), 1 }, "Delay Enabled #3", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayMode), 1 }, "Delay Mode #3", juce::StringArray { "Stereo", "Ping-Pong" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delaySync), 1 }, "Delay Sync #3", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayTime), 1 }, "Delay Time #3", juce::NormalisableRange<float> { 1.0f, 2000.0f, 0.1f }, 350.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayDivision), 1 }, "Delay Division #3", juce::StringArray { "1/1", "1/2", "1/4", "1/8", "1/16", "1/4 dotted", "1/8 dotted", "1/4 triplet", "1/8 triplet" }, 2));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayFeedback), 1 }, "Delay Feedback #3", juce::NormalisableRange<float> { 0.0f, 95.0f, 0.1f }, 35.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayLowCut), 1 }, "Delay Low Cut #3", juce::NormalisableRange<float> { 20.0f, 2000.0f, 1.0f }, 100.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayHighCut), 1 }, "Delay High Cut #3", juce::NormalisableRange<float> { 1000.0f, 20000.0f, 1.0f }, 12000.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayMix), 1 }, "Delay Mix #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 30.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::delay, 2, hypercolor::ParameterIDs::delayWidth), 1 }, "Delay Width #3", juce::NormalisableRange<float> { 0.0f, 200.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::tape, 2, hypercolor::ParameterIDs::tapeEnabled), 1 }, "Tape Enabled #3", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 2, hypercolor::ParameterIDs::tapeDrive), 1 }, "Tape Drive #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 35.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 2, hypercolor::ParameterIDs::tapeWow), 1 }, "Tape Wow #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 15.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 2, hypercolor::ParameterIDs::tapeFlutter), 1 }, "Tape Flutter #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 10.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 2, hypercolor::ParameterIDs::tapeWear), 1 }, "Tape Wear #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 15.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 2, hypercolor::ParameterIDs::tapeMix), 1 }, "Tape Mix #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::tape, 2, hypercolor::ParameterIDs::tapeOutput), 1 }, "Tape Output #3", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::bitcrush, 2, hypercolor::ParameterIDs::bitcrushEnabled), 1 }, "Bitcrush Enabled #3", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 2, hypercolor::ParameterIDs::bitcrushBits), 1 }, "Bitcrush Bits #3", juce::NormalisableRange<float> { 4.0f, 24.0f, 1.0f }, 16.0f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 2, hypercolor::ParameterIDs::bitcrushRate), 1 }, "Bitcrush Rate #3", juce::NormalisableRange<float> { 500.0f, 44100.0f, 1.0f }, 22050.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 2, hypercolor::ParameterIDs::bitcrushMode), 1 }, "Bitcrush Mode #3", juce::StringArray { "Round", "Truncate" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 2, hypercolor::ParameterIDs::bitcrushMix), 1 }, "Bitcrush Mix #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::bitcrush, 2, hypercolor::ParameterIDs::bitcrushOutput), 1 }, "Bitcrush Output #3", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::filter, 2, hypercolor::ParameterIDs::filterEnabled), 1 }, "Filter Enabled #3", false));
+    layout.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 2, hypercolor::ParameterIDs::filterMode), 1 }, "Filter Mode #3", juce::StringArray { "Low-Pass", "High-Pass", "Band-Pass", "Notch" }, 0));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 2, hypercolor::ParameterIDs::filterCutoff), 1 }, "Filter Cutoff #3", juce::NormalisableRange<float> { 20.0f, 20000.0f, 1.0f, 0.35f }, 10000.0f, juce::AudioParameterFloatAttributes().withLabel("Hz")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 2, hypercolor::ParameterIDs::filterResonance), 1 }, "Filter Resonance #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 20.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 2, hypercolor::ParameterIDs::filterDrive), 1 }, "Filter Drive #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 0.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 2, hypercolor::ParameterIDs::filterMix), 1 }, "Filter Mix #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::filter, 2, hypercolor::ParameterIDs::filterOutput), 1 }, "Filter Output #3", juce::NormalisableRange<float> { -24.0f, 12.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::plugin::fxEnabledParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorEnabled), 1 }, "Compressor Enabled #3", false));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorThreshold), 1 }, "Compressor Threshold #3", juce::NormalisableRange<float> { -60.0f, 0.0f, 0.1f }, -18.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorRatio), 1 }, "Compressor Ratio #3", juce::NormalisableRange<float> { 1.0f, 20.0f, 0.1f }, 4.0f));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorAttack), 1 }, "Compressor Attack #3", juce::NormalisableRange<float> { 0.1f, 100.0f, 0.1f }, 10.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorRelease), 1 }, "Compressor Release #3", juce::NormalisableRange<float> { 10.0f, 1000.0f, 0.1f }, 100.0f, juce::AudioParameterFloatAttributes().withLabel("ms")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorKnee), 1 }, "Compressor Knee #3", juce::NormalisableRange<float> { 0.0f, 24.0f, 0.1f }, 6.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorMakeup), 1 }, "Compressor Makeup #3", juce::NormalisableRange<float> { 0.0f, 24.0f, 0.1f }, 0.0f, juce::AudioParameterFloatAttributes().withLabel("dB")));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorMix), 1 }, "Compressor Mix #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID { hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::dynamics, 2, hypercolor::ParameterIDs::compressorStereoLink), 1 }, "Compressor Stereo Link #3", juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 100.0f, percentAttributes));
+
     layout.add(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID { hypercolor::ParameterIDs::outputGain, 1 },
         "Output Gain",
@@ -877,6 +1076,7 @@ void HypercolorAudioProcessor::processBlock(
 
     updateParameterTargets();
     updateEffectBypassTargets();
+    applyFxChainConfiguration();
     const auto bpmForBlock = readHostBpm();
     const auto densityBpm = static_cast<double>(lastValidHostBpm.load(
         std::memory_order_acquire
@@ -950,6 +1150,46 @@ void HypercolorAudioProcessor::processBlock(
         compressorMixParameter->load(std::memory_order_relaxed) / 100.0f,
         compressorStereoLinkParameter->load(std::memory_order_relaxed) / 100.0f
     });
+
+    for (std::size_t type = 0; type < hypercolor::plugin::fxTypeCount; ++type)
+    {
+        for (std::size_t slot = 1; slot < hypercolor::plugin::maximumFxInstancesPerType; ++slot)
+        {
+            const auto& raw = fxRawParameters[type][slot].values;
+            const auto value = [&raw](std::size_t i, float fallback = 0.0f)
+            {
+                return raw[i] != nullptr ? raw[i]->load(std::memory_order_relaxed) : fallback;
+            };
+            switch (type)
+            {
+                case 0:
+                    extraSpaceReverbs[slot - 1].setParameters({ value(0, 30.0f) / 100.0f, value(1, 50.0f) / 100.0f, value(2, 4.0f), value(3, 40.0f) / 100.0f, value(4, 20.0f), value(5, 100.0f) / 100.0f });
+                    break;
+                case 1:
+                    extraModulationEffects[slot - 1].setParameters({ value(0) >= 0.5f ? hypercolor::dsp::fx::ModulationMode::flanger : hypercolor::dsp::fx::ModulationMode::chorus, value(1, 0.3f), value(2, 50.0f) / 100.0f, value(3, 7.0f), value(4) / 100.0f, value(5, 30.0f) / 100.0f, value(6, 100.0f) / 100.0f });
+                    break;
+                case 2:
+                    extraDriveEffects[slot - 1].setParameters({ value(0) >= 1.5f ? hypercolor::dsp::fx::DriveMode::tube : (value(0) >= 0.5f ? hypercolor::dsp::fx::DriveMode::hardClip : hypercolor::dsp::fx::DriveMode::softClip), value(1), value(2, 50.0f) / 100.0f, value(3, 100.0f) / 100.0f, value(4) });
+                    break;
+                case 3:
+                    extraTapeEffects[slot - 1].setParameters({ value(0, 35.0f) / 100.0f, value(1, 15.0f) / 100.0f, value(2, 10.0f) / 100.0f, value(3, 15.0f) / 100.0f, value(4, 100.0f) / 100.0f, value(5) });
+                    break;
+                case 4:
+                    extraBitcrushEffects[slot - 1].setParameters({ value(0, 16.0f), value(1, 22050.0f), value(2) >= 0.5f ? hypercolor::dsp::fx::BitcrushMode::truncate : hypercolor::dsp::fx::BitcrushMode::round, value(3, 100.0f) / 100.0f, value(4) });
+                    break;
+                case 5:
+                    extraFilterEffects[slot - 1].setParameters({ static_cast<hypercolor::dsp::fx::FilterMode>(std::clamp(value(0), 0.0f, 3.0f)), value(1, 10000.0f), value(2, 20.0f) / 100.0f, value(3) / 100.0f, value(4, 100.0f) / 100.0f, value(5) });
+                    break;
+                case 6:
+                    extraCompressorEffects[slot - 1].setParameters({ value(0, -18.0f), value(1, 4.0f), value(2, 10.0f), value(3, 100.0f), value(4, 6.0f), value(5), value(6, 100.0f) / 100.0f, value(7, 100.0f) / 100.0f });
+                    break;
+                case 7:
+                    extraDelayEffects[slot - 1].setParameters({ value(0) >= 0.5f ? hypercolor::dsp::fx::DelayMode::pingPong : hypercolor::dsp::fx::DelayMode::stereo, value(1) >= 0.5f, value(2, 350.0f), static_cast<hypercolor::dsp::fx::DelayDivision>(std::clamp(value(3, 2.0f), 0.0f, 8.0f)), value(4, 35.0f) / 100.0f, value(5, 100.0f), value(6, 12000.0f), value(7, 30.0f) / 100.0f, value(8, 100.0f) / 100.0f, static_cast<float>(bpmForBlock) });
+                    break;
+                default: break;
+            }
+        }
+    }
 
     const auto numChannels = juce::jmin(
         totalInputChannels,
@@ -1028,30 +1268,11 @@ void HypercolorAudioProcessor::updateEffectBypassTargets() noexcept
     // APVTS raw values are atomic and are therefore safe to sample on the
     // audio thread. EffectChain owns the sample-level 15 ms ramp; these calls
     // only publish the current target for each module.
-    spaceReverb.setBypassed(
-        reverbEnabledParameter->load(std::memory_order_relaxed) < 0.5f
-    );
-    modulationEffect.setBypassed(
-        modulationEnabledParameter->load(std::memory_order_relaxed) < 0.5f
-    );
-    driveEffect.setBypassed(
-        driveEnabledParameter->load(std::memory_order_relaxed) < 0.5f
-    );
-    tapeEffect.setBypassed(
-        tapeEnabledParameter->load(std::memory_order_relaxed) < 0.5f
-    );
-    bitcrushEffect.setBypassed(
-        bitcrushEnabledParameter->load(std::memory_order_relaxed) < 0.5f
-    );
-    filterEffect.setBypassed(
-        filterEnabledParameter->load(std::memory_order_relaxed) < 0.5f
-    );
-    compressorEffect.setBypassed(
-        compressorEnabledParameter->load(std::memory_order_relaxed) < 0.5f
-    );
-    delayEffect.setBypassed(
-        delayEnabledParameter->load(std::memory_order_relaxed) < 0.5f
-    );
+    for (std::size_t type = 0; type < hypercolor::plugin::fxTypeCount; ++type)
+        for (std::size_t slot = 0; slot < hypercolor::plugin::maximumFxInstancesPerType; ++slot)
+            fxModuleInstances[type][slot]->setBypassed(
+                fxRawParameters[type][slot].enabled->load(std::memory_order_relaxed) < 0.5f
+            );
 }
 
 double HypercolorAudioProcessor::readHostBpm() noexcept
@@ -1389,6 +1610,16 @@ void HypercolorAudioProcessor::getStateInformation(
         currentStateSchemaVersion,
         nullptr
     );
+    auto fxChainState = juce::ValueTree(fxChainStateType);
+    const auto chainConfiguration = getFxChainConfiguration();
+    for (std::size_t i = 0; i < chainConfiguration.count; ++i)
+    {
+        juce::ValueTree entry("MODULE");
+        entry.setProperty("type", hypercolor::plugin::toIndex(chainConfiguration.order[i].type), nullptr);
+        entry.setProperty("slot", chainConfiguration.order[i].slot, nullptr);
+        fxChainState.addChild(entry, -1, nullptr);
+    }
+    state.addChild(fxChainState, -1, nullptr);
 
     if (const auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
@@ -1440,10 +1671,119 @@ void HypercolorAudioProcessor::setStateInformation(
         schemaVersion = static_cast<int>(numericVersion);
     }
 
+    hypercolor::plugin::FxChainConfiguration restoredFxChain;
+    constexpr std::array<hypercolor::plugin::FxType, 8> legacyFxOrder {
+        hypercolor::plugin::FxType::space,
+        hypercolor::plugin::FxType::modulation,
+        hypercolor::plugin::FxType::drive,
+        hypercolor::plugin::FxType::tape,
+        hypercolor::plugin::FxType::bitcrush,
+        hypercolor::plugin::FxType::filter,
+        hypercolor::plugin::FxType::dynamics,
+        hypercolor::plugin::FxType::delay
+    };
+    restoredFxChain.count = 8;
+    for (std::size_t i = 0; i < legacyFxOrder.size(); ++i)
+        restoredFxChain.order[i] = { legacyFxOrder[i], 0 };
+    const auto chainNode = restoredState.getChildWithName(fxChainStateType);
+    if (!chainNode.isValid() && schemaVersion >= currentStateSchemaVersion)
+        return;
+    if (chainNode.isValid())
+    {
+        if (chainNode.getNumChildren() > static_cast<int>(hypercolor::plugin::maximumFxChainModules))
+            return;
+        restoredFxChain = {};
+        restoredFxChain.count = static_cast<std::uint8_t>(chainNode.getNumChildren());
+        for (int i = 0; i < chainNode.getNumChildren(); ++i)
+        {
+            const auto entry = chainNode.getChild(i);
+            const auto type = static_cast<int>(entry.getProperty("type", -1));
+            const auto slot = static_cast<int>(entry.getProperty("slot", -1));
+            if (type < 0 || type >= static_cast<int>(hypercolor::plugin::fxTypeCount)
+                || slot < 0 || slot >= static_cast<int>(hypercolor::plugin::maximumFxInstancesPerType))
+                return;
+            restoredFxChain.order[static_cast<std::size_t>(i)] = {
+                static_cast<hypercolor::plugin::FxType>(type),
+                static_cast<std::uint8_t>(slot)
+            };
+        }
+        std::array<bool, hypercolor::plugin::fxTypeCount * hypercolor::plugin::maximumFxInstancesPerType> seen {};
+        for (std::size_t i = 0; i < restoredFxChain.count; ++i)
+        {
+            const auto id = restoredFxChain.order[i];
+            const auto flat = static_cast<std::size_t>(hypercolor::plugin::toIndex(id.type))
+                * hypercolor::plugin::maximumFxInstancesPerType + id.slot;
+            if (seen[flat])
+                return;
+            seen[flat] = true;
+        }
+    }
+
     if (!migrateLegacyDensityDivisionOrder(restoredState, schemaVersion))
         return;
 
     const auto parameterTemplateState = parameters.copyState();
+
+    // Additional-instance parameters are predeclared APVTS parameters. Old
+    // states have no values for them, so explicitly materialise each true
+    // parameter default instead of copying the processor's live value.
+    for (std::size_t type = 0; type < hypercolor::plugin::fxTypeCount; ++type)
+    {
+        for (std::size_t slot = 1; slot < hypercolor::plugin::maximumFxInstancesPerType; ++slot)
+        {
+            const auto addParameterDefault = [this, &restoredState, &parameterTemplateState](const juce::String& id)
+            {
+                if (restoredState.getChildWithProperty("id", id).isValid())
+                    return true;
+                const auto templateChild = parameterTemplateState.getChildWithProperty("id", id);
+                auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(parameters.getParameter(id));
+                if (!templateChild.isValid() || ranged == nullptr)
+                    return false;
+                auto child = templateChild.createCopy();
+                child.setProperty("value", ranged->convertFrom0to1(ranged->getDefaultValue()), nullptr);
+                restoredState.addChild(child, -1, nullptr);
+                return true;
+            };
+            const auto fxType = static_cast<hypercolor::plugin::FxType>(type);
+            if (!addParameterDefault(hypercolor::plugin::fxEnabledParameterID(
+                    fxType, static_cast<std::uint8_t>(slot), fxEnabledLegacyIDs[type])))
+                return;
+            for (const auto* legacyID : fxLegacyParameterIDs[type])
+                if (legacyID != nullptr
+                    && !addParameterDefault(hypercolor::plugin::fxParameterID(
+                        fxType, static_cast<std::uint8_t>(slot), legacyID)))
+                    return;
+
+            const auto validateParameter = [this, &restoredState](const juce::String& id)
+            {
+                const auto child = restoredState.getChildWithProperty("id", id);
+                auto* parameter = parameters.getParameter(id);
+                auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(parameter);
+                if (!child.isValid() || ranged == nullptr || !child.hasProperty("value"))
+                    return false;
+                double value = 0.0;
+                if (!readFiniteNumber(child.getProperty("value"), value))
+                    return false;
+                const auto range = ranged->getNormalisableRange();
+                if (value < range.start || value > range.end)
+                    return false;
+                if (dynamic_cast<juce::AudioParameterBool*>(parameter) != nullptr)
+                    return value == 0.0 || value == 1.0;
+                if (dynamic_cast<juce::AudioParameterChoice*>(parameter) != nullptr)
+                    return value == std::floor(value);
+                return true;
+            };
+            const auto enabledID = hypercolor::plugin::fxEnabledParameterID(
+                fxType, static_cast<std::uint8_t>(slot), fxEnabledLegacyIDs[type]);
+            if (!validateParameter(enabledID))
+                return;
+            for (const auto* legacyID : fxLegacyParameterIDs[type])
+                if (legacyID != nullptr
+                    && !validateParameter(hypercolor::plugin::fxParameterID(
+                        fxType, static_cast<std::uint8_t>(slot), legacyID)))
+                    return;
+        }
+    }
 
     // FX enable parameters were introduced in schema 3.  Legacy projects did
     // not contain these children at all, so a missing value must preserve the
@@ -1858,6 +2198,85 @@ void HypercolorAudioProcessor::setStateInformation(
         nullptr
     );
     parameters.replaceState(restoredState);
+    (void) setFxChainConfiguration(restoredFxChain);
+}
+
+hypercolor::plugin::FxChainConfiguration
+HypercolorAudioProcessor::getFxChainConfiguration() const noexcept
+{
+    hypercolor::plugin::FxChainConfiguration result;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        const auto before = fxConfigurationSequence.load(std::memory_order_acquire);
+        if ((before & 1u) != 0u)
+            continue;
+        result.count = fxConfigurationCount.load(std::memory_order_relaxed);
+        for (std::size_t i = 0; i < result.count; ++i)
+        {
+            const auto packed = fxConfigurationPacked[i].load(std::memory_order_relaxed);
+            result.order[i] = {
+                static_cast<hypercolor::plugin::FxType>((packed >> 2u) & 0x07u),
+                static_cast<std::uint8_t>(packed & 0x03u)
+            };
+        }
+        if (before == fxConfigurationSequence.load(std::memory_order_acquire))
+            return result;
+    }
+    result.count = 0;
+    return result;
+}
+
+bool HypercolorAudioProcessor::setFxChainConfiguration(
+    const hypercolor::plugin::FxChainConfiguration& configuration
+) noexcept
+{
+    if (configuration.count > hypercolor::plugin::maximumFxChainModules)
+        return false;
+    std::array<bool, hypercolor::plugin::fxTypeCount * hypercolor::plugin::maximumFxInstancesPerType> used {};
+    for (std::size_t i = 0; i < configuration.count; ++i)
+    {
+        const auto id = configuration.order[i];
+        if (hypercolor::plugin::toIndex(id.type) >= hypercolor::plugin::fxTypeCount
+            || id.slot >= hypercolor::plugin::maximumFxInstancesPerType)
+            return false;
+        const auto flat = static_cast<std::size_t>(hypercolor::plugin::toIndex(id.type))
+            * hypercolor::plugin::maximumFxInstancesPerType + id.slot;
+        if (used[flat])
+            return false;
+        used[flat] = true;
+    }
+    fxConfigurationSequence.fetch_add(1, std::memory_order_acq_rel);
+    for (std::size_t i = 0; i < configuration.count; ++i)
+    {
+        const auto id = configuration.order[i];
+        fxConfigurationPacked[i].store(
+            static_cast<std::uint8_t>((hypercolor::plugin::toIndex(id.type) << 2u) | id.slot),
+            std::memory_order_relaxed
+        );
+    }
+    fxConfigurationCount.store(configuration.count, std::memory_order_relaxed);
+    fxConfigurationSequence.fetch_add(1, std::memory_order_release);
+    return true;
+}
+
+void HypercolorAudioProcessor::applyFxChainConfiguration() noexcept
+{
+    const auto sequenceBefore = fxConfigurationSequence.load(std::memory_order_acquire);
+    if ((sequenceBefore & 1u) != 0u)
+        return;
+    const auto configuration = getFxChainConfiguration();
+    if (sequenceBefore != fxConfigurationSequence.load(std::memory_order_acquire))
+        return;
+    std::array<std::uint8_t, hypercolor::plugin::maximumFxChainModules> indices {};
+    for (std::size_t i = 0; i < configuration.count; ++i)
+        indices[i] = static_cast<std::uint8_t>(
+            hypercolor::plugin::toIndex(configuration.order[i].type)
+                * hypercolor::plugin::maximumFxInstancesPerType
+            + configuration.order[i].slot
+        );
+    (void) effectChain.setActiveOrder(
+        std::span<const std::uint8_t>(indices.data(), configuration.count)
+    );
 }
 
 juce::AudioProcessorValueTreeState&

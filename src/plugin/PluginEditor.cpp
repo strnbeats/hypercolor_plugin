@@ -907,15 +907,10 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     for (std::size_t index = 0; index < effectButtons.size(); ++index)
     {
         auto& button = effectButtons[index];
-        button.setButtonText(index == 1 ? "MOD" : effectNames[index]);
-        button.setTooltip(effectNames[index]);
         button.setClickingTogglesState(true);
         button.setRadioGroupId(1701);
         button.setColour(juce::TextButton::buttonColourId, panelRaised);
-        button.setColour(
-            juce::TextButton::buttonOnColourId,
-            effectAccent(index)
-        );
+        button.setColour(juce::TextButton::buttonOnColourId, hypercolor::ui::palette::lime());
         button.setColour(juce::TextButton::textColourOffId, text);
         button.setColour(juce::TextButton::textColourOnId, hypercolor::ui::palette::background());
         button.onStateChange = [this, index]
@@ -924,20 +919,16 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
                 selectEffect(index);
         };
         button.setComponentID("module." + juce::String(static_cast<int>(index)));
+        button.addMouseListener(this, false);
         addAndMakeVisible(button);
 
         auto& enableButton = fxEnableButtons[index];
-        const auto accent = effectAccent(index);
         enableButton.setClickingTogglesState(true);
-        enableButton.setComponentID(effectEnableParameterIDs[index]);
         enableButton.setColour(
             juce::TextButton::buttonColourId,
             hypercolor::ui::palette::panelRaised()
         );
-        enableButton.setColour(
-            juce::TextButton::buttonOnColourId,
-            accent
-        );
+        enableButton.setColour(juce::TextButton::buttonOnColourId, hypercolor::ui::palette::lime());
         enableButton.setColour(
             juce::TextButton::textColourOffId,
             hypercolor::ui::palette::mutedText()
@@ -945,9 +936,6 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
         enableButton.setColour(
             juce::TextButton::textColourOnId,
             hypercolor::ui::palette::background()
-        );
-        enableButton.setTooltip(
-            juce::String(effectNames[index]) + " effect ON / OFF"
         );
         enableButton.onStateChange = [enableButtonPtr = &enableButton]
         {
@@ -957,20 +945,30 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
         };
         enableButton.onStateChange();
         addAndMakeVisible(enableButton);
+
+        auto& removeButton = fxRemoveButtons[index];
+        removeButton.setButtonText("×");
+        removeButton.setComponentID("fx.remove." + juce::String(static_cast<int>(index)));
+        removeButton.setTooltip("Remove this FX instance");
+        removeButton.setColour(juce::TextButton::buttonColourId, panelRaised);
+        removeButton.setColour(juce::TextButton::buttonOnColourId, hypercolor::ui::palette::drive());
+        removeButton.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::mutedText());
+        removeButton.onClick = [this, index] { removeEffect(index); };
+        addAndMakeVisible(removeButton);
     }
+    addFxButton.setButtonText("+ ADD EFFECT");
+    addFxButton.setComponentID("fx.add");
+    addFxButton.setColour(juce::TextButton::buttonColourId, panelRaised);
+    addFxButton.setColour(juce::TextButton::buttonOnColourId, hypercolor::ui::palette::lime());
+    addFxButton.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::lime());
+    addFxButton.onClick = [this] { showAddEffectMenu(); };
+    addAndMakeVisible(addFxButton);
     granularNavButton.setToggleState(true, juce::dontSendNotification);
     moduleTitleLabel.setText("GRANULAR CORE", juce::dontSendNotification);
     moduleSubtitleLabel.setText("XY CHARACTER FIELD  //  REAL-TIME HISTORY  //  64 VOICES", juce::dontSendNotification);
 
     auto& state = audioProcessor.getValueTreeState();
-    for (std::size_t index = 0; index < fxEnableButtons.size(); ++index)
-    {
-        fxEnableAttachments[index] = std::make_unique<ButtonAttachment>(
-            state,
-            effectEnableParameterIDs[index],
-            fxEnableButtons[index]
-        );
-    }
+    refreshFxRack();
     densityModeAttachment = std::make_unique<ComboBoxAttachment>(
         state,
         hypercolor::ParameterIDs::grainDensityMode,
@@ -1342,6 +1340,70 @@ void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
             effectVisualCurrent
         );
     }
+    if (dropRackIndex >= 0)
+    {
+        const auto configuration = audioProcessor.getFxChainConfiguration();
+        if (configuration.count > 0)
+        {
+            const auto index = std::min(static_cast<std::size_t>(dropRackIndex),
+                                        static_cast<std::size_t>(configuration.count - 1));
+            const auto bounds = effectButtons[index].getBounds();
+            const auto y = dropRackIndex >= static_cast<int>(configuration.count)
+                ? bounds.getBottom() : bounds.getY();
+            graphics.setColour(hypercolor::ui::palette::lime().withAlpha(0.9f));
+            graphics.fillRect(rackPanel.getX() + 8, y - 1, rackPanel.getWidth() - 16, 2);
+        }
+    }
+}
+
+void HypercolorAudioProcessorEditor::mouseDown(const juce::MouseEvent& event)
+{
+    for (std::size_t i = 0; i < effectButtons.size(); ++i)
+        if (event.originalComponent == &effectButtons[i])
+        {
+            draggingRackIndex = static_cast<int>(i);
+            dropRackIndex = static_cast<int>(i);
+            return;
+        }
+}
+
+void HypercolorAudioProcessorEditor::mouseDrag(const juce::MouseEvent& event)
+{
+    if (draggingRackIndex < 0)
+        return;
+    const auto point = event.getEventRelativeTo(this).getPosition();
+    const auto configuration = audioProcessor.getFxChainConfiguration();
+    for (std::size_t i = 0; i < configuration.count; ++i)
+    {
+        if (point.y < effectButtons[i].getBounds().getCentreY())
+        {
+            dropRackIndex = static_cast<int>(i);
+            effectButtons[static_cast<std::size_t>(draggingRackIndex)].setAlpha(0.55f);
+            repaint(rackPanel);
+            return;
+        }
+    }
+    dropRackIndex = static_cast<int>(configuration.count);
+    effectButtons[static_cast<std::size_t>(draggingRackIndex)].setAlpha(0.55f);
+    repaint(rackPanel);
+}
+
+void HypercolorAudioProcessorEditor::mouseUp(const juce::MouseEvent&)
+{
+    if (draggingRackIndex >= 0)
+    {
+        auto& dragged = effectButtons[static_cast<std::size_t>(draggingRackIndex)];
+        dragged.setAlpha(1.0f);
+        auto target = dropRackIndex;
+        const auto configuration = audioProcessor.getFxChainConfiguration();
+        if (target >= static_cast<int>(configuration.count))
+            target = static_cast<int>(configuration.count) - 1;
+        if (target >= 0)
+            moveEffect(static_cast<std::size_t>(draggingRackIndex), static_cast<std::size_t>(target));
+    }
+    draggingRackIndex = -1;
+    dropRackIndex = -1;
+    repaint(rackPanel);
 }
 
 void HypercolorAudioProcessorEditor::selectGranular()
@@ -1357,15 +1419,154 @@ void HypercolorAudioProcessorEditor::selectGranular()
 
 void HypercolorAudioProcessorEditor::selectEffect(std::size_t index)
 {
-    if (index >= effectButtons.size())
+    const auto configuration = audioProcessor.getFxChainConfiguration();
+    if (index >= configuration.count || index >= effectButtons.size())
         return;
 
+    selectedRackIndex = index;
     selectedModule = static_cast<int>(index);
-    selectedEffect = index;
+    selectedEffect = hypercolor::plugin::toIndex(configuration.order[index].type);
+    selectedEffectSlot = configuration.order[index].slot;
     granularNavButton.setToggleState(false, juce::dontSendNotification);
     for (std::size_t i = 0; i < effectButtons.size(); ++i)
-        effectButtons[i].setToggleState(i == selectedEffect, juce::dontSendNotification);
+        effectButtons[i].setToggleState(i == selectedRackIndex, juce::dontSendNotification);
     rebuildInspector();
+}
+
+void HypercolorAudioProcessorEditor::refreshFxRack()
+{
+    for (auto& attachment : fxEnableAttachments)
+        attachment.reset();
+    const auto configuration = audioProcessor.getFxChainConfiguration();
+    auto& state = audioProcessor.getValueTreeState();
+    for (std::size_t i = 0; i < effectButtons.size(); ++i)
+    {
+        const auto active = i < configuration.count;
+        effectButtons[i].setVisible(active);
+        fxEnableButtons[i].setVisible(active);
+        fxRemoveButtons[i].setVisible(active);
+        if (!active)
+            continue;
+        const auto id = configuration.order[i];
+        const auto type = hypercolor::plugin::toIndex(id.type);
+        const auto label = juce::String(effectNames[type])
+            + (id.slot == 0 ? juce::String() : " #" + juce::String(static_cast<int>(id.slot + 1)));
+        effectButtons[i].setButtonText(label);
+        effectButtons[i].setTooltip(label + " — drag to reorder");
+        effectButtons[i].setColour(juce::TextButton::buttonOnColourId, effectAccent(type));
+        effectButtons[i].setToggleState(
+            selectedModule >= 0 && selectedRackIndex == i,
+            juce::dontSendNotification
+        );
+        const auto enabledID = hypercolor::plugin::fxEnabledParameterID(
+            id.type, id.slot, effectEnableParameterIDs[type]
+        );
+        fxEnableButtons[i].setComponentID(enabledID);
+        fxRemoveButtons[i].setComponentID("fx.remove." + juce::String(static_cast<int>(i)));
+        fxEnableButtons[i].setColour(juce::TextButton::buttonOnColourId, effectAccent(type));
+        fxEnableButtons[i].setTooltip(label + " ON / OFF");
+        fxEnableAttachments[i] = std::make_unique<ButtonAttachment>(
+            state, enabledID, fxEnableButtons[i]
+        );
+    }
+    addFxButton.setEnabled(configuration.count < hypercolor::plugin::maximumFxChainModules);
+    addFxButton.setButtonText(configuration.count >= hypercolor::plugin::maximumFxChainModules
+        ? "FX RACK FULL" : "+ ADD EFFECT");
+    resized();
+    repaint(rackPanel);
+}
+
+void HypercolorAudioProcessorEditor::showAddEffectMenu()
+{
+    juce::PopupMenu menu;
+    const auto configuration = audioProcessor.getFxChainConfiguration();
+    for (std::size_t i = 0; i < effectNames.size(); ++i)
+    {
+        std::size_t instances = 0;
+        for (std::size_t j = 0; j < configuration.count; ++j)
+            instances += hypercolor::plugin::toIndex(configuration.order[j].type) == i ? 1u : 0u;
+        menu.addItem(static_cast<int>(i + 1), effectNames[i],
+                     instances < hypercolor::plugin::maximumFxInstancesPerType);
+    }
+    juce::Component::SafePointer<HypercolorAudioProcessorEditor> safe(this);
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&addFxButton),
+        [safe](int result)
+        {
+            if (safe != nullptr && result >= 1 && result <= 8)
+                safe->addEffect(static_cast<hypercolor::plugin::FxType>(result - 1));
+        });
+}
+
+void HypercolorAudioProcessorEditor::addEffect(hypercolor::plugin::FxType type)
+{
+    auto configuration = audioProcessor.getFxChainConfiguration();
+    if (configuration.count >= hypercolor::plugin::maximumFxChainModules)
+        return;
+    std::array<bool, hypercolor::plugin::maximumFxInstancesPerType> used {};
+    for (std::size_t i = 0; i < configuration.count; ++i)
+        if (configuration.order[i].type == type)
+            used[configuration.order[i].slot] = true;
+    const auto free = std::find(used.begin(), used.end(), false);
+    if (free == used.end())
+        return;
+    const auto slot = static_cast<std::uint8_t>(std::distance(used.begin(), free));
+    configuration.order[configuration.count++] = { type, slot };
+    if (!audioProcessor.setFxChainConfiguration(configuration))
+        return;
+    selectedModule = static_cast<int>(configuration.count - 1);
+    selectedRackIndex = configuration.count - 1;
+    selectedEffect = hypercolor::plugin::toIndex(type);
+    selectedEffectSlot = slot;
+    refreshFxRack();
+    rebuildInspector();
+}
+
+void HypercolorAudioProcessorEditor::removeEffect(std::size_t rackIndex)
+{
+    auto configuration = audioProcessor.getFxChainConfiguration();
+    if (rackIndex >= configuration.count)
+        return;
+    for (std::size_t i = rackIndex + 1; i < configuration.count; ++i)
+        configuration.order[i - 1] = configuration.order[i];
+    --configuration.count;
+    if (!audioProcessor.setFxChainConfiguration(configuration))
+        return;
+    if (configuration.count == 0)
+    {
+        selectGranular();
+        refreshFxRack();
+        return;
+    }
+    selectedRackIndex = std::min(rackIndex, static_cast<std::size_t>(configuration.count - 1));
+    selectedModule = static_cast<int>(selectedRackIndex);
+    selectedEffect = hypercolor::plugin::toIndex(configuration.order[selectedRackIndex].type);
+    selectedEffectSlot = configuration.order[selectedRackIndex].slot;
+    refreshFxRack();
+    rebuildInspector();
+}
+
+void HypercolorAudioProcessorEditor::moveEffect(std::size_t from, std::size_t to)
+{
+    auto configuration = audioProcessor.getFxChainConfiguration();
+    if (from >= configuration.count || to >= configuration.count || from == to)
+        return;
+    const auto moved = configuration.order[from];
+    if (from < to)
+        for (std::size_t i = from; i < to; ++i)
+            configuration.order[i] = configuration.order[i + 1];
+    else
+        for (std::size_t i = from; i > to; --i)
+            configuration.order[i] = configuration.order[i - 1];
+    configuration.order[to] = moved;
+    if (audioProcessor.setFxChainConfiguration(configuration))
+    {
+        selectedRackIndex = to;
+        selectedEffect = hypercolor::plugin::toIndex(moved.type);
+        selectedEffectSlot = moved.slot;
+        selectedModule = static_cast<int>(to);
+        refreshFxRack();
+        rebuildInspector();
+    }
 }
 
 void HypercolorAudioProcessorEditor::rebuildInspector()
@@ -1401,9 +1602,6 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
         nullptr,
         nullptr
     };
-    const auto* parameterList = selectedModule < 0
-        ? granularParameters.data()
-        : effectParameters[selectedEffect].data();
     const auto parameterCount = selectedModule < 0
         ? std::size_t { 7 }
         : effectParameterCounts[selectedEffect];
@@ -1411,11 +1609,13 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
     inspectorSectionLabel.setText(
         selectedModule < 0
             ? "GRANULAR DETAIL  /  VARIATION"
-            : juce::String("MODULE CONTROL  /  ") + effectNames[selectedEffect],
+            : juce::String("MODULE CONTROL  /  ") + effectNames[selectedEffect]
+                + (selectedEffectSlot == 0 ? juce::String() : "  #" + juce::String(static_cast<int>(selectedEffectSlot + 1))),
         juce::dontSendNotification
     );
     moduleTitleLabel.setText(
-        selectedModule < 0 ? "GRANULAR CORE" : effectNames[selectedEffect],
+        selectedModule < 0 ? "GRANULAR CORE" : juce::String(effectNames[selectedEffect])
+            + (selectedEffectSlot == 0 ? juce::String() : "  #" + juce::String(static_cast<int>(selectedEffectSlot + 1))),
         juce::dontSendNotification
     );
     moduleSubtitleLabel.setText(
@@ -1441,7 +1641,15 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
 
     for (std::size_t i = 0; i < parameterCount; ++i)
     {
-        const auto* parameterID = parameterList[i];
+        const auto parameterID = selectedModule < 0
+            ? juce::String(granularParameters[i] == nullptr ? "" : granularParameters[i])
+            : hypercolor::plugin::fxParameterID(
+                static_cast<hypercolor::plugin::FxType>(selectedEffect),
+                selectedEffectSlot,
+                effectParameters[selectedEffect][i]
+            );
+        if (parameterID.isEmpty())
+            continue;
         auto* parameter = audioProcessor.getValueTreeState().getParameter(parameterID);
         if (parameter == nullptr)
             continue;
@@ -1507,13 +1715,13 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
             displayName = "MIX";
         if (selectedModule == 2)
         {
-            if (std::strcmp(parameterID, hypercolor::ParameterIDs::driveMode) == 0)
+            if (parameterID == hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, selectedEffectSlot, hypercolor::ParameterIDs::driveMode))
                 displayName = "MODE";
-            else if (std::strcmp(parameterID, hypercolor::ParameterIDs::driveAmount) == 0)
+            else if (parameterID == hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, selectedEffectSlot, hypercolor::ParameterIDs::driveAmount))
                 displayName = "DRIVE";
-            else if (std::strcmp(parameterID, hypercolor::ParameterIDs::driveTone) == 0)
+            else if (parameterID == hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, selectedEffectSlot, hypercolor::ParameterIDs::driveTone))
                 displayName = "TONE";
-            else if (std::strcmp(parameterID, hypercolor::ParameterIDs::driveOutput) == 0)
+            else if (parameterID == hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::drive, selectedEffectSlot, hypercolor::ParameterIDs::driveOutput))
                 displayName = "OUTPUT";
         }
         label.setComponentID("inspector.label." + juce::String(static_cast<int>(i)));
@@ -1552,7 +1760,11 @@ void HypercolorAudioProcessorEditor::updateEffectVisualTargets(
         }
 
         const auto* parameter = audioProcessor.getValueTreeState().getParameter(
-            effectParameters[selectedEffect][index]
+            hypercolor::plugin::fxParameterID(
+                static_cast<hypercolor::plugin::FxType>(selectedEffect),
+                selectedEffectSlot,
+                effectParameters[selectedEffect][index]
+            )
         );
         if (parameter == nullptr)
         {
@@ -1672,16 +1884,26 @@ void HypercolorAudioProcessorEditor::resized()
     navigationArea.removeFromTop(28);
     granularNavButton.setBounds(navigationArea.removeFromTop(34));
     navigationArea.removeFromTop(6);
-    for (std::size_t index = 0; index < effectButtons.size(); ++index)
+    const auto rackConfiguration = audioProcessor.getFxChainConfiguration();
+    const auto addRowHeight = 29;
+    const auto fxRackRowHeight = rackConfiguration.count == 0 ? 28
+        : juce::jlimit(21, 30, (navigationArea.getHeight() - addRowHeight)
+            / static_cast<int>(rackConfiguration.count));
+    for (std::size_t index = 0; index < rackConfiguration.count; ++index)
     {
         auto& button = effectButtons[index];
-        auto row = navigationArea.removeFromTop(30);
-        auto enableBounds = row.removeFromRight(36);
-        row.removeFromRight(4);
+        auto row = navigationArea.removeFromTop(fxRackRowHeight);
+        auto removeBounds = row.removeFromRight(22);
+        row.removeFromRight(2);
+        auto enableBounds = row.removeFromRight(32);
+        row.removeFromRight(3);
         button.setBounds(row);
         fxEnableButtons[index].setBounds(enableBounds);
-        navigationArea.removeFromTop(4);
+        fxRemoveButtons[index].setBounds(removeBounds);
+        if (index + 1 < rackConfiguration.count)
+            navigationArea.removeFromTop(2);
     }
+    addFxButton.setBounds(navigationArea.removeFromTop(addRowHeight));
 
     moduleTitleLabel.setBounds(workspace.removeFromTop(24));
     moduleSubtitleLabel.setBounds(workspace.removeFromTop(16));

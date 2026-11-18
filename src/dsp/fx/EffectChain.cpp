@@ -39,6 +39,18 @@ bool EffectChain::prepare(const core::ProcessSpec& spec) noexcept
         }
     }
 
+    if (!activeOrderWasSet)
+    {
+        activeCount = std::min(moduleCount, maximumActiveModules);
+        for (std::size_t index = 0; index < activeCount; ++index)
+            activeOrder[index] = static_cast<std::uint8_t>(index);
+    }
+    requestedCount = activeCount;
+    requestedOrder = activeOrder;
+    chainGain = chainGainTarget = 1.0f;
+    chainRampRemaining = 0;
+    swapOrderWhenSilent = false;
+
     preparedBlockSize = spec.maximumBlockSize;
     bypassTransitionSamples = std::max<std::size_t>(
         1,
@@ -54,6 +66,9 @@ bool EffectChain::prepare(const core::ProcessSpec& spec) noexcept
         targetEnabledGains[index] = target;
         remainingRampSamples[index] = 0;
     }
+    chainGain = chainGainTarget = 1.0f;
+    chainRampRemaining = 0;
+    swapOrderWhenSilent = false;
 
     prepared = true;
     return true;
@@ -73,6 +88,9 @@ void EffectChain::reset() noexcept
         targetEnabledGains[index] = target;
         remainingRampSamples[index] = 0;
     }
+    chainGain = chainGainTarget = 1.0f;
+    chainRampRemaining = 0;
+    swapOrderWhenSilent = false;
 }
 
 bool EffectChain::addModule(EffectModule* module) noexcept
@@ -81,6 +99,65 @@ bool EffectChain::addModule(EffectModule* module) noexcept
         return false;
 
     modules[moduleCount++] = module;
+    return true;
+}
+
+bool EffectChain::setActiveOrder(
+    std::span<const std::uint8_t> moduleIndices
+) noexcept
+{
+    if (moduleIndices.size() > maximumActiveModules)
+        return false;
+
+    for (std::size_t i = 0; i < moduleIndices.size(); ++i)
+    {
+        if (moduleIndices[i] >= moduleCount)
+            return false;
+        for (std::size_t j = 0; j < i; ++j)
+            if (moduleIndices[i] == moduleIndices[j])
+                return false;
+    }
+
+    if (!prepared)
+    {
+        activeCount = moduleIndices.size();
+        requestedCount = activeCount;
+        std::copy(moduleIndices.begin(), moduleIndices.end(), activeOrder.begin());
+        std::copy(moduleIndices.begin(), moduleIndices.end(), requestedOrder.begin());
+        activeOrderWasSet = true;
+        return true;
+    }
+
+    bool same = moduleIndices.size() == activeCount;
+    for (std::size_t i = 0; same && i < activeCount; ++i)
+        same = activeOrder[i] == moduleIndices[i];
+    if (same && swapOrderWhenSilent)
+    {
+        swapOrderWhenSilent = false;
+        chainGainTarget = 1.0f;
+        chainRampRemaining = bypassTransitionSamples;
+        return true;
+    }
+    if (same)
+        return true;
+
+    if (swapOrderWhenSilent)
+    {
+        bool samePending = moduleIndices.size() == requestedCount;
+        for (std::size_t i = 0; samePending && i < requestedCount; ++i)
+            samePending = requestedOrder[i] == moduleIndices[i];
+        if (samePending)
+            return true;
+    }
+
+    requestedCount = moduleIndices.size();
+    std::copy(moduleIndices.begin(), moduleIndices.end(), requestedOrder.begin());
+    if (!swapOrderWhenSilent)
+    {
+        chainGainTarget = 0.0f;
+        chainRampRemaining = bypassTransitionSamples;
+    }
+    swapOrderWhenSilent = true;
     return true;
 }
 
@@ -116,8 +193,18 @@ EffectChainResult EffectChain::process(EffectAudioBlock& block) const noexcept
         }
     }
 
-    for (std::size_t index = 0; index < moduleCount; ++index)
+    if (swapOrderWhenSilent && chainGain <= 0.0f)
     {
+        activeCount = requestedCount;
+        std::copy_n(requestedOrder.begin(), activeCount, activeOrder.begin());
+        swapOrderWhenSilent = false;
+        chainGainTarget = 1.0f;
+        chainRampRemaining = bypassTransitionSamples;
+    }
+
+    for (std::size_t orderPosition = 0; orderPosition < activeCount; ++orderPosition)
+    {
+        const auto index = static_cast<std::size_t>(activeOrder[orderPosition]);
         auto* module = modules[index];
 
         if (module == nullptr)
@@ -159,6 +246,20 @@ EffectChainResult EffectChain::process(EffectAudioBlock& block) const noexcept
                 block.channels[channel][sample] = dry + gain * (wet - dry);
             }
         }
+    }
+
+    for (std::size_t sample = 0; sample < blockSize; ++sample)
+    {
+        if (chainRampRemaining > 0)
+        {
+            chainGain += (chainGainTarget - chainGain)
+                / static_cast<float>(chainRampRemaining);
+            --chainRampRemaining;
+            if (chainRampRemaining == 0)
+                chainGain = chainGainTarget;
+        }
+        for (std::uint32_t channel = 0; channel < block.numChannels; ++channel)
+            block.channels[channel][sample] *= chainGain;
     }
 
     return EffectChainResult::success;

@@ -102,6 +102,24 @@ private:
     float gain;
 };
 
+class AffineModule final : public EffectModule
+{
+public:
+    AffineModule(float multiplierToUse, float offsetToUse) noexcept
+        : multiplier(multiplierToUse), offset(offsetToUse) {}
+    bool prepare(const ProcessSpec&) noexcept override { return true; }
+    void reset() noexcept override {}
+    void process(EffectAudioBlock& block) noexcept override
+    {
+        for (std::uint32_t channel = 0; channel < block.numChannels; ++channel)
+            for (auto& sample : block.channels[channel])
+                sample = sample * multiplier + offset;
+    }
+private:
+    float multiplier;
+    float offset;
+};
+
 class FailingModule final : public EffectModule
 {
 public:
@@ -354,8 +372,12 @@ void testCapacityAndOversized(TestContext& context)
 {
     EffectChain chain;
     std::array<GainModule, EffectChain::maximumModules> modules {
-        GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f },
-        GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }
+            GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f },
+            GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f },
+            GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f },
+            GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f },
+            GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f },
+            GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }, GainModule { 1.0f }
     };
     for (auto& module : modules)
         context.expect(chain.addModule(&module), "capacity module add");
@@ -366,6 +388,42 @@ void testCapacityAndOversized(TestContext& context)
     std::array right = left;
     auto block = makeBlock(left, right, 2);
     context.expect(chain.process(block) == EffectChainResult::success, "oversized-compatible process");
+}
+
+void testDynamicOrderAndSmoothConfigurationChange(TestContext& context)
+{
+    EffectChain chain;
+    AffineModule first { 2.0f, 1.0f };
+    AffineModule second { 3.0f, 4.0f };
+    context.expect(chain.addModule(&first) && chain.addModule(&second), "dynamic order modules register");
+    const std::array<std::uint8_t, 2> initialOrder { 0, 1 };
+    context.expect(chain.setActiveOrder(initialOrder), "initial order can be set before prepare");
+    context.expect(chain.prepare({ 1000.0, 32, 1 }), "dynamic order chain prepares");
+
+    std::array<float, 8> left {};
+    std::array<float, 8> right {};
+    left.fill(1.0f);
+    right.fill(1.0f);
+    auto block = makeBlock(left, right, 1);
+    context.expect(chain.process(block) == EffectChainResult::success, "initial dynamic order processes");
+    context.expect(std::abs(left.back() - 13.0f) < 1.0e-4f, "initial order executes registered sequence");
+
+    const std::array<std::uint8_t, 2> reversedOrder { 1, 0 };
+    context.expect(chain.setActiveOrder(reversedOrder), "reorder request accepted");
+    left.fill(1.0f);
+    block = makeBlock(left, right, 1);
+    context.expect(chain.process(block) == EffectChainResult::success, "old chain continues fading during reconfiguration");
+    left.fill(1.0f);
+    block = makeBlock(left, right, 1);
+    context.expect(chain.process(block) == EffectChainResult::success, "old chain reaches the silent swap boundary");
+    context.expect(std::abs(left.back()) < 1.0e-4f, "chain reaches silence before order swap");
+    left.fill(1.0f);
+    block = makeBlock(left, right, 1);
+    context.expect(chain.process(block) == EffectChainResult::success, "new order fades back in");
+    left.fill(1.0f);
+    block = makeBlock(left, right, 1);
+    context.expect(chain.process(block) == EffectChainResult::success, "new order completes its fade in");
+    context.expect(std::abs(left.back() - 15.0f) < 1.0e-3f, "new order becomes active after safe handoff");
 }
 }
 
@@ -378,6 +436,7 @@ int main()
     testDifferentBlockSizes(context);
     testProcessPathDoesNotAllocate(context);
     testCapacityAndOversized(context);
+    testDynamicOrderAndSmoothConfigurationChange(context);
     if (context.getFailures() == 0)
     {
         std::cout << "All EffectChain tests passed.\n";
