@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "PresetManager.h"
 
 #include <array>
 #include <cmath>
@@ -361,8 +362,23 @@ private:
 class LfoWavePreview final : public juce::Component
 {
 public:
-    void setWaveform(hypercolor::dsp::modulation::LfoWaveform value)
-    { waveform = value; repaint(); }
+    using Waveform = hypercolor::dsp::modulation::Lfo::CustomWaveform;
+    void setState(hypercolor::dsp::modulation::LfoWaveform value,
+                  const Waveform& custom, float depthValue, float offsetValue,
+                  float phaseValue, bool enabledValue, bool usedValue)
+    {
+        waveform = value; customWaveform = custom;
+        depth = juce::jlimit(0.0f, 1.0f, depthValue);
+        offset = juce::jlimit(-1.0f, 1.0f, offsetValue);
+        phase = phaseValue - std::floor(phaseValue);
+        enabled = enabledValue; used = usedValue;
+        rebuildPath(); repaint();
+    }
+    void setPhase(float value)
+    {
+        if (std::isfinite(value))
+        { phase = value - std::floor(value); repaint(); }
+    }
     void paint(juce::Graphics& g) override
     {
         auto r = getLocalBounds().toFloat().reduced(2.0f);
@@ -370,42 +386,241 @@ public:
         g.fillRoundedRectangle(r, 4.0f);
         g.setColour(hypercolor::ui::palette::border());
         g.drawRoundedRectangle(r, 4.0f, 1.0f);
-        juce::Path path;
-        if (waveform == hypercolor::dsp::modulation::LfoWaveform::sampleAndHold)
+        const auto usableHeight = r.getHeight() * 0.36f;
+        const auto centreY = r.getCentreY() - offset * usableHeight;
+        const auto depthHeight = depth * usableHeight;
+        const auto waveformTransform = juce::AffineTransform()
+            .scaled(r.getWidth(), -usableHeight).translated(r.getX(), r.getCentreY());
+        g.setColour(hypercolor::ui::palette::space().withAlpha(enabled ? 0.12f : 0.035f));
+        g.fillRect(r.getX(), centreY - depthHeight, r.getWidth(), 2.0f * depthHeight);
+        g.setColour(hypercolor::ui::palette::mutedText().withAlpha(0.45f));
+        g.drawHorizontalLine(juce::roundToInt(r.getCentreY()), r.getX() + 3.0f, r.getRight() - 3.0f);
+        g.setColour(hypercolor::ui::palette::border().brighter(0.15f));
+        g.strokePath(path, juce::PathStrokeType(1.8f), waveformTransform);
+        auto waveColour = enabled ? hypercolor::ui::palette::space()
+                                  : hypercolor::ui::palette::mutedText().withAlpha(0.45f);
+        g.setColour(waveColour.withAlpha(enabled ? 0.95f : 0.4f));
+        g.strokePath(path, juce::PathStrokeType(1.8f), waveformTransform);
+        if (used && enabled)
         {
-            constexpr std::array held { -0.72f, 0.24f, 0.68f, -0.18f,
-                                         0.82f, -0.45f, 0.12f, -0.62f };
-            const auto dx = r.getWidth() / static_cast<float>(held.size());
-            auto previousY = r.getCentreY() - held[0] * r.getHeight() * 0.36f;
-            path.startNewSubPath(r.getX(), previousY);
-            for (std::size_t i = 0; i < held.size(); ++i)
-            {
-                const auto x = r.getX() + static_cast<float>(i + 1) * dx;
-                path.lineTo(x, previousY);
-                if (i + 1 < held.size())
-                {
-                    previousY = r.getCentreY() - held[i + 1] * r.getHeight() * 0.36f;
-                    path.lineTo(x, previousY);
-                }
-            }
+            g.setColour(hypercolor::ui::palette::text());
+            g.fillEllipse(r.getRight() - 8.0f, r.getY() + 3.0f, 4.0f, 4.0f);
         }
-        else
+        if (enabled)
         {
-            for (int i = 0; i <= 96; ++i)
-            {
-                const auto x = static_cast<float>(i) / 96.0f;
-                const auto y = hypercolor::dsp::modulation::Lfo::evaluate(waveform, x);
-                const auto point = juce::Point<float>(r.getX() + x * r.getWidth(),
-                    r.getCentreY() - y * r.getHeight() * 0.36f);
-                if (i == 0) path.startNewSubPath(point); else path.lineTo(point);
-            }
+            const auto x = r.getX() + phase * r.getWidth();
+            g.setColour(hypercolor::ui::palette::text().withAlpha(0.2f));
+            g.drawLine(x, r.getY() + 3.0f, x, r.getBottom() - 3.0f, 4.0f);
+            g.setColour(hypercolor::ui::palette::text());
+            g.drawLine(x, r.getY() + 3.0f, x, r.getBottom() - 3.0f, 1.2f);
         }
-        g.setColour(hypercolor::ui::palette::space());
-        g.strokePath(path, juce::PathStrokeType(1.8f));
     }
 private:
+    void rebuildPath()
+    {
+        path.clear();
+        constexpr std::array held { -0.72f, 0.24f, 0.68f, -0.18f,
+                                     0.82f, -0.45f, 0.12f, -0.62f };
+        for (int i = 0; i <= 96; ++i)
+        {
+            const auto x = static_cast<float>(i) / 96.0f;
+            auto y = 0.0f;
+            if (waveform == hypercolor::dsp::modulation::LfoWaveform::sampleAndHold)
+                y = held[juce::jmin(held.size() - 1,
+                    static_cast<std::size_t>(x * static_cast<float>(held.size())))];
+            else
+                y = hypercolor::dsp::modulation::Lfo::evaluate(waveform, x, 0.0f,
+                    waveform == hypercolor::dsp::modulation::LfoWaveform::custom
+                        ? &customWaveform : nullptr);
+            const auto point = juce::Point<float>(x, offset - y * depth);
+            if (i == 0) path.startNewSubPath(point); else path.lineTo(point);
+        }
+    }
     hypercolor::dsp::modulation::LfoWaveform waveform
         = hypercolor::dsp::modulation::LfoWaveform::sine;
+    Waveform customWaveform = hypercolor::dsp::modulation::Lfo::makeDefaultCustomWaveform();
+    juce::Path path;
+    float depth = 1.0f, offset = 0.0f, phase = 0.0f;
+    bool enabled = true, used = false;
+};
+
+class CustomLfoWaveEditor final : public juce::Component
+{
+public:
+    using Waveform = hypercolor::dsp::modulation::Lfo::CustomWaveform;
+    std::function<void(const Waveform&)> onWaveformChanged;
+    std::function<void()> onDrawStarted;
+    void setWaveform(const Waveform& raw, const Waveform& display)
+    { waveform = raw; displayWaveform = display; rebuildPath(); repaint(); }
+    [[nodiscard]] const Waveform& getWaveform() const noexcept { return waveform; }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced(1.0f);
+        g.setColour(hypercolor::ui::palette::background()); g.fillRoundedRectangle(r, 5.0f);
+        g.setColour(hypercolor::ui::palette::border()); g.drawRoundedRectangle(r, 5.0f, 1.0f);
+        g.saveState(); g.reduceClipRegion(getLocalBounds().reduced(4));
+        const auto inner = r.reduced(8.0f);
+        g.setColour(hypercolor::ui::palette::border().withAlpha(0.35f));
+        for (int i = 1; i < 8; ++i)
+        {
+            const auto x = inner.getX() + inner.getWidth() * static_cast<float>(i) / 8.0f;
+            g.drawVerticalLine(juce::roundToInt(x), inner.getY(), inner.getBottom());
+        }
+        for (int i = 1; i < 4; ++i)
+        {
+            const auto y = inner.getY() + inner.getHeight() * static_cast<float>(i) / 4.0f;
+            g.drawHorizontalLine(juce::roundToInt(y), inner.getX(), inner.getRight());
+        }
+        g.setColour(hypercolor::ui::palette::mutedText().withAlpha(0.8f));
+        g.drawHorizontalLine(juce::roundToInt(inner.getCentreY()), inner.getX(), inner.getRight());
+        juce::AffineTransform transform;
+        transform = transform.scaled(inner.getWidth(), -inner.getHeight() * 0.5f)
+                             .translated(inner.getX(), inner.getCentreY());
+        g.setColour(hypercolor::ui::palette::space().withAlpha(0.14f));
+        g.fillPath(fillPath, transform);
+        g.setColour(hypercolor::ui::palette::space());
+        g.strokePath(path, juce::PathStrokeType(2.0f), transform);
+        g.restoreState();
+        if (drawing)
+        {
+            g.setColour(hypercolor::ui::palette::text());
+            g.drawRoundedRectangle(r.reduced(1.5f), 5.0f, 1.4f);
+        }
+    }
+
+    void mouseDown(const juce::MouseEvent& event) override
+    { drawing = event.mods.isLeftButtonDown(); previousIndex = -1;
+      if (drawing) { if (onDrawStarted) onDrawStarted(); writeAt(event.position); } }
+    void mouseDrag(const juce::MouseEvent& event) override
+    { if (drawing) writeAt(event.position); }
+    void mouseUp(const juce::MouseEvent&) override
+    { drawing = false; previousIndex = -1; repaint(); }
+
+private:
+    void rebuildPath()
+    {
+        path.clear();
+        for (std::size_t i = 0; i < displayWaveform.size(); ++i)
+        {
+            const auto x = static_cast<float>(i) / static_cast<float>(displayWaveform.size() - 1);
+            const auto point = juce::Point<float>(x, displayWaveform[i]);
+            if (i == 0) path.startNewSubPath(point); else path.lineTo(point);
+        }
+        fillPath = path;
+        fillPath.lineTo(1.0f, 0.0f); fillPath.lineTo(0.0f, 0.0f);
+        fillPath.closeSubPath();
+    }
+    void writeAt(juce::Point<float> point)
+    {
+        auto inner = getLocalBounds().toFloat().reduced(9.0f);
+        if (inner.isEmpty()) return;
+        const auto x = juce::jlimit(0.0f, 1.0f, (point.x - inner.getX()) / inner.getWidth());
+        const auto y = juce::jlimit(-1.0f, 1.0f,
+            1.0f - 2.0f * (point.y - inner.getY()) / inner.getHeight());
+        if (previousIndex >= 0)
+            hypercolor::dsp::modulation::Lfo::drawCustomSegment(waveform, previousX, previousY, x, y);
+        else
+            hypercolor::dsp::modulation::Lfo::drawCustomSegment(waveform, x, y, x, y);
+        previousX = x; previousY = y;
+        previousIndex = juce::roundToInt(x * static_cast<float>(waveform.size() - 2));
+        rebuildPath(); repaint();
+        if (onWaveformChanged) onWaveformChanged(waveform);
+    }
+    Waveform waveform = hypercolor::dsp::modulation::Lfo::makeDefaultCustomWaveform();
+    Waveform displayWaveform = waveform;
+    juce::Path path;
+    juce::Path fillPath;
+    int previousIndex = -1;
+    float previousX = 0.0f, previousY = 0.0f;
+    bool drawing = false;
+};
+
+class LfoModuleCard final : public juce::Component
+{
+public:
+    using Waveform = hypercolor::dsp::modulation::Lfo::CustomWaveform;
+    std::function<void()> onClick;
+    void setState(int moduleNumber, hypercolor::dsp::modulation::LfoWaveform shape,
+                  const Waveform& table, bool isEnabled, bool isSelected, float currentPhase)
+    {
+        const bool rebuild = number != moduleNumber || waveform != shape
+            || customWaveform != table || enabled != isEnabled;
+        number = moduleNumber; waveform = shape; customWaveform = table;
+        enabled = isEnabled; selected = isSelected;
+        if (std::isfinite(currentPhase)) phase = currentPhase - std::floor(currentPhase);
+        if (rebuild) rebuildPath();
+        repaint();
+    }
+    void setSelected(bool value) { if (selected != value) { selected = value; repaint(); } }
+    void setPhase(float value)
+    { if (std::isfinite(value)) { phase = value - std::floor(value); repaint(); } }
+    void mouseDown(const juce::MouseEvent& event) override
+    { mousePressed = event.mods.isLeftButtonDown(); }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat().reduced(1.0f);
+        auto fill = selected ? hypercolor::ui::palette::space().withAlpha(0.22f)
+                             : hypercolor::ui::palette::panelRaised();
+        if (!enabled) fill = fill.withMultipliedAlpha(0.62f);
+        g.setColour(fill); g.fillRoundedRectangle(bounds, 5.0f);
+        g.setColour(selected ? hypercolor::ui::palette::space()
+                             : hypercolor::ui::palette::border());
+        g.drawRoundedRectangle(bounds, 5.0f, selected ? 1.4f : 1.0f);
+        g.setColour(enabled ? hypercolor::ui::palette::text()
+                            : hypercolor::ui::palette::mutedText());
+        g.setFont(11.0f);
+        g.drawText("L" + juce::String(number) + (enabled ? " ON" : " OFF"),
+                   getLocalBounds().reduced(6, 2).removeFromTop(16),
+                   juce::Justification::centredLeft, false);
+        auto graph = bounds.reduced(7.0f);
+        graph.removeFromTop(15.0f);
+        if (graph.getHeight() < 5.0f) return;
+        const auto transform = juce::AffineTransform().scaled(graph.getWidth(), -graph.getHeight() * 0.42f)
+            .translated(graph.getX(), graph.getCentreY());
+        g.setColour(hypercolor::ui::palette::border().withAlpha(0.65f));
+        g.drawHorizontalLine(juce::roundToInt(graph.getCentreY()), graph.getX(), graph.getRight());
+        g.setColour(enabled ? hypercolor::ui::palette::space()
+                            : hypercolor::ui::palette::mutedText().withAlpha(0.45f));
+        g.strokePath(path, juce::PathStrokeType(1.35f), transform);
+        if (enabled)
+        {
+            const auto x = graph.getX() + phase * graph.getWidth();
+            g.setColour(hypercolor::ui::palette::text().withAlpha(0.26f));
+            g.drawLine(x, graph.getY(), x, graph.getBottom(), 2.8f);
+            g.setColour(hypercolor::ui::palette::text());
+            g.drawLine(x, graph.getY(), x, graph.getBottom(), 0.9f);
+        }
+    }
+    void mouseUp(const juce::MouseEvent& event) override
+    { if (mousePressed && getLocalBounds().contains(event.getPosition()) && onClick) onClick();
+      mousePressed = false; }
+
+private:
+    void rebuildPath()
+    {
+        path.clear();
+        constexpr std::array<float, 8> held { -0.72f, 0.24f, 0.68f, -0.18f,
+                                               0.82f, -0.45f, 0.12f, -0.62f };
+        for (int i = 0; i <= 64; ++i)
+        {
+            const auto p = static_cast<float>(i) / 64.0f;
+            const auto value = waveform == hypercolor::dsp::modulation::LfoWaveform::sampleAndHold
+                ? held[juce::jmin(held.size() - 1, static_cast<std::size_t>(p * held.size()))]
+                : hypercolor::dsp::modulation::Lfo::evaluate(waveform, p, 0.0f,
+                    waveform == hypercolor::dsp::modulation::LfoWaveform::custom
+                        ? &customWaveform : nullptr);
+            const juce::Point<float> point { p, value };
+            if (i == 0) path.startNewSubPath(point); else path.lineTo(point);
+        }
+    }
+    int number = 0;
+    hypercolor::dsp::modulation::LfoWaveform waveform = hypercolor::dsp::modulation::LfoWaveform::sine;
+    Waveform customWaveform = hypercolor::dsp::modulation::Lfo::makeDefaultCustomWaveform();
+    juce::Path path;
+    float phase = 0.0f;
+    bool enabled = false, selected = false, mousePressed = false;
 };
 
 class LfoWorkspacePanel final : public juce::Component, private juce::Timer
@@ -415,7 +630,7 @@ public:
                       std::function<void(std::uint64_t)> onFocus)
         : owner(processor), focusCallback(std::move(onFocus))
     {
-        setSize(520, 590);
+        setSize(560, 720);
         title.setText("LFO MODULATION", juce::dontSendNotification);
         title.setColour(juce::Label::textColourId, hypercolor::ui::palette::text());
         addAndMakeVisible(title);
@@ -433,26 +648,19 @@ public:
         for (std::size_t i = 0; i < moduleCards.size(); ++i)
         {
             auto& card = moduleCards[i];
-            card.setClickingTogglesState(true);
-            card.setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
-            card.setColour(juce::TextButton::buttonOnColourId, hypercolor::ui::palette::space().withAlpha(0.22f));
-            card.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::mutedText());
-            card.setColour(juce::TextButton::textColourOnId, hypercolor::ui::palette::space());
             card.onClick = [this, i]
             {
                 selectedModule = static_cast<int>(i);
-                for (std::size_t cardIndex = 0; cardIndex < moduleCards.size(); ++cardIndex)
-                    moduleCards[cardIndex].setToggleState(cardIndex == i, juce::dontSendNotification);
                 module.setSelectedId(static_cast<int>(i + 1), juce::dontSendNotification);
                 loadModule();
             };
             addAndMakeVisible(card);
         }
-        waveform.addItemList({ "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "Random / S&H" }, 1);
+        waveform.addItemList({ "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "Random / S&H", "Custom" }, 1);
         rateMode.addItemList({ "FREE RATE", "BPM SYNC" }, 1);
         for (std::size_t i = 0; i < hypercolor::plugin::lfoDivisionLabels.size(); ++i)
             division.addItem(hypercolor::plugin::lfoDivisionLabels[i], static_cast<int>(i + 1));
-        for (auto* s : { &rate, &depth, &phase, &offset, &amount })
+        for (auto* s : { &rate, &depth, &phase, &offset, &smooth, &amount })
         {
             s->setSliderStyle(juce::Slider::LinearHorizontal);
             s->setTextBoxStyle(juce::Slider::TextBoxRight, false, 58, 18);
@@ -464,7 +672,10 @@ public:
         }
         rate.setRange(0.0, 40.0, 0.01); rate.setTextValueSuffix(" Hz");
         depth.setRange(0.0, 1.0, 0.001); phase.setRange(0.0, 1.0, 0.001);
-        offset.setRange(-1.0, 1.0, 0.001); amount.setRange(0.0, 1.0, 0.001);
+        offset.setRange(-1.0, 1.0, 0.001); smooth.setRange(0.0, 1.0, 0.01);
+        smooth.textFromValueFunction = [](double value)
+            { return juce::String(juce::roundToInt(value * 100.0)) + "%"; };
+        amount.setRange(0.0, 1.0, 0.001);
         amount.setValue(0.5, juce::dontSendNotification);
         for (auto* b : { &enabled, &bipolar, &inverted, &addModule, &removeModule, &addMapping, &removeMapping })
         { addAndMakeVisible(*b); b->setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
@@ -474,21 +685,28 @@ public:
         inverted.setButtonText("INVERT"); inverted.setClickingTogglesState(true);
         addModule.setButtonText("+ ADD LFO"); removeModule.setButtonText("REMOVE LFO");
         addMapping.setButtonText("ADD ASSIGNMENT"); removeMapping.setButtonText("REMOVE");
+        undoWave.setButtonText("UNDO"); clearWave.setButtonText("CLEAR"); resetWave.setButtonText("RESET");
         addAndMakeVisible(preview);
+        addAndMakeVisible(customEditor);
+        for (auto* button : { &undoWave, &clearWave, &resetWave })
+        { addAndMakeVisible(*button); button->setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
+          button->setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::space()); }
         addAndMakeVisible(title2);
         addAndMakeVisible(rateLabel); addAndMakeVisible(depthLabel); addAndMakeVisible(phaseLabel);
         addAndMakeVisible(offsetLabel); addAndMakeVisible(amountLabel); addAndMakeVisible(help);
+        addAndMakeVisible(smoothLabel);
         title2.setColour(juce::Label::textColourId, hypercolor::ui::palette::space());
-        for (auto* label : { &rateLabel, &depthLabel, &phaseLabel, &offsetLabel, &amountLabel })
+        for (auto* label : { &rateLabel, &depthLabel, &phaseLabel, &offsetLabel, &smoothLabel, &amountLabel })
             label->setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
         rateLabel.setText("RATE", juce::dontSendNotification); depthLabel.setText("DEPTH", juce::dontSendNotification);
         phaseLabel.setText("PHASE", juce::dontSendNotification); offsetLabel.setText("OFFSET", juce::dontSendNotification);
         amountLabel.setText("AMOUNT", juce::dontSendNotification);
+        smoothLabel.setText("SMOOTH", juce::dontSendNotification);
         help.setText("Continuous controls only. LFO sums after XY Macro; base FX values remain stored.",
                      juce::dontSendNotification);
         help.setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
         module.onChange = [this] { loadModule(); };
-        waveform.onChange = [this] { preview.setWaveform(static_cast<hypercolor::dsp::modulation::LfoWaveform>(waveform.getSelectedId() - 1)); saveModule(); };
+        waveform.onChange = [this] { saveModule(); };
         rateMode.onChange = [this] { division.setEnabled(rateMode.getSelectedId() == 2); rate.setEnabled(rateMode.getSelectedId() == 1); saveModule(); };
         division.onChange = [this] { saveModule(); };
         enabled.onClick = [this] { enabled.setButtonText(enabled.getToggleState() ? "ON" : "OFF"); saveModule(); };
@@ -496,6 +714,36 @@ public:
         depth.onValueChange = [this] { saveModule(); };
         phase.onValueChange = [this] { saveModule(); };
         offset.onValueChange = [this] { saveModule(); };
+        smooth.onValueChange = [this] { saveModule(); };
+        customEditor.onDrawStarted = [this]
+        {
+            if (selectedModule < 0) return;
+            configuration = owner.getLfoConfiguration();
+            if (static_cast<std::size_t>(selectedModule) < configuration.moduleCount)
+            { undoWaveform = configuration.modules[static_cast<std::size_t>(selectedModule)].customWaveform;
+              undoLfoIdentity = configuration.modules[static_cast<std::size_t>(selectedModule)].stableIdentity;
+              hasUndoWaveform = true; undoWave.setEnabled(true); }
+        };
+        customEditor.onWaveformChanged = [this](const auto& value) { acceptDrawnWaveform(value); };
+        undoWave.onClick = [this]
+        {
+            if (selectedModule >= 0 && static_cast<std::size_t>(selectedModule) < configuration.moduleCount
+                && configuration.modules[static_cast<std::size_t>(selectedModule)].stableIdentity == undoLfoIdentity)
+                applyCustomWaveform(undoWaveform);
+            hasUndoWaveform = false; undoLfoIdentity = 0; undoWave.setEnabled(false);
+        };
+        clearWave.onClick = [this]
+        {
+            captureUndo();
+            hypercolor::dsp::modulation::Lfo::CustomWaveform flat {};
+            hypercolor::dsp::modulation::Lfo::clearCustomWaveform(flat);
+            applyCustomWaveform(flat);
+        };
+        resetWave.onClick = [this]
+        {
+            captureUndo();
+            applyCustomWaveform(hypercolor::dsp::modulation::Lfo::makeDefaultCustomWaveform());
+        };
         fxInstance.onChange = [this] { rebuildParameters(); };
         mapping.onChange = [this] { loadMapping(); };
         amount.onValueChange = [this] { saveMapping(); };
@@ -506,7 +754,7 @@ public:
         addMapping.onClick = [this] { createMapping(); };
         removeMapping.onClick = [this] { deleteMapping(); };
         refresh();
-        startTimerHz(10);
+        startTimerHz(30);
     }
 
     ~LfoWorkspacePanel() override { stopTimer(); }
@@ -524,7 +772,7 @@ public:
         title.setBounds(a.removeFromTop(24)); a.removeFromTop(6);
         auto row = a.removeFromTop(28); addModule.setBounds(row.removeFromLeft(120));
         row.removeFromLeft(8); removeModule.setBounds(row);
-        a.removeFromTop(4); row = a.removeFromTop(28);
+        a.removeFromTop(4); row = a.removeFromTop(50);
         const auto visibleCards = juce::jmax(1, module.getNumItems());
         const auto cardWidth = juce::jmax(48, row.getWidth() / visibleCards);
         for (std::size_t i = 0; i < moduleCards.size(); ++i)
@@ -533,10 +781,18 @@ public:
         a.removeFromTop(8); row = a.removeFromTop(28); enabled.setBounds(row.removeFromLeft(56));
         row.removeFromLeft(8); waveform.setBounds(row.removeFromLeft(140)); row.removeFromLeft(8);
         rateMode.setBounds(row.removeFromLeft(116)); row.removeFromLeft(8); division.setBounds(row);
-        a.removeFromTop(7); preview.setBounds(a.removeFromTop(48)); a.removeFromTop(6);
+        a.removeFromTop(7); preview.setBounds(a.removeFromTop(46));
+        if (customEditor.isVisible())
+        {
+            a.removeFromTop(5); customEditor.setBounds(a.removeFromTop(86));
+            row = a.removeFromTop(24); undoWave.setBounds(row.removeFromLeft(78)); row.removeFromLeft(6);
+            clearWave.setBounds(row.removeFromLeft(78)); row.removeFromLeft(6); resetWave.setBounds(row.removeFromLeft(78));
+            a.removeFromTop(3);
+        }
         auto sliderRow = [&](juce::Label& l, juce::Slider& s)
         { auto r = a.removeFromTop(25); l.setBounds(r.removeFromLeft(62)); s.setBounds(r); a.removeFromTop(2); };
         sliderRow(rateLabel, rate); sliderRow(depthLabel, depth); sliderRow(phaseLabel, phase); sliderRow(offsetLabel, offset);
+        if (smooth.isVisible()) sliderRow(smoothLabel, smooth);
         a.removeFromTop(2); row = a.removeFromTop(24); row.removeFromLeft(0); row.removeFromRight(0);
         row.removeFromLeft(0); bipolar.setBounds(row.removeFromLeft(100)); row.removeFromLeft(6); inverted.setBounds(row.removeFromLeft(100));
         a.removeFromTop(9); title2.setBounds(a.removeFromTop(20));
@@ -553,6 +809,13 @@ private:
         const auto revision = owner.getLfoConfigurationRevision();
         if ((revision & 1u) == 0u && revision != observedRevision)
             refresh();
+        else if (selectedModule >= 0)
+        {
+            preview.setPhase(owner.getLfoPhaseForDisplay(static_cast<std::size_t>(selectedModule)));
+            for (std::size_t i = 0; i < moduleCards.size(); ++i)
+                if (moduleCards[i].isVisible())
+                    moduleCards[i].setPhase(owner.getLfoPhaseForDisplay(i));
+        }
     }
     void refresh()
     {
@@ -570,10 +833,12 @@ private:
             moduleCards[i].setVisible(active);
             if (active)
             {
-                moduleCards[i].setButtonText("L" + juce::String(static_cast<int>(i + 1))
-                    + (configuration.modules[i].enabled ? "  ON" : "  OFF"));
-                moduleCards[i].setToggleState(static_cast<int>(i) == selectedModule,
-                                              juce::dontSendNotification);
+                hypercolor::dsp::modulation::Lfo::CustomWaveform effective {};
+                hypercolor::dsp::modulation::Lfo::prepareCustomWaveform(
+                    configuration.modules[i].customWaveform, configuration.modules[i].smooth, effective);
+                moduleCards[i].setState(static_cast<int>(i + 1), configuration.modules[i].waveform,
+                    effective, configuration.modules[i].enabled, static_cast<int>(i) == selectedModule,
+                    owner.getLfoPhaseForDisplay(i));
             }
         }
         if (configuration.moduleCount > 0)
@@ -625,30 +890,106 @@ private:
         if (refreshing) return;
         selectedModule = module.getSelectedId() - 1;
         for (std::size_t i = 0; i < moduleCards.size(); ++i)
-            moduleCards[i].setToggleState(static_cast<int>(i) == selectedModule,
-                                          juce::dontSendNotification);
+            moduleCards[i].setSelected(static_cast<int>(i) == selectedModule);
         configuration = owner.getLfoConfiguration();
         if (selectedModule < 0 || static_cast<std::size_t>(selectedModule) >= configuration.moduleCount)
         { title.setText("LFO MODULATION", juce::dontSendNotification);
+          customEditor.setVisible(false); smoothLabel.setVisible(false); smooth.setVisible(false);
+          undoWave.setVisible(false); clearWave.setVisible(false); resetWave.setVisible(false);
           setControlsEnabled(false); rebuildMappings(); return; }
         const auto& m = configuration.modules[static_cast<std::size_t>(selectedModule)];
         title.setText("LFO MODULATION  /  LFO " + juce::String(selectedModule + 1),
                       juce::dontSendNotification);
         if (focusCallback) focusCallback(m.stableIdentity);
         waveform.setSelectedId(static_cast<int>(m.waveform) + 1, juce::dontSendNotification);
-        preview.setWaveform(m.waveform);
         rateMode.setSelectedId(static_cast<int>(m.rateMode) + 1, juce::dontSendNotification);
         division.setSelectedId(static_cast<int>(m.division) + 1, juce::dontSendNotification);
         enabled.setToggleState(m.enabled, juce::dontSendNotification);
         enabled.setButtonText(m.enabled ? "ON" : "OFF");
         rate.setValue(m.rateHz, juce::dontSendNotification); depth.setValue(m.depth, juce::dontSendNotification);
         phase.setValue(m.phase, juce::dontSendNotification); offset.setValue(m.offset, juce::dontSendNotification);
+        smooth.setValue(m.smooth, juce::dontSendNotification);
+        const auto isUsed = hasAssignments(m.stableIdentity);
+        hypercolor::dsp::modulation::Lfo::CustomWaveform effective {};
+        hypercolor::dsp::modulation::Lfo::prepareCustomWaveform(m.customWaveform, m.smooth, effective);
+        customEditor.setWaveform(m.customWaveform, effective);
+        const auto customSelected = m.waveform == hypercolor::dsp::modulation::LfoWaveform::custom;
+        help.setText(customSelected
+            ? "Hold and drag to draw. Custom waveform is saved with this LFO."
+            : "Continuous controls only. LFO sums after XY Macro; base FX values remain stored.",
+            juce::dontSendNotification);
+        customEditor.setVisible(customSelected);
+        smoothLabel.setVisible(customSelected); smooth.setVisible(customSelected);
+        undoWave.setVisible(customSelected); clearWave.setVisible(customSelected); resetWave.setVisible(customSelected);
+        preview.setState(m.waveform, effective, m.depth, m.offset,
+            owner.getLfoPhaseForDisplay(static_cast<std::size_t>(selectedModule)), m.enabled, isUsed);
+        undoWave.setEnabled(hasUndoWaveform && undoLfoIdentity == m.stableIdentity);
         setControlsEnabled(true); rate.setEnabled(m.rateMode == hypercolor::plugin::LfoRateMode::free);
         division.setEnabled(m.rateMode == hypercolor::plugin::LfoRateMode::bpmSync);
         rebuildMappings();
     }
+    bool hasAssignments(std::uint64_t identity) const
+    {
+        for (std::size_t i = 0; i < configuration.assignmentCount; ++i)
+            if (configuration.assignments[i].lfoIdentity == identity)
+                return true;
+        return false;
+    }
+    void captureUndo()
+    {
+        if (selectedModule < 0) return;
+        configuration = owner.getLfoConfiguration();
+        if (static_cast<std::size_t>(selectedModule) >= configuration.moduleCount) return;
+        undoWaveform = configuration.modules[static_cast<std::size_t>(selectedModule)].customWaveform;
+        undoLfoIdentity = configuration.modules[static_cast<std::size_t>(selectedModule)].stableIdentity;
+        hasUndoWaveform = true; undoWave.setEnabled(true);
+    }
+    void acceptDrawnWaveform(const hypercolor::dsp::modulation::Lfo::CustomWaveform& value)
+    {
+        if (refreshing || selectedModule < 0) return;
+        configuration = owner.getLfoConfiguration();
+        if (static_cast<std::size_t>(selectedModule) >= configuration.moduleCount) return;
+        auto& target = configuration.modules[static_cast<std::size_t>(selectedModule)].customWaveform;
+        for (std::size_t i = 0; i < target.size(); ++i)
+            target[i] = std::isfinite(value[i]) ? juce::jlimit(-1.0f, 1.0f, value[i]) : 0.0f;
+        target.back() = target.front();
+        if (owner.setLfoConfiguration(configuration))
+            observedRevision = owner.getLfoConfigurationRevision();
+        auto& moduleConfig = configuration.modules[static_cast<std::size_t>(selectedModule)];
+        hypercolor::dsp::modulation::Lfo::CustomWaveform effective {};
+        hypercolor::dsp::modulation::Lfo::prepareCustomWaveform(moduleConfig.customWaveform,
+                                                      moduleConfig.smooth, effective);
+        customEditor.setWaveform(moduleConfig.customWaveform, effective);
+        preview.setState(moduleConfig.waveform, effective, moduleConfig.depth, moduleConfig.offset,
+            owner.getLfoPhaseForDisplay(static_cast<std::size_t>(selectedModule)),
+            moduleConfig.enabled, hasAssignments(moduleConfig.stableIdentity));
+        moduleCards[static_cast<std::size_t>(selectedModule)].setState(selectedModule + 1,
+            moduleConfig.waveform, effective, moduleConfig.enabled, true,
+            owner.getLfoPhaseForDisplay(static_cast<std::size_t>(selectedModule)));
+    }
+    void applyCustomWaveform(const hypercolor::dsp::modulation::Lfo::CustomWaveform& value)
+    {
+        if (selectedModule < 0) return;
+        configuration = owner.getLfoConfiguration();
+        if (static_cast<std::size_t>(selectedModule) >= configuration.moduleCount) return;
+        auto& target = configuration.modules[static_cast<std::size_t>(selectedModule)].customWaveform;
+        target = value; target.back() = target.front();
+        if (owner.setLfoConfiguration(configuration))
+            observedRevision = owner.getLfoConfigurationRevision();
+        auto& moduleConfig = configuration.modules[static_cast<std::size_t>(selectedModule)];
+        hypercolor::dsp::modulation::Lfo::CustomWaveform effective {};
+        hypercolor::dsp::modulation::Lfo::prepareCustomWaveform(moduleConfig.customWaveform,
+                                                      moduleConfig.smooth, effective);
+        customEditor.setWaveform(moduleConfig.customWaveform, effective);
+        preview.setState(moduleConfig.waveform, effective, moduleConfig.depth, moduleConfig.offset,
+            owner.getLfoPhaseForDisplay(static_cast<std::size_t>(selectedModule)),
+            moduleConfig.enabled, hasAssignments(moduleConfig.stableIdentity));
+        moduleCards[static_cast<std::size_t>(selectedModule)].setState(selectedModule + 1,
+            moduleConfig.waveform, effective, moduleConfig.enabled, true,
+            owner.getLfoPhaseForDisplay(static_cast<std::size_t>(selectedModule)));
+    }
     void setControlsEnabled(bool value)
-    { enabled.setEnabled(value); waveform.setEnabled(value); rateMode.setEnabled(value); rate.setEnabled(value); depth.setEnabled(value); phase.setEnabled(value); offset.setEnabled(value); bipolar.setEnabled(value); inverted.setEnabled(value); addMapping.setEnabled(value); }
+    { enabled.setEnabled(value); waveform.setEnabled(value); rateMode.setEnabled(value); rate.setEnabled(value); depth.setEnabled(value); phase.setEnabled(value); offset.setEnabled(value); smooth.setEnabled(value); bipolar.setEnabled(value); inverted.setEnabled(value); addMapping.setEnabled(value); }
     void saveModule()
     {
         if (refreshing || selectedModule < 0) return;
@@ -661,11 +1002,28 @@ private:
         m.division = static_cast<hypercolor::plugin::LfoDivision>(juce::jmax(0, division.getSelectedId() - 1));
         m.rateHz = static_cast<float>(rate.getValue()); m.depth = static_cast<float>(depth.getValue());
         m.phase = static_cast<float>(phase.getValue()); m.offset = static_cast<float>(offset.getValue());
-        moduleCards[static_cast<std::size_t>(selectedModule)].setButtonText(
-            "L" + juce::String(selectedModule + 1) + (m.enabled ? " ON" : " OFF"));
+        m.smooth = static_cast<float>(smooth.getValue());
+        hypercolor::dsp::modulation::Lfo::CustomWaveform cardWave {};
+        hypercolor::dsp::modulation::Lfo::prepareCustomWaveform(m.customWaveform, m.smooth, cardWave);
+        moduleCards[static_cast<std::size_t>(selectedModule)].setState(selectedModule + 1,
+            m.waveform, cardWave, m.enabled, true,
+            owner.getLfoPhaseForDisplay(static_cast<std::size_t>(selectedModule)));
         if (owner.setLfoConfiguration(configuration))
             observedRevision = owner.getLfoConfigurationRevision();
-        preview.setWaveform(m.waveform);
+        hypercolor::dsp::modulation::Lfo::CustomWaveform effective {};
+        hypercolor::dsp::modulation::Lfo::prepareCustomWaveform(m.customWaveform, m.smooth, effective);
+        customEditor.setWaveform(m.customWaveform, effective);
+        const auto customSelected = m.waveform == hypercolor::dsp::modulation::LfoWaveform::custom;
+        help.setText(customSelected
+            ? "Hold and drag to draw. Custom waveform is saved with this LFO."
+            : "Continuous controls only. LFO sums after XY Macro; base FX values remain stored.",
+            juce::dontSendNotification);
+        customEditor.setVisible(customSelected); smoothLabel.setVisible(customSelected); smooth.setVisible(customSelected);
+        undoWave.setVisible(customSelected); clearWave.setVisible(customSelected); resetWave.setVisible(customSelected);
+        preview.setState(m.waveform, effective, m.depth, m.offset,
+            owner.getLfoPhaseForDisplay(static_cast<std::size_t>(selectedModule)), m.enabled,
+            hasAssignments(m.stableIdentity));
+        resized();
     }
     void rebuildMappings()
     {
@@ -786,16 +1144,21 @@ private:
     HypercolorAudioProcessor& owner;
     std::function<void(std::uint64_t)> focusCallback;
     hypercolor::plugin::LfoConfiguration configuration;
-    juce::Label title, title2 { "ASSIGNMENTS" }, rateLabel, depthLabel, phaseLabel, offsetLabel, amountLabel, help;
+    juce::Label title, title2 { "ASSIGNMENTS" }, rateLabel, depthLabel, phaseLabel, offsetLabel, smoothLabel, amountLabel, help;
     juce::ComboBox module, waveform, rateMode, division, fxInstance, parameter, mapping;
-    std::array<juce::TextButton, hypercolor::plugin::maximumLfoModules> moduleCards;
-    juce::Slider rate, depth, phase, offset, amount;
+    std::array<LfoModuleCard, hypercolor::plugin::maximumLfoModules> moduleCards;
+    juce::Slider rate, depth, phase, offset, smooth, amount;
     juce::TextButton enabled { "ON" }, bipolar { "BIPOLAR" }, inverted { "INVERT" }, addModule, removeModule, addMapping, removeMapping { "REMOVE" };
+    juce::TextButton undoWave, clearWave, resetWave;
     LfoWavePreview preview;
+    CustomLfoWaveEditor customEditor;
+    hypercolor::dsp::modulation::Lfo::CustomWaveform undoWaveform {};
+    std::uint64_t undoLfoIdentity = 0;
     std::vector<hypercolor::plugin::FxInstanceId> instances;
     std::vector<juce::String> parameterIDs;
     int selectedModule = -1;
     bool refreshing = false;
+    bool hasUndoWaveform = false;
     std::uint32_t observedRevision = 0;
 };
 
@@ -1341,6 +1704,226 @@ void drawEffectBackdrop(
             break;
     }
 }
+}
+
+namespace
+{
+class PresetBrowserPanel final : public juce::Component,
+                                 private juce::ListBoxModel
+{
+public:
+    PresetBrowserPanel(hypercolor::plugin::PresetManager& managerToUse,
+                       std::function<void()> onChanged)
+        : manager(managerToUse), changed(std::move(onChanged))
+    {
+        setSize(520, 560);
+        title.setText("PRESET LIBRARY", juce::dontSendNotification);
+        title.setColour(juce::Label::textColourId, hypercolor::ui::palette::text());
+        title.setFont(juce::FontOptions(16.0f).withStyle("Bold"));
+        addAndMakeVisible(title);
+        search.setTextToShowWhenEmpty("Search presets", hypercolor::ui::palette::mutedText());
+        addAndMakeVisible(search);
+        source.addItem("ALL", 1); source.addItem("FACTORY", 2);
+        source.addItem("USER", 3); source.addItem("FAVORITES", 4);
+        source.setSelectedId(1, juce::dontSendNotification);
+        addAndMakeVisible(source);
+        category.addItem("ALL CATEGORIES", 1);
+        const auto& categories = manager.factoryCategories();
+        for (int i = 0; i < categories.size(); ++i) category.addItem(categories[i], i + 2);
+        category.setSelectedId(1, juce::dontSendNotification);
+        addAndMakeVisible(category);
+        list.setModel(this);
+        list.setRowHeight(34);
+        list.setColour(juce::ListBox::backgroundColourId, hypercolor::ui::palette::panel());
+        list.setColour(juce::ListBox::outlineColourId, hypercolor::ui::palette::border());
+        addAndMakeVisible(list);
+        for (auto* button : { &favorite, &rename, &remove })
+        {
+            button->setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
+            button->setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::cyan());
+            addAndMakeVisible(*button);
+        }
+        favorite.setButtonText("☆ FAVORITE"); rename.setButtonText("RENAME"); remove.setButtonText("DELETE");
+        search.onTextChange = [this] { rebuild(); };
+        source.onChange = [this] { rebuild(); };
+        category.onChange = [this] { rebuild(); };
+        favorite.onClick = [this] { toggleFavorite(); };
+        rename.onClick = [this] { renameSelected(); };
+        remove.onClick = [this] { deleteSelected(); };
+        rebuild();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        g.fillAll(hypercolor::ui::palette::panel().darker(0.12f));
+        g.setColour(hypercolor::ui::palette::border());
+        g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 8.0f, 1.0f);
+        g.setColour(hypercolor::ui::palette::cyan()); g.fillRect(0, 0, 64, 2);
+        if (visible.empty())
+        {
+            g.setColour(hypercolor::ui::palette::mutedText());
+            g.setFont(juce::FontOptions(12.0f));
+            g.drawText("Нет пресетов для выбранного фильтра.", list.getBounds(), juce::Justification::centred);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(14, 12);
+        title.setBounds(r.removeFromTop(26)); r.removeFromTop(8);
+        auto filters = r.removeFromTop(30);
+        source.setBounds(filters.removeFromLeft(128)); filters.removeFromLeft(8); category.setBounds(filters);
+        r.removeFromTop(8); search.setBounds(r.removeFromTop(30)); r.removeFromTop(8);
+        auto actions = r.removeFromBottom(30); list.setBounds(r);
+        favorite.setBounds(actions.removeFromLeft(150)); actions.removeFromLeft(8);
+        rename.setBounds(actions.removeFromLeft(120)); actions.removeFromLeft(8); remove.setBounds(actions);
+    }
+
+private:
+    int getNumRows() override { return static_cast<int>(visible.size()); }
+    void paintListBoxItem(int row, juce::Graphics& g, int width, int height, bool selected) override
+    {
+        if (row < 0 || row >= static_cast<int>(visible.size())) return;
+        const auto& info = visible[static_cast<std::size_t>(row)];
+        g.fillAll(selected ? hypercolor::ui::palette::cyan().withAlpha(0.15f)
+                           : hypercolor::ui::palette::panel());
+        g.setColour(info.id == manager.currentId() ? hypercolor::ui::palette::lime()
+                                                   : hypercolor::ui::palette::text());
+        g.setFont(juce::FontOptions(12.0f).withStyle("Bold"));
+        g.drawText(info.name + (info.favorite ? "  ★" : ""), 10, 1, width - 18, 17,
+                   juce::Justification::centredLeft, true);
+        g.setColour(hypercolor::ui::palette::mutedText());
+        g.setFont(juce::FontOptions(9.0f));
+        g.drawText((info.factory ? "FACTORY" : "USER") + juce::String("  ·  ") + info.category,
+                   10, 17, width - 18, height - 17, juce::Justification::centredLeft, true);
+    }
+    void selectedRowsChanged(int row) override
+    {
+        const bool selected = row >= 0 && row < static_cast<int>(visible.size());
+        const bool user = selected && !visible[static_cast<std::size_t>(row)].factory;
+        favorite.setEnabled(selected); rename.setEnabled(user); remove.setEnabled(user);
+        favorite.setButtonText(selected && visible[static_cast<std::size_t>(row)].favorite
+            ? "★ FAVORITE" : "☆ FAVORITE");
+    }
+    void rebuild()
+    {
+        const auto oldId = selectedInfo() ? selectedInfo()->id : juce::String{};
+        visible.clear();
+        const auto text = search.getText().trim().toLowerCase();
+        const auto sourceFilter = source.getSelectedId();
+        const auto categoryFilter = category.getSelectedId();
+        for (const auto& info : manager.getPresets())
+        {
+            if (sourceFilter == 2 && !info.factory) continue;
+            if (sourceFilter == 3 && info.factory) continue;
+            if (sourceFilter == 4 && !info.favorite) continue;
+            if (categoryFilter > 1 && info.category != category.getItemText(categoryFilter - 1)) continue;
+            if (text.isNotEmpty() && !info.name.toLowerCase().contains(text)
+                && !info.description.toLowerCase().contains(text)) continue;
+            visible.push_back(info);
+        }
+        list.updateContent();
+        int selected = -1;
+        for (std::size_t i = 0; i < visible.size(); ++i)
+            if (visible[i].id == oldId || (oldId.isEmpty() && visible[i].id == manager.currentId())) selected = static_cast<int>(i);
+        if (selected >= 0) list.selectRow(selected); else list.deselectAllRows();
+        selectedRowsChanged(selected);
+        repaint();
+    }
+    const hypercolor::plugin::PresetInfo* selectedInfo() const
+    {
+        const auto row = list.getSelectedRow();
+        return row >= 0 && row < static_cast<int>(visible.size()) ? &visible[static_cast<std::size_t>(row)] : nullptr;
+    }
+    void listBoxItemClicked(int row, const juce::MouseEvent&) override
+    {
+        if (row < 0 || row >= static_cast<int>(visible.size())) return;
+        if (manager.load(visible[static_cast<std::size_t>(row)].id)) { if (changed) changed(); rebuild(); }
+    }
+    void toggleFavorite()
+    {
+        if (const auto* info = selectedInfo()) { (void) manager.setFavorite(info->id, !info->favorite); rebuild(); }
+    }
+    void renameSelected()
+    {
+        const auto* info = selectedInfo(); if (info == nullptr || info->factory) return;
+        juce::AlertWindow::showAsync(juce::MessageBoxOptions().withIconType(juce::MessageBoxIconType::NoIcon)
+            .withTitle("Rename Preset").withMessage("Enter a new preset name.").withButton("Rename")
+            .withButton("Cancel").withTextEditor("name", info->name),
+            [this, id = info->id](int result)
+            {
+                if (result == 1)
+                    if (auto* box = juce::AlertWindow::getCurrentlyModalComponent())
+                        (void) manager.rename(id, box->getTextEditorContents("name"));
+                rebuild(); if (changed) changed();
+            });
+    }
+    void deleteSelected()
+    {
+        const auto* info = selectedInfo(); if (info == nullptr || info->factory) return;
+        const auto id = info->id;
+        juce::AlertWindow::showAsync(juce::MessageBoxOptions().withIconType(juce::MessageBoxIconType::WarningIcon)
+            .withTitle("Delete Preset?").withMessage("This user preset will be removed.")
+            .withButton("Delete").withButton("Cancel"), [this, id](int result)
+            { if (result == 1) (void) manager.erase(id); rebuild(); if (changed) changed(); });
+    }
+
+    hypercolor::plugin::PresetManager& manager;
+    std::function<void()> changed;
+    juce::Label title;
+    juce::TextEditor search;
+    juce::ComboBox source, category;
+    juce::ListBox list;
+    juce::TextButton favorite, rename, remove;
+    std::vector<hypercolor::plugin::PresetInfo> visible;
+};
+
+class PresetSavePanel final : public juce::Component
+{
+public:
+    PresetSavePanel(hypercolor::plugin::PresetManager& managerToUse,
+                    std::function<void()> onSaved)
+        : manager(managerToUse), saved(std::move(onSaved))
+    {
+        setSize(360, 230);
+        title.setText("SAVE PRESET AS", juce::dontSendNotification);
+        title.setColour(juce::Label::textColourId, hypercolor::ui::palette::text());
+        addAndMakeVisible(title);
+        name.setText(manager.currentIsFactory() ? manager.currentName() : "New Preset");
+        name.setTextToShowWhenEmpty("Preset name", hypercolor::ui::palette::mutedText()); addAndMakeVisible(name);
+        for (int i = 0; i < manager.factoryCategories().size(); ++i)
+            category.addItem(manager.factoryCategories()[i], i + 1);
+        category.setSelectedId(1); addAndMakeVisible(category);
+        description.setTextToShowWhenEmpty("Optional description", hypercolor::ui::palette::mutedText()); addAndMakeVisible(description);
+        save.setButtonText("SAVE"); cancel.setButtonText("CANCEL");
+        for (auto* button : { &save, &cancel }) { button->setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised()); addAndMakeVisible(*button); }
+        save.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::cyan());
+        save.onClick = [this]
+        {
+            if (manager.saveAs(name.getText(), category.getText(), description.getText()))
+            { if (saved) saved(); dismiss(); }
+            else name.setColour(juce::TextEditor::outlineColourId, hypercolor::ui::palette::drive());
+        };
+        cancel.onClick = [this] { dismiss(); };
+    }
+    void paint(juce::Graphics& g) override
+    { g.fillAll(hypercolor::ui::palette::panel().darker(0.12f)); g.setColour(hypercolor::ui::palette::border()); g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 8, 1); }
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced(14); title.setBounds(r.removeFromTop(24)); r.removeFromTop(8);
+        name.setBounds(r.removeFromTop(28)); r.removeFromTop(6); category.setBounds(r.removeFromTop(28));
+        r.removeFromTop(6); description.setBounds(r.removeFromTop(28)); r.removeFromTop(8);
+        auto row = r.removeFromTop(30); save.setBounds(row.removeFromLeft(row.getWidth() / 2 - 4)); row.removeFromLeft(8); cancel.setBounds(row);
+    }
+private:
+    void dismiss() { if (auto* callout = findParentComponentOfClass<juce::CallOutBox>()) callout->dismiss(); }
+    hypercolor::plugin::PresetManager& manager;
+    std::function<void()> saved;
+    juce::Label title;
+    juce::TextEditor name, description;
+    juce::ComboBox category;
+    juce::TextButton save, cancel;
+};
 }
 
 HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(

@@ -5,6 +5,7 @@
 #include "HypercolorLookAndFeel.h"
 #include "PremiumRotaryKnob.h"
 #include "PluginProcessor.h"
+#include "PresetManager.h"
 #include "XYController.h"
 
 #include <array>
@@ -49,6 +50,10 @@ private:
     [[nodiscard]] DensityMode readDensityMode() const noexcept;
     void synchronizeDensityMode();
     void updateEffectVisualTargets(bool snapToTarget);
+    void showPresetBrowser();
+    void showSaveAs();
+    void saveCurrentPreset();
+    void refreshPresetHeader();
     void timerCallback() override;
     void parameterChanged(const juce::String& parameterID,
                           float newValue) override;
@@ -63,6 +68,7 @@ private:
         juce::AudioProcessorValueTreeState::ComboBoxAttachment;
 
     HypercolorAudioProcessor& audioProcessor;
+    std::unique_ptr<hypercolor::plugin::PresetManager> presetManager;
     hypercolor::ui::HypercolorLookAndFeel lookAndFeel;
     GranularVisualizer granularVisualizer;
     hypercolor::ui::XYController xyController;
@@ -106,6 +112,12 @@ private:
     std::array<juce::TextButton, hypercolor::plugin::maximumFxChainModules> fxRemoveButtons;
     juce::TextButton addFxButton;
     juce::TextButton lfoWorkspaceButton { "MODULATION / LFO" };
+    juce::TextButton previousPresetButton { "‹" };
+    juce::TextButton nextPresetButton { "›" };
+    juce::TextButton presetBrowserButton { "PRESETS" };
+    juce::TextButton presetSaveButton { "SAVE" };
+    juce::TextButton presetSaveAsButton { "SAVE AS" };
+    juce::Label presetNameLabel;
     std::array<juce::Slider, 9> inspectorSliders;
     std::array<hypercolor::ui::PremiumRotaryKnob, 9> fxRotaryKnobs;
     std::array<juce::Label, 9> inspectorLabels;

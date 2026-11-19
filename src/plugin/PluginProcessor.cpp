@@ -13,7 +13,7 @@ namespace
 {
 static_assert(
     std::atomic<float>::is_always_lock_free,
-    "Host BPM cache must remain lock-free on the audio thread"
+    "Host BPM and LFO waveform snapshots must remain lock-free on the audio thread"
 );
 static_assert(std::atomic<std::uint8_t>::is_always_lock_free
               && std::atomic<std::uint32_t>::is_always_lock_free
@@ -29,7 +29,7 @@ constexpr auto fxMacroAssignmentsStateType = "FX_MACRO_ASSIGNMENTS";
 constexpr auto lfoConfigurationStateType = "LFO_CONFIGURATION";
 constexpr auto nextFxIdentityProperty = "nextFxIdentity";
 constexpr auto nextLfoIdentityProperty = "nextLfoIdentity";
-constexpr int currentStateSchemaVersion = 7;
+constexpr int currentStateSchemaVersion = 8;
 // Large enough to leave room for future bounded preset/state data while still
 // rejecting clearly unreasonable input before parsing it as XML.
 constexpr int maxStateSizeBytes = 64 * 1024 * 1024;
@@ -1110,6 +1110,10 @@ void HypercolorAudioProcessor::processBlock(
     applyFxChainConfiguration();
     applyFxMacroAssignmentSnapshot();
     applyLfoConfigurationSnapshot();
+    for (auto& type : audioFxLfoOverrides)
+        for (auto& slot : type)
+            for (auto& parameter : slot)
+                parameter = {};
     const auto bpmForBlock = readHostBpm();
     currentBlockBpm = bpmForBlock;
     currentBlockPpqValid = false;
@@ -1563,6 +1567,12 @@ void HypercolorAudioProcessor::processChunk(
     else
     {
         effectResult = effectChain.process(effectBlock);
+        const auto ppq = currentBlockPpqValid
+            ? std::optional<double>(currentBlockPpq
+                + static_cast<double>(startSample) * currentBlockBpm / 60.0
+                    / juce::jmax(1.0, getSampleRate()))
+            : std::nullopt;
+        advanceLfoPhases(currentBlockBpm, ppq, numSamples);
     }
     const auto useDryFallback = granularResult
             == hypercolor::dsp::granular::GranularEngineProcessResult::engineNotPrepared
@@ -1743,6 +1753,9 @@ void HypercolorAudioProcessor::getStateInformation(
     state.addChild(assignmentState, -1, nullptr);
 
     const auto lfoConfiguration = getLfoConfiguration();
+    const auto previousLfoState = state.getChildWithName(lfoConfigurationStateType);
+    if (previousLfoState.isValid())
+        state.removeChild(previousLfoState, nullptr);
     juce::ValueTree lfoState(lfoConfigurationStateType);
     for (std::size_t i = 0; i < lfoConfiguration.moduleCount; ++i)
     {
@@ -1757,6 +1770,14 @@ void HypercolorAudioProcessor::getStateInformation(
         entry.setProperty("depth", module.depth, nullptr);
         entry.setProperty("phase", module.phase, nullptr);
         entry.setProperty("offset", module.offset, nullptr);
+        entry.setProperty("smooth", module.smooth, nullptr);
+        juce::String waveformData;
+        for (std::size_t sample = 0; sample < module.customWaveform.size(); ++sample)
+        {
+            if (sample != 0) waveformData << ',';
+            waveformData << juce::String(module.customWaveform[sample], 6);
+        }
+        entry.setProperty("customWaveform", waveformData, nullptr);
         lfoState.addChild(entry, -1, nullptr);
     }
     for (std::size_t i = 0; i < lfoConfiguration.assignmentCount; ++i)
@@ -1940,13 +1961,14 @@ void HypercolorAudioProcessor::setStateInformation(
                 const auto waveform = static_cast<int>(entry.getProperty("waveform", -1));
                 const auto rateMode = static_cast<int>(entry.getProperty("rateMode", -1));
                 const auto division = static_cast<int>(entry.getProperty("division", -1));
+                const auto maximumWaveform = schemaVersion >= 8 ? 6 : 5;
                 if (!readFiniteNumber(entry.getProperty("identity"), identity)
                     || identity < 1.0 || identity > 9007199254740991.0 || identity != std::floor(identity)
                     || !readFiniteNumber(entry.getProperty("rateHz"), rate)
                     || !readFiniteNumber(entry.getProperty("depth"), depth)
                     || !readFiniteNumber(entry.getProperty("phase"), phase)
                     || !readFiniteNumber(entry.getProperty("offset"), offset)
-                    || waveform < 0 || waveform > 5 || rateMode < 0 || rateMode > 1
+                    || waveform < 0 || waveform > maximumWaveform || rateMode < 0 || rateMode > 1
                     || division < 0 || division >= static_cast<int>(hypercolor::plugin::lfoDivisionLabels.size()))
                     return;
                 auto& module = restoredLfos.modules[restoredLfos.moduleCount++];
@@ -1959,6 +1981,36 @@ void HypercolorAudioProcessor::setStateInformation(
                 module.depth = static_cast<float>(depth);
                 module.phase = static_cast<float>(phase);
                 module.offset = static_cast<float>(offset);
+                double smooth = 0.0;
+                if (entry.hasProperty("smooth"))
+                {
+                    if (readFiniteNumber(entry.getProperty("smooth"), smooth)
+                        && smooth >= 0.0 && smooth <= 1.0)
+                        module.smooth = static_cast<float>(smooth);
+                    else
+                        module.smooth = 0.0f;
+                }
+                if (entry.hasProperty("customWaveform"))
+                {
+                    const auto encoded = entry.getProperty("customWaveform").toString();
+                    const auto samples = juce::StringArray::fromTokens(encoded, ",", "");
+                    if (samples.size() == static_cast<int>(module.customWaveform.size()))
+                    {
+                        bool validWave = true;
+                        for (int sample = 0; sample < samples.size(); ++sample)
+                        {
+                            double value = 0.0;
+                            if (!readFiniteNumber(samples[sample], value)
+                                || value < -1.0 || value > 1.0)
+                            { validWave = false; break; }
+                            module.customWaveform[static_cast<std::size_t>(sample)] = static_cast<float>(value);
+                        }
+                        if (validWave)
+                            module.customWaveform.back() = module.customWaveform.front();
+                        else
+                            module.customWaveform = hypercolor::dsp::modulation::Lfo::makeDefaultCustomWaveform();
+                    }
+                }
             }
             else if (entry.hasType("ASSIGNMENT"))
             {
@@ -2631,6 +2683,13 @@ std::uint32_t HypercolorAudioProcessor::getLfoConfigurationRevision() const noex
     return lfoConfigurationSequence.load(std::memory_order_acquire);
 }
 
+float HypercolorAudioProcessor::getLfoPhaseForDisplay(std::size_t moduleIndex) const noexcept
+{
+    if (moduleIndex >= lfoDisplayPhases.size())
+        return 0.0f;
+    return lfoDisplayPhases[moduleIndex].load(std::memory_order_relaxed);
+}
+
 std::uint64_t HypercolorAudioProcessor::allocateLfoIdentity() noexcept
 {
     return nextLfoIdentity.fetch_add(1, std::memory_order_relaxed);
@@ -2648,25 +2707,35 @@ bool HypercolorAudioProcessor::setLfoConfiguration(
     const juce::ScopedLock lock(lfoConfigurationLock);
     const auto chain = getFxChainConfiguration();
     std::array<LfoModuleRuntime, maximumLfoModules> modules {};
+    std::array<hypercolor::dsp::modulation::Lfo::CustomWaveform, maximumLfoModules>
+        preparedWaveforms {};
     std::array<LfoAssignmentRuntime, maximumLfoAssignments> assignments {};
     for (std::size_t i = 0; i < configuration.moduleCount; ++i)
     {
         const auto& source = configuration.modules[i];
         if (source.stableIdentity == 0 || source.stableIdentity > 9007199254740991ull
-            || static_cast<std::uint8_t>(source.waveform) > static_cast<std::uint8_t>(Waveform::sampleAndHold)
+            || static_cast<std::uint8_t>(source.waveform) > static_cast<std::uint8_t>(Waveform::custom)
             || static_cast<std::uint8_t>(source.rateMode) > 1
             || static_cast<std::uint8_t>(source.division) >= lfoDivisionLabels.size()
             || !std::isfinite(source.rateHz) || source.rateHz < 0.0f || source.rateHz > 40.0f
             || !std::isfinite(source.depth) || source.depth < 0.0f || source.depth > 1.0f
             || !std::isfinite(source.phase) || source.phase < 0.0f || source.phase > 1.0f
-            || !std::isfinite(source.offset) || source.offset < -1.0f || source.offset > 1.0f)
+            || !std::isfinite(source.offset) || source.offset < -1.0f || source.offset > 1.0f
+            || !std::isfinite(source.smooth) || source.smooth < 0.0f || source.smooth > 1.0f)
             return false;
+        for (const auto sample : source.customWaveform)
+            if (!std::isfinite(sample) || sample < -1.0f || sample > 1.0f)
+                return false;
         for (std::size_t j = 0; j < i; ++j)
             if (configuration.modules[j].stableIdentity == source.stableIdentity)
                 return false;
         modules[i] = { source.stableIdentity, source.enabled, source.waveform,
             source.rateMode, source.division, source.rateHz, source.depth,
             source.phase, source.offset };
+        hypercolor::dsp::modulation::Lfo::CustomWaveform raw = source.customWaveform;
+        raw.back() = raw.front();
+        hypercolor::dsp::modulation::Lfo::prepareCustomWaveform(raw, source.smooth, preparedWaveforms[i]);
+        modules[i].customWaveform = preparedWaveforms[i];
     }
 
     for (std::size_t i = 0; i < configuration.assignmentCount; ++i)
@@ -2766,6 +2835,10 @@ bool HypercolorAudioProcessor::setLfoConfiguration(
         destination.depth.store(active ? modules[i].depth : 1.0f, std::memory_order_relaxed);
         destination.phase.store(active ? modules[i].phase : 0.0f, std::memory_order_relaxed);
         destination.offset.store(active ? modules[i].offset : 0.0f, std::memory_order_relaxed);
+        for (std::size_t sample = 0; sample < destination.customWaveform.size(); ++sample)
+            destination.customWaveform[sample].store(
+                active ? preparedWaveforms[i][sample] : 0.0f,
+                std::memory_order_relaxed);
     }
     for (std::size_t i = 0; i < maximumLfoAssignments; ++i)
     {
@@ -2790,6 +2863,9 @@ bool HypercolorAudioProcessor::setLfoConfiguration(
     lfoAssignmentCount.store(configuration.assignmentCount, std::memory_order_relaxed);
     lfoConfigurationSequence.fetch_add(1, std::memory_order_release);
     lfoConfigurationMessageThread = configuration;
+    for (std::size_t i = 0; i < lfoConfigurationMessageThread.moduleCount; ++i)
+        lfoConfigurationMessageThread.modules[i].customWaveform.back()
+            = lfoConfigurationMessageThread.modules[i].customWaveform.front();
     std::uint64_t nextIdentity = 1;
     for (std::size_t i = 0; i < configuration.moduleCount; ++i)
         nextIdentity = std::max(nextIdentity, configuration.modules[i].stableIdentity + 1);
@@ -2960,6 +3036,9 @@ void HypercolorAudioProcessor::applyLfoConfigurationSnapshot() noexcept
         return;
     const auto previousModules = audioLfoModules;
     const auto previousOscillators = lfoOscillators;
+    auto nextModules = audioLfoModules;
+    auto nextOscillators = lfoOscillators;
+    auto nextAssignments = audioLfoAssignments;
     const auto moduleCount = lfoModuleCount.load(std::memory_order_relaxed);
     const auto assignmentCount = lfoAssignmentCount.load(std::memory_order_relaxed);
     if (moduleCount > hypercolor::plugin::maximumLfoModules
@@ -2969,7 +3048,7 @@ void HypercolorAudioProcessor::applyLfoConfigurationSnapshot() noexcept
     {
         const auto& source = lfoRuntimeAtomic[i];
         const bool active = i < moduleCount;
-        audioLfoModules[i] = {
+        nextModules[i] = {
             active ? source.identity.load(std::memory_order_relaxed) : 0,
             active && source.enabled.load(std::memory_order_relaxed),
             static_cast<hypercolor::dsp::modulation::LfoWaveform>(source.waveform.load(std::memory_order_relaxed)),
@@ -2978,31 +3057,34 @@ void HypercolorAudioProcessor::applyLfoConfigurationSnapshot() noexcept
             source.rateHz.load(std::memory_order_relaxed), source.depth.load(std::memory_order_relaxed),
             source.phase.load(std::memory_order_relaxed), source.offset.load(std::memory_order_relaxed)
         };
+        for (std::size_t sample = 0; sample < nextModules[i].customWaveform.size(); ++sample)
+            nextModules[i].customWaveform[sample] =
+                source.customWaveform[sample].load(std::memory_order_relaxed);
         bool preserved = false;
-        float preservedPhaseSetting = audioLfoModules[i].phase;
+        float preservedPhaseSetting = nextModules[i].phase;
         for (std::size_t old = 0; old < previousModules.size(); ++old)
-            if (active && previousModules[old].identity == audioLfoModules[i].identity)
+            if (active && previousModules[old].identity == nextModules[i].identity)
             {
-                lfoOscillators[i] = previousOscillators[old];
+                nextOscillators[i] = previousOscillators[old];
                 preservedPhaseSetting = previousModules[old].phase;
                 preserved = true;
                 break;
             }
         if (!preserved)
         {
-            const auto identity = audioLfoModules[i].identity;
+            const auto identity = nextModules[i].identity;
             const auto seed = static_cast<std::uint32_t>(identity ^ (identity >> 32u));
-            lfoOscillators[i].reset(seed);
-            lfoOscillators[i].setPhase(audioLfoModules[i].phase);
+            nextOscillators[i].reset(seed);
+            nextOscillators[i].setPhase(nextModules[i].phase);
         }
-        else if (std::abs(preservedPhaseSetting - audioLfoModules[i].phase) > 1.0e-6f)
-            lfoOscillators[i].setPhase(audioLfoModules[i].phase);
+        else if (std::abs(preservedPhaseSetting - nextModules[i].phase) > 1.0e-6f)
+            nextOscillators[i].setPhase(nextModules[i].phase);
     }
     for (std::size_t i = 0; i < hypercolor::plugin::maximumLfoAssignments; ++i)
     {
         const auto& source = lfoAssignmentRuntimeAtomic[i];
         const bool active = i < assignmentCount && source.active.load(std::memory_order_relaxed);
-        audioLfoAssignments[i] = {
+        nextAssignments[i] = {
             active,
             source.lfoIdentity.load(std::memory_order_relaxed),
             source.fxIdentity.load(std::memory_order_relaxed),
@@ -3017,6 +3099,15 @@ void HypercolorAudioProcessor::applyLfoConfigurationSnapshot() noexcept
     }
     if (before != lfoConfigurationSequence.load(std::memory_order_acquire))
         return;
+
+    audioLfoModules = nextModules;
+    lfoOscillators = nextOscillators;
+    audioLfoAssignments = nextAssignments;
+
+    for (auto& type : audioFxLfoOverrides)
+        for (auto& slot : type)
+            for (auto& parameter : slot)
+                parameter = {};
 
     for (auto& type : audioFxLfoRanges)
         for (auto& slot : type)
@@ -3060,8 +3151,11 @@ void HypercolorAudioProcessor::updateLfoOverrides(
         }
         double total = 0.0;
         for (int sample = 0; sample < segmentSamples; ++sample)
-            total += lfoOscillators[i].nextSample(module.waveform);
+            total += lfoOscillators[i].nextSample(module.waveform, 0.0f,
+                                                  &module.customWaveform);
         average[i] = static_cast<float>(total / static_cast<double>(segmentSamples));
+        lfoDisplayPhases[i].store(static_cast<float>(lfoOscillators[i].getPhase()),
+                                  std::memory_order_relaxed);
     }
 
     for (auto& type : audioFxLfoOverrides)
@@ -3121,6 +3215,32 @@ void HypercolorAudioProcessor::updateLfoOverrides(
                     raw = start + std::round((raw - start) / interval) * interval;
                 audioFxLfoOverrides[type][slot][parameter] = { true, juce::jlimit(start, end, raw) };
             }
+}
+
+void HypercolorAudioProcessor::advanceLfoPhases(
+    double bpm, std::optional<double> ppqPosition, int numSamples) noexcept
+{
+    if (numSamples <= 0) return;
+    for (std::size_t i = 0; i < audioLfoModules.size(); ++i)
+    {
+        const auto& module = audioLfoModules[i];
+        if (module.identity == 0 || !module.enabled) continue;
+        lfoOscillators[i].setFrequency(hypercolor::plugin::lfoFrequencyHz(
+            module.rateMode, module.rateHz, module.division, bpm));
+        if (ppqPosition && module.rateMode == hypercolor::plugin::LfoRateMode::bpmSync)
+        {
+            const auto divisionIndex = static_cast<std::size_t>(module.division);
+            if (divisionIndex < hypercolor::plugin::lfoDivisionCyclesPerQuarter.size())
+                lfoOscillators[i].setPhase(*ppqPosition
+                    * hypercolor::plugin::lfoDivisionCyclesPerQuarter[divisionIndex]
+                    + module.phase);
+        }
+        for (int sample = 0; sample < numSamples; ++sample)
+            (void) lfoOscillators[i].nextSample(module.waveform, 0.0f,
+                                                &module.customWaveform);
+        lfoDisplayPhases[i].store(static_cast<float>(lfoOscillators[i].getPhase()),
+                                  std::memory_order_relaxed);
+    }
 }
 
 float HypercolorAudioProcessor::readFxParameterValue(

@@ -1686,8 +1686,13 @@ void testLfoConfigurationAndRuntime(TestContext& context)
     context.expect(source.setFxChainConfiguration(chain), "LFO test configures stable FX identities");
     LfoConfiguration configuration;
     configuration.moduleCount = 2;
-    configuration.modules[0] = { 901, true, LfoWaveform::sawUp, LfoRateMode::free,
+    configuration.modules[0] = { 901, true, LfoWaveform::custom, LfoRateMode::free,
         2.5f, LfoDivision::quarter, 0.8f, 0.125f, 0.0f };
+    configuration.modules[0].smooth = 0.25f;
+    for (std::size_t i = 0; i + 1 < configuration.modules[0].customWaveform.size(); ++i)
+        configuration.modules[0].customWaveform[i] = std::sin(
+            6.28318530718f * static_cast<float>(i) / 255.0f);
+    configuration.modules[0].customWaveform.back() = configuration.modules[0].customWaveform.front();
     configuration.modules[1] = { 902, true, LfoWaveform::triangle, LfoRateMode::bpmSync,
         1.0f, LfoDivision::eighthTriplet, 0.35f, 0.5f, 0.1f };
     configuration.assignmentCount = 4;
@@ -1704,8 +1709,10 @@ void testLfoConfigurationAndRuntime(TestContext& context)
     const auto copied = source.getLfoConfiguration();
     context.expect(copied.moduleCount == 2 && copied.assignmentCount == 4
         && copied.modules[1].rateMode == LfoRateMode::bpmSync
+        && copied.modules[0].waveform == LfoWaveform::custom
+        && std::abs(copied.modules[0].customWaveform[64] - 1.0f) < 0.002f
         && copied.assignments[1].fxInstanceIdentity == 801,
-        "LFO configuration API retains module and stable assignment data");
+        "LFO configuration API retains custom waveform, smooth, module and stable assignment data");
     auto reordered = chain;
     std::swap(reordered.order[0], reordered.order[2]);
     context.expect(source.setFxChainConfiguration(reordered), "FX reorder with LFO mappings is accepted");
@@ -1737,10 +1744,68 @@ void testLfoConfigurationAndRuntime(TestContext& context)
     context.expect(restoredConfig.moduleCount == 2 && restoredConfig.assignmentCount == 4,
         "LFO modules and mappings survive plugin state round trip");
     context.expect(restoredConfig.modules[0].stableIdentity == 901
+        && restoredConfig.modules[0].waveform == LfoWaveform::custom
+        && std::abs(restoredConfig.modules[0].smooth - 0.25f) < 1.0e-6f
+        && std::abs(restoredConfig.modules[0].customWaveform[64] - 1.0f) < 0.002f
         && restoredConfig.modules[1].division == LfoDivision::eighthTriplet
         && restoredConfig.assignments[2].parameterID
             == fxParameterID(FxType::filter, 0, hypercolor::ParameterIDs::filterCutoff),
-        "state restore preserves stable IDs and BPM division mapping");
+        "state restore preserves custom table, smoothing, stable IDs and BPM division mapping");
+    auto editedAfterRestore = restored.getLfoConfiguration();
+    editedAfterRestore.modules[0].customWaveform[80] = 0.375f;
+    context.expect(restored.setLfoConfiguration(editedAfterRestore),
+        "custom waveform remains editable after restoring a project");
+    juce::MemoryBlock resavedState;
+    restored.getStateInformation(resavedState);
+    HypercolorAudioProcessor restoredAgain;
+    restoredAgain.setStateInformation(resavedState.getData(), static_cast<int>(resavedState.getSize()));
+    context.expectNear(restoredAgain.getLfoConfiguration().modules[0].customWaveform[80], 0.375, 1.0e-6,
+        "saving after state restore writes the current custom waveform rather than a stale tree copy");
+
+    auto schemaSevenXml = juce::AudioProcessor::getXmlFromBinary(
+        state.getData(), static_cast<int>(state.getSize()));
+    if (schemaSevenXml != nullptr)
+    {
+        schemaSevenXml->setAttribute("schemaVersion", 7);
+        auto lfoNode = schemaSevenXml->getChildByName("LFO_CONFIGURATION");
+        for (int child = 0; child < lfoNode->getNumChildElements(); ++child)
+        {
+            auto entry = lfoNode->getChildElement(child);
+            if (entry != nullptr && entry->hasTagName("LFO"))
+            { entry->setAttribute("waveform", 0); entry->removeAttribute("smooth");
+              entry->removeAttribute("customWaveform"); }
+        }
+        juce::MemoryBlock schemaSevenState;
+        juce::AudioProcessor::copyXmlToBinary(*schemaSevenXml, schemaSevenState);
+        HypercolorAudioProcessor schemaSevenRestored;
+        schemaSevenRestored.setStateInformation(schemaSevenState.getData(),
+                                                static_cast<int>(schemaSevenState.getSize()));
+        const auto oldLfo = schemaSevenRestored.getLfoConfiguration();
+        context.expect(oldLfo.moduleCount == 2 && oldLfo.modules[0].waveform == LfoWaveform::sine
+            && oldLfo.modules[0].smooth == 0.0f
+            && std::abs(oldLfo.modules[0].customWaveform[64] - 1.0f) < 0.002f,
+            "schema 7 LFO state migrates with default custom table and no smoothing");
+    }
+    auto damagedWaveXml = juce::AudioProcessor::getXmlFromBinary(
+        state.getData(), static_cast<int>(state.getSize()));
+    if (damagedWaveXml != nullptr)
+    {
+        auto lfoNode = damagedWaveXml->getChildByName("LFO_CONFIGURATION");
+        auto firstLfo = lfoNode != nullptr ? lfoNode->getChildByName("LFO") : nullptr;
+        if (firstLfo != nullptr)
+        { firstLfo->setAttribute("customWaveform", "not-a-wave");
+          firstLfo->setAttribute("smooth", "NaN"); }
+        juce::MemoryBlock damagedWaveState;
+        juce::AudioProcessor::copyXmlToBinary(*damagedWaveXml, damagedWaveState);
+        HypercolorAudioProcessor damagedWaveRestored;
+        damagedWaveRestored.setStateInformation(damagedWaveState.getData(),
+                                                static_cast<int>(damagedWaveState.getSize()));
+        const auto safeConfig = damagedWaveRestored.getLfoConfiguration();
+        context.expect(safeConfig.moduleCount == 2
+            && safeConfig.modules[0].smooth == 0.0f
+            && std::abs(safeConfig.modules[0].customWaveform[64] - 1.0f) < 0.002f,
+            "corrupt custom table and smooth state fall back to a valid sine shape and zero smooth");
+    }
     auto legacyXml = juce::AudioProcessor::getXmlFromBinary(
         state.getData(), static_cast<int>(state.getSize()));
     if (legacyXml != nullptr)
@@ -1779,8 +1844,12 @@ void testLfoConfigurationAndRuntime(TestContext& context)
         {
             LfoConfiguration active;
             active.moduleCount = 2;
-            active.modules[0] = { 912, true, LfoWaveform::sawUp, LfoRateMode::free,
+            active.modules[0] = { 912, true, LfoWaveform::custom, LfoRateMode::free,
                 1.0f, LfoDivision::quarter, 1.0f, 0.0f, 0.0f };
+            for (std::size_t sample = 0; sample + 1 < active.modules[0].customWaveform.size(); ++sample)
+                active.modules[0].customWaveform[sample] = std::sin(
+                    6.28318530718f * static_cast<float>(sample) / 255.0f);
+            active.modules[0].customWaveform.back() = active.modules[0].customWaveform.front();
             active.modules[1] = { 913, true, LfoWaveform::sine, LfoRateMode::free,
                 3.0f, LfoDivision::quarter, 0.45f, 0.25f, 0.0f };
             active.assignmentCount = 2;
@@ -1848,6 +1917,32 @@ void testLfoConfigurationAndRuntime(TestContext& context)
     const auto syncAtQuarterPhase = processSynced(0.25);
     context.expect(buffersDiffer(syncAtZero, syncAtQuarterPhase, 1.0e-5f),
         "BPM-synced LFO phase follows host PPQ position");
+
+    HypercolorAudioProcessor displayOnly;
+    (void) displayOnly.setBusesLayout({ juce::AudioChannelSet::mono(), juce::AudioChannelSet::mono() });
+    LfoConfiguration displayConfig;
+    displayConfig.moduleCount = 1;
+    displayConfig.modules[0] = { 931, true, LfoWaveform::sine, LfoRateMode::free,
+        2.0f, LfoDivision::quarter, 1.0f, 0.0f, 0.0f };
+    (void) displayOnly.setLfoConfiguration(displayConfig);
+    displayOnly.prepareToPlay(48000.0, 512);
+    for (int block = 0; block < 10; ++block)
+    {
+        juce::AudioBuffer<float> silence(1, 512); silence.clear();
+        displayOnly.processBlock(silence, midi);
+    }
+    const auto visiblePhase = displayOnly.getLfoPhaseForDisplay(0);
+    context.expect(visiblePhase > 0.18f && visiblePhase < 0.25f,
+        "LFO phase advances and is available to UI even without an FX assignment");
+    displayConfig.modules[0].enabled = false;
+    (void) displayOnly.setLfoConfiguration(displayConfig);
+    for (int block = 0; block < 3; ++block)
+    {
+        juce::AudioBuffer<float> silence(1, 512); silence.clear();
+        displayOnly.processBlock(silence, midi);
+    }
+    context.expectNear(displayOnly.getLfoPhaseForDisplay(0), visiblePhase, 1.0e-6,
+        "disabled LFO display phase stops with its modulation");
 
     allocationProbe::count.store(0, std::memory_order_relaxed);
     allocationProbe::enabled.store(true, std::memory_order_relaxed);
@@ -2691,7 +2786,7 @@ void testDensitySyncStateMigration(TestContext& context)
         );
         context.expect(
             migratedXml != nullptr
-                && migratedXml->getIntAttribute("schemaVersion") == 7,
+                && migratedXml->getIntAttribute("schemaVersion") == 8,
             "Migrated state should be saved with the current schema version"
         );
 
@@ -3076,8 +3171,8 @@ void testFxEnableStateMigration(TestContext& context)
     if (currentXml != nullptr)
     {
         context.expect(
-            currentXml->getIntAttribute("schemaVersion") == 7,
-            "Newly saved states should use schema 7"
+            currentXml->getIntAttribute("schemaVersion") == 8,
+            "Newly saved states should use schema 8"
         );
 
         HypercolorAudioProcessor currentRestored;
@@ -4334,7 +4429,7 @@ void testStateRoundTrip(TestContext& context)
 
     if (futureXml != nullptr)
     {
-        futureXml->setAttribute("schemaVersion", 8);
+        futureXml->setAttribute("schemaVersion", 9);
         juce::MemoryBlock futureState;
         juce::AudioProcessor::copyXmlToBinary(*futureXml, futureState);
 

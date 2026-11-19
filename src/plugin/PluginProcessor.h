@@ -68,6 +68,7 @@ public:
     );
     [[nodiscard]] hypercolor::plugin::LfoConfiguration getLfoConfiguration() const;
     [[nodiscard]] std::uint32_t getLfoConfigurationRevision() const noexcept;
+    [[nodiscard]] float getLfoPhaseForDisplay(std::size_t moduleIndex) const noexcept;
     [[nodiscard]] bool setLfoConfiguration(
         const hypercolor::plugin::LfoConfiguration& configuration
     );
@@ -103,6 +104,8 @@ private:
     void applyFxChainConfiguration() noexcept;
     void applyFxMacroAssignmentSnapshot() noexcept;
     void applyLfoConfigurationSnapshot() noexcept;
+    void advanceLfoPhases(double bpm, std::optional<double> ppqPosition,
+                          int numSamples) noexcept;
     void updateFxModuleParameters(double bpm) noexcept;
     void updateLfoOverrides(double bpm, std::optional<double> ppqPosition,
                             int segmentSamples) noexcept;
@@ -292,6 +295,7 @@ private:
         hypercolor::plugin::LfoRateMode rateMode = hypercolor::plugin::LfoRateMode::free;
         hypercolor::plugin::LfoDivision division = hypercolor::plugin::LfoDivision::quarter;
         float rateHz = 1.0f, depth = 1.0f, phase = 0.0f, offset = 0.0f;
+        hypercolor::dsp::modulation::Lfo::CustomWaveform customWaveform {};
     };
     struct LfoAssignmentRuntime
     {
@@ -314,6 +318,8 @@ private:
         std::atomic<bool> enabled { false };
         std::atomic<std::uint8_t> waveform { 0 }, rateMode { 0 }, division { 3 };
         std::atomic<float> rateHz { 1.0f }, depth { 1.0f }, phase { 0.0f }, offset { 0.0f };
+        std::array<std::atomic<float>, hypercolor::dsp::modulation::Lfo::customWaveformSize>
+            customWaveform {};
     };
     struct LfoAssignmentRuntimeAtomic
     {
@@ -332,6 +338,8 @@ private:
         audioLfoAssignments {};
     std::array<hypercolor::dsp::modulation::Lfo, hypercolor::plugin::maximumLfoModules>
         lfoOscillators {};
+    std::array<std::atomic<float>, hypercolor::plugin::maximumLfoModules>
+        lfoDisplayPhases {};
     std::array<std::array<std::array<LfoOverride, 9>, hypercolor::plugin::maximumFxInstancesPerType>,
                hypercolor::plugin::fxTypeCount> audioFxLfoOverrides {};
     std::array<std::array<std::array<LfoTargetRange, 9>, hypercolor::plugin::maximumFxInstancesPerType>,

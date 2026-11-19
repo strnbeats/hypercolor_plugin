@@ -55,6 +55,9 @@ struct LfoModuleConfig
     float depth = 1.0f;
     float phase = 0.0f;
     float offset = 0.0f;
+    float smooth = 0.0f;
+    hypercolor::dsp::modulation::Lfo::CustomWaveform customWaveform
+        = hypercolor::dsp::modulation::Lfo::makeDefaultCustomWaveform();
 };
 
 struct LfoParameterAssignment
@@ -87,6 +90,7 @@ inline constexpr const char* lfoWaveformLabel(
         case W::sawDown: return "Saw Down";
         case W::square: return "Square";
         case W::sampleAndHold: return "Random / S&H";
+        case W::custom: return "Custom";
     }
     return "Sine";
 }

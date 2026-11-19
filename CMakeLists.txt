@@ -79,6 +79,7 @@ target_sources(HYPERCOLOR
         src/plugin/XYController.cpp
         src/plugin/PluginProcessor.cpp
         src/plugin/PluginEditor.cpp
+            src/plugin/PresetManager.cpp
 )
 
 target_include_directories(HYPERCOLOR
