@@ -124,6 +124,26 @@ void setFxValue(HypercolorAudioProcessor& processor, const FxInstanceId& id,
     if (legacy.isNotEmpty())
         (void) setRaw(processor, fxParameterID(id.type, id.slot, legacy.toRawUTF8()), value);
 }
+
+struct FactoryStateBuilder
+{
+    HypercolorAudioProcessor processor;
+    juce::MemoryBlock defaultState;
+
+    FactoryStateBuilder() { processor.getStateInformation(defaultState); }
+    void reset()
+    {
+        processor.setStateInformation(defaultState.getData(), static_cast<int>(defaultState.getSize()));
+        auto& state = processor.getValueTreeState().state;
+        for (const auto* nodeName : { "FX_CHAIN", "FX_MACRO_ASSIGNMENTS", "LFO_CONFIGURATION" })
+        {
+            const auto child = state.getChildWithName(nodeName);
+            if (child.isValid()) state.removeChild(child, nullptr);
+        }
+        for (const auto* property : { "schemaVersion", "nextFxIdentity", "nextLfoIdentity" })
+            state.removeProperty(property, nullptr);
+    }
+};
 }
 
 PresetManager::PresetManager(HypercolorAudioProcessor& processorToUse, juce::File directory)
@@ -189,12 +209,16 @@ bool PresetManager::isModified() const
 void PresetManager::rememberLoaded(const PresetInfo& info, const juce::MemoryBlock& state)
 {
     loadedId = info.id; loadedName = info.name; loadedCategory = info.category;
-    loadedFactory = info.factory; loadedState = state;
+    loadedFactory = info.factory;
+    juce::ignoreUnused(state);
+    loadedState = captureCurrentState();
 }
 
 bool PresetManager::applyState(const juce::MemoryBlock& state)
 {
     if (state.getSize() == 0 || state.getSize() > 4 * 1024 * 1024) return false;
+    const auto xml = processor.getXmlFromBinary(state.getData(), static_cast<int>(state.getSize()));
+    if (xml == nullptr || !xml->hasTagName("HYPERCOLOR_STATE")) return false;
     processor.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
     return true;
 }
@@ -304,6 +328,8 @@ bool PresetManager::readUserPreset(const juce::String& id, PresetInfo& info,
     const auto category = xml->getStringAttribute("category");
     if (presetId != id || !isSafeName(name) || !factoryCategories().contains(category)) return false;
     juce::MemoryBlock binary; processor.copyXmlToBinary(*child, binary);
+    const auto stateXml = processor.getXmlFromBinary(binary.getData(), static_cast<int>(binary.getSize()));
+    if (stateXml == nullptr || !stateXml->hasTagName("HYPERCOLOR_STATE")) return false;
     info = { id, name, category, xml->getStringAttribute("description"), false, false };
     state = binary;
     return state.getSize() > 0;
@@ -312,7 +338,7 @@ bool PresetManager::readUserPreset(const juce::String& id, PresetInfo& info,
 bool PresetManager::writeUserPreset(const PresetInfo& info, const juce::MemoryBlock& state) const
 {
     if (!userRoot.createDirectory() || state.getSize() == 0) return false;
-    const auto xml = processor.getXmlFromBinary(state.getData(), static_cast<int>(state.getSize()));
+    auto xml = processor.getXmlFromBinary(state.getData(), static_cast<int>(state.getSize()));
     if (xml == nullptr) return false;
     juce::XmlElement root("HYPERCOLOR_PRESET");
     root.setAttribute("id", info.id); root.setAttribute("name", info.name);
@@ -346,7 +372,12 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
 {
     const auto rowIndex = id.fromLastOccurrenceOf(".", false, false).getIntValue() - 1;
     if (rowIndex < 0 || rowIndex >= static_cast<int>(factoryRows.size())) return {};
-    HypercolorAudioProcessor factoryProcessor;
+    static FactoryStateBuilder builder;
+    static std::array<juce::MemoryBlock, factoryRows.size()> stateCache;
+    auto& cached = stateCache[static_cast<std::size_t>(rowIndex)];
+    if (cached.getSize() > 0) return cached;
+    builder.reset();
+    auto& factoryProcessor = builder.processor;
     const auto& row = factoryRows[static_cast<std::size_t>(rowIndex)];
     const auto cat = categoryIndex(row.category);
     const auto itemInCategory = [&]
@@ -356,20 +387,24 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
         return count;
     }();
     const auto variant = itemInCategory;
+    const auto variantIndex = static_cast<std::size_t>(variant);
+    const auto variantFloat = static_cast<float>(variant);
 
     static constexpr float sizes[5] { 35.0f, 70.0f, 115.0f, 185.0f, 280.0f };
     static constexpr float densities[5] { 18.0f, 28.0f, 42.0f, 64.0f, 92.0f };
     static constexpr float positions[5] { 0.12f, 0.31f, 0.52f, 0.73f, 0.88f };
     static constexpr float pitches[5] { -7.0f, -2.0f, 0.0f, 3.0f, 7.0f };
-    auto set = [&factoryProcessor](const char* parameter, float value)
+    auto set = [](const char* parameter, float value)
     { (void) setRaw(factoryProcessor, parameter, value); };
     set(ParameterIDs::dryWet, cat >= 5 ? 82.0f : 88.0f);
     set(ParameterIDs::outputGain, cat == 10 ? -5.0f : -2.0f);
-    set(ParameterIDs::grainDensity, densities[(variant + cat) % 5]);
-    set(ParameterIDs::grainSize, sizes[(variant * 2 + cat) % 5]);
-    set(ParameterIDs::grainPosition, positions[(variant + cat * 2) % 5]);
-    set(ParameterIDs::grainPitch, pitches[(variant + cat) % 5]);
+    set(ParameterIDs::grainDensity, densities[(variantIndex + cat) % 5]);
+    set(ParameterIDs::grainSize, sizes[(variantIndex * 2 + cat) % 5]);
+    set(ParameterIDs::grainPosition, positions[(variantIndex + cat * 2) % 5]);
+    set(ParameterIDs::grainPitch, pitches[(variantIndex + cat) % 5]);
     set(ParameterIDs::grainReverse, ((cat == 3 || cat == 10) && (variant % 2 == 1)) ? 1.0f : 0.0f);
+    set(ParameterIDs::grainDensityMode, cat == 7 && variant % 2 == 1 ? 1.0f : 0.0f);
+    set(ParameterIDs::grainDensityDivision, static_cast<float>((variant + 2) % 9));
     set(ParameterIDs::grainPitchRandom, cat == 10 ? 22.0f : (cat == 3 ? 11.0f : 5.0f));
     set(ParameterIDs::grainPositionRandom, cat == 10 ? 30.0f : (cat == 3 ? 18.0f : 7.0f));
     set(ParameterIDs::grainTimingJitter, cat == 8 || cat == 10 ? 15.0f : 4.0f);
@@ -380,7 +415,9 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
     const auto chainLength = cat == 5 || cat == 9 ? 2 : 3;
     for (int i = 0; i < chainLength; ++i)
     {
-        const auto type = categoryChains[cat][static_cast<std::size_t>((i + variant) % 4)];
+        const auto type = (i == 2 && rowIndex % 13 == 4 && chain.count > 0)
+            ? chain.order[0].type
+            : categoryChains[cat][static_cast<std::size_t>((i + variant) % 4)];
         std::uint8_t slot = 0;
         for (std::size_t n = 0; n < chain.count; ++n) if (chain.order[n].type == type) ++slot;
         if (slot >= maximumFxInstancesPerType || chain.count >= maximumFxChainModules) continue;
@@ -394,17 +431,17 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
         switch (type)
         {
             case FxType::space:
-                setFxValue(factoryProcessor, instance, 0, cat == 3 ? 24.0f : 20.0f + variant * 5.0f);
-                setFxValue(factoryProcessor, instance, 1, 38.0f + variant * 9.0f);
-                setFxValue(factoryProcessor, instance, 2, cat == 3 || cat == 4 ? 7.0f : 2.8f + variant * 0.5f);
+                setFxValue(factoryProcessor, instance, 0, cat == 3 ? 24.0f : 20.0f + variantFloat * 5.0f);
+                setFxValue(factoryProcessor, instance, 1, 38.0f + variantFloat * 9.0f);
+                setFxValue(factoryProcessor, instance, 2, cat == 3 || cat == 4 ? 7.0f : 2.8f + variantFloat * 0.5f);
                 setFxValue(factoryProcessor, instance, 3, 48.0f);
                 setFxValue(factoryProcessor, instance, 4, cat == 3 ? 36.0f : 12.0f);
                 setFxValue(factoryProcessor, instance, 5, cat == 9 ? 100.0f : 125.0f);
                 break;
             case FxType::modulation:
                 setFxValue(factoryProcessor, instance, 0, variant % 3 == 0 ? 1.0f : 0.0f);
-                setFxValue(factoryProcessor, instance, 1, 0.15f + 0.11f * (variant + 1));
-                setFxValue(factoryProcessor, instance, 2, 24.0f + variant * 8.0f);
+                setFxValue(factoryProcessor, instance, 1, 0.15f + 0.11f * static_cast<float>(variant + 1));
+                setFxValue(factoryProcessor, instance, 2, 24.0f + variantFloat * 8.0f);
                 setFxValue(factoryProcessor, instance, 3, 5.0f);
                 setFxValue(factoryProcessor, instance, 4, variant % 2 ? 12.0f : -8.0f);
                 setFxValue(factoryProcessor, instance, 5, cat == 8 ? 22.0f : 30.0f);
@@ -412,37 +449,37 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
                 break;
             case FxType::drive:
                 setFxValue(factoryProcessor, instance, 0, variant % 3 == 0 ? 2.0f : 0.0f);
-                setFxValue(factoryProcessor, instance, 1, cat == 9 ? 3.0f : 5.0f + variant * 2.0f);
+                setFxValue(factoryProcessor, instance, 1, cat == 9 ? 3.0f : 5.0f + variantFloat * 2.0f);
                 setFxValue(factoryProcessor, instance, 2, 52.0f);
                 setFxValue(factoryProcessor, instance, 3, 70.0f);
                 setFxValue(factoryProcessor, instance, 4, -2.0f);
                 break;
             case FxType::tape:
-                setFxValue(factoryProcessor, instance, 0, 24.0f + variant * 7.0f);
-                setFxValue(factoryProcessor, instance, 1, 12.0f + variant * 4.0f);
-                setFxValue(factoryProcessor, instance, 2, 8.0f + variant * 3.0f);
-                setFxValue(factoryProcessor, instance, 3, 20.0f + variant * 5.0f);
+                setFxValue(factoryProcessor, instance, 0, 24.0f + variantFloat * 7.0f);
+                setFxValue(factoryProcessor, instance, 1, 12.0f + variantFloat * 4.0f);
+                setFxValue(factoryProcessor, instance, 2, 8.0f + variantFloat * 3.0f);
+                setFxValue(factoryProcessor, instance, 3, 20.0f + variantFloat * 5.0f);
                 setFxValue(factoryProcessor, instance, 4, 28.0f);
                 setFxValue(factoryProcessor, instance, 5, -1.0f);
                 break;
             case FxType::bitcrush:
-                setFxValue(factoryProcessor, instance, 0, cat == 10 ? 10.0f : 12.0f - variant);
-                setFxValue(factoryProcessor, instance, 1, 18000.0f - variant * 1200.0f);
+                setFxValue(factoryProcessor, instance, 0, cat == 10 ? 10.0f : 12.0f - variantFloat);
+                setFxValue(factoryProcessor, instance, 1, 18000.0f - variantFloat * 1200.0f);
                 setFxValue(factoryProcessor, instance, 2, variant % 2 ? 1.0f : 0.0f);
                 setFxValue(factoryProcessor, instance, 3, 28.0f);
                 setFxValue(factoryProcessor, instance, 4, -2.0f);
                 break;
             case FxType::filter:
                 setFxValue(factoryProcessor, instance, 0, 0.0f);
-                setFxValue(factoryProcessor, instance, 1, cat == 9 ? 5000.0f : 11000.0f - variant * 1000.0f);
-                setFxValue(factoryProcessor, instance, 2, 25.0f + variant * 6.0f);
+                setFxValue(factoryProcessor, instance, 1, cat == 9 ? 5000.0f : 11000.0f - variantFloat * 1000.0f);
+                setFxValue(factoryProcessor, instance, 2, 25.0f + variantFloat * 6.0f);
                 setFxValue(factoryProcessor, instance, 3, cat == 9 ? 3.0f : 0.5f);
                 setFxValue(factoryProcessor, instance, 4, 70.0f);
                 setFxValue(factoryProcessor, instance, 5, -1.0f);
                 break;
             case FxType::dynamics:
                 setFxValue(factoryProcessor, instance, 0, cat == 5 || cat == 9 ? -12.0f : -18.0f);
-                setFxValue(factoryProcessor, instance, 1, 3.0f + variant * 0.7f);
+                setFxValue(factoryProcessor, instance, 1, 3.0f + variantFloat * 0.7f);
                 setFxValue(factoryProcessor, instance, 2, 12.0f);
                 setFxValue(factoryProcessor, instance, 3, 110.0f);
                 setFxValue(factoryProcessor, instance, 4, 6.0f);
@@ -453,9 +490,9 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
             case FxType::delay:
                 setFxValue(factoryProcessor, instance, 0, variant % 2 ? 1.0f : 0.0f);
                 setFxValue(factoryProcessor, instance, 1, 0.0f);
-                setFxValue(factoryProcessor, instance, 2, 180.0f + variant * 65.0f);
+                setFxValue(factoryProcessor, instance, 2, 180.0f + variantFloat * 65.0f);
                 setFxValue(factoryProcessor, instance, 3, 2.0f);
-                setFxValue(factoryProcessor, instance, 4, 24.0f + variant * 8.0f);
+                setFxValue(factoryProcessor, instance, 4, 24.0f + variantFloat * 8.0f);
                 setFxValue(factoryProcessor, instance, 5, 120.0f);
                 setFxValue(factoryProcessor, instance, 6, 12000.0f);
                 setFxValue(factoryProcessor, instance, 7, 24.0f);
@@ -470,12 +507,19 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
     {
         FxMacroAssignmentSet macros;
         macros.count = 2;
-        macros.assignments[0] = { MacroAxis::x, chain.order[0].stableIdentity,
-            fxParameterID(chain.order[0].type, chain.order[0].slot,
-                          legacyFxParameter(chain.order[0].type, 0).toRawUTF8()), 0.0f, 1.0f };
-        macros.assignments[1] = { MacroAxis::y, chain.order[0].stableIdentity,
-            fxParameterID(chain.order[0].type, chain.order[0].slot,
-                          legacyFxParameter(chain.order[0].type, 1).toRawUTF8()), 0.0f, 1.0f };
+        for (std::size_t assignmentIndex = 0; assignmentIndex < macros.count; ++assignmentIndex)
+        {
+            const auto parameterIndex = assignmentIndex;
+            const auto parameterID = fxParameterID(chain.order[0].type, chain.order[0].slot,
+                legacyFxParameter(chain.order[0].type, parameterIndex).toRawUTF8());
+            auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(
+                factoryProcessor.getValueTreeState().getParameter(parameterID));
+            if (ranged == nullptr) { macros.count = 0; break; }
+            const auto range = ranged->getNormalisableRange();
+            macros.assignments[assignmentIndex] = {
+                assignmentIndex == 0 ? MacroAxis::x : MacroAxis::y,
+                chain.order[0].stableIdentity, parameterID, range.start, range.end };
+        }
         (void) factoryProcessor.setFxMacroAssignments(macros);
     }
     if (rowIndex % 4 == 1 && chain.count > 0)
@@ -483,7 +527,7 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
         LfoConfiguration lfos;
         lfos.moduleCount = 1;
         auto& lfo = lfos.modules[0]; lfo.stableIdentity = 20000u + static_cast<std::uint64_t>(rowIndex);
-        lfo.enabled = true; lfo.waveform = rowIndex == 47 ? dsp::modulation::LfoWaveform::custom : dsp::modulation::LfoWaveform::sine;
+        lfo.enabled = true; lfo.waveform = rowIndex == 49 ? dsp::modulation::LfoWaveform::custom : dsp::modulation::LfoWaveform::sine;
         lfo.rateHz = 0.18f + 0.09f * static_cast<float>(variant);
         lfo.depth = 0.35f; lfo.phase = 0.0f; lfo.offset = 0.0f;
         if (lfo.waveform == dsp::modulation::LfoWaveform::custom)
@@ -494,10 +538,11 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
                     * static_cast<float>(i) / static_cast<float>(lfo.customWaveform.size()));
         lfos.assignments[0] = { lfo.stableIdentity, chain.order[0].stableIdentity,
             fxParameterID(chain.order[0].type, chain.order[0].slot,
-                          legacyFxParameter(chain.order[0].type, 0).toRawUTF8()), 0.16f, true, false };
+                          legacyFxParameter(chain.order[0].type, 1).toRawUTF8()), 0.16f, true, false };
         lfos.assignmentCount = 1;
         (void) factoryProcessor.setLfoConfiguration(lfos);
     }
-    juce::MemoryBlock state; factoryProcessor.getStateInformation(state); return state;
+    factoryProcessor.getStateInformation(cached);
+    return cached;
 }
 }

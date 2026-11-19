@@ -1847,16 +1847,25 @@ private:
     void renameSelected()
     {
         const auto* info = selectedInfo(); if (info == nullptr || info->factory) return;
-        juce::AlertWindow::showAsync(juce::MessageBoxOptions().withIconType(juce::MessageBoxIconType::NoIcon)
-            .withTitle("Rename Preset").withMessage("Enter a new preset name.").withButton("Rename")
-            .withButton("Cancel").withTextEditor("name", info->name),
-            [this, id = info->id](int result)
+        const auto id = info->id;
+        auto alert = std::make_unique<juce::AlertWindow>("Rename Preset",
+            "Enter a new preset name.", juce::MessageBoxIconType::NoIcon);
+        alert->addTextEditor("name", info->name);
+        alert->addButton("Rename", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        alert->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+        alert->enterModalState(true, juce::ModalCallbackFunction::create(
+            [safePanel = juce::Component::SafePointer<PresetBrowserPanel>(this), id,
+             safeAlert = juce::Component::SafePointer<juce::AlertWindow>(alert.get())](int result)
             {
-                if (result == 1)
-                    if (auto* box = juce::AlertWindow::getCurrentlyModalComponent())
-                        (void) manager.rename(id, box->getTextEditorContents("name"));
-                rebuild(); if (changed) changed();
-            });
+                if (safePanel != nullptr)
+                {
+                    if (result == 1 && safeAlert != nullptr)
+                        (void) safePanel->manager.rename(id, safeAlert->getTextEditorContents("name"));
+                    safePanel->rebuild();
+                    if (safePanel->changed) safePanel->changed();
+                }
+            }), true);
+        alert.release();
     }
     void deleteSelected()
     {
@@ -1864,7 +1873,7 @@ private:
         const auto id = info->id;
         juce::AlertWindow::showAsync(juce::MessageBoxOptions().withIconType(juce::MessageBoxIconType::WarningIcon)
             .withTitle("Delete Preset?").withMessage("This user preset will be removed.")
-            .withButton("Delete").withButton("Cancel"), [this, id](int result)
+            .withButton("Delete", 1).withButton("Cancel", 0), [this, id](int result)
             { if (result == 1) (void) manager.erase(id); rebuild(); if (changed) changed(); });
     }
 
@@ -1965,6 +1974,51 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
       tooltipWindow(this, 500)
 {
     setLookAndFeel(&lookAndFeel);
+    presetManager = std::make_unique<hypercolor::plugin::PresetManager>(processorToEdit);
+
+    presetNameLabel.setJustificationType(juce::Justification::centredLeft);
+    presetNameLabel.setColour(juce::Label::textColourId, hypercolor::ui::palette::text());
+    presetNameLabel.setFont(juce::FontOptions(10.0f).withStyle("Bold"));
+    presetNameLabel.setTooltip("Current preset. An asterisk indicates unsaved changes.");
+    addAndMakeVisible(presetNameLabel);
+    const auto configurePresetButton = [](juce::TextButton& button, juce::Colour accent)
+    {
+        button.setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
+        button.setColour(juce::TextButton::buttonOnColourId, accent.withAlpha(0.24f));
+        button.setColour(juce::TextButton::textColourOffId, accent);
+        button.setColour(juce::TextButton::textColourOnId, hypercolor::ui::palette::text());
+    };
+    for (auto* button : { &previousPresetButton, &nextPresetButton, &presetBrowserButton,
+                          &presetSaveButton, &presetSaveAsButton })
+    {
+        configurePresetButton(*button, hypercolor::ui::palette::cyan());
+        addAndMakeVisible(*button);
+    }
+    previousPresetButton.setTooltip("Load previous preset");
+    nextPresetButton.setTooltip("Load next preset");
+    presetBrowserButton.setTooltip("Browse Factory, User and Favorite presets");
+    presetSaveButton.setTooltip("Save changes to the current User preset; Factory presets use Save As");
+    presetSaveAsButton.setTooltip("Create a new User preset");
+    previousPresetButton.onClick = [this]
+    {
+        const auto all = presetManager->getPresets(); if (all.empty()) return;
+        auto index = 0;
+        for (std::size_t i = 0; i < all.size(); ++i) if (all[i].id == presetManager->currentId()) index = static_cast<int>(i);
+        index = (index + static_cast<int>(all.size()) - 1) % static_cast<int>(all.size());
+        (void) presetManager->load(all[static_cast<std::size_t>(index)].id); refreshPresetHeader();
+    };
+    nextPresetButton.onClick = [this]
+    {
+        const auto all = presetManager->getPresets(); if (all.empty()) return;
+        auto index = -1;
+        for (std::size_t i = 0; i < all.size(); ++i) if (all[i].id == presetManager->currentId()) index = static_cast<int>(i);
+        index = (index + 1) % static_cast<int>(all.size());
+        (void) presetManager->load(all[static_cast<std::size_t>(index)].id); refreshPresetHeader();
+    };
+    presetBrowserButton.onClick = [this] { showPresetBrowser(); };
+    presetSaveButton.onClick = [this] { saveCurrentPreset(); };
+    presetSaveAsButton.onClick = [this] { showSaveAs(); };
+    refreshPresetHeader();
 
     const auto cyan = hypercolor::ui::palette::cyan();
     const auto pink = hypercolor::ui::palette::pink();
@@ -2368,6 +2422,7 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     setResizable(true, true);
     setResizeLimits(760, 560, 1600, 1000);
     setSize(1100, 700);
+    startTimerHz(2);
 }
 
 HypercolorAudioProcessorEditor::~HypercolorAudioProcessorEditor()
@@ -2386,6 +2441,9 @@ HypercolorAudioProcessorEditor::~HypercolorAudioProcessorEditor()
     densityModeSelector.onChange = nullptr;
     macroAssignmentButton.onClick = nullptr;
     lfoWorkspaceButton.onClick = nullptr;
+    previousPresetButton.onClick = nullptr; nextPresetButton.onClick = nullptr;
+    presetBrowserButton.onClick = nullptr; presetSaveButton.onClick = nullptr;
+    presetSaveAsButton.onClick = nullptr;
     xyController.setOnChange(nullptr);
     densityAttachment.reset();
     densityModeAttachment.reset();
@@ -2406,6 +2464,55 @@ void HypercolorAudioProcessorEditor::showLfoWorkspace()
             }
         });
     juce::CallOutBox::launchAsynchronously(std::move(panel), lfoWorkspaceButton, this);
+}
+
+void HypercolorAudioProcessorEditor::showPresetBrowser()
+{
+    juce::Component::SafePointer<HypercolorAudioProcessorEditor> safeEditor(this);
+    auto panel = std::make_unique<PresetBrowserPanel>(*presetManager, [safeEditor]
+    {
+        if (safeEditor != nullptr) safeEditor->refreshPresetHeader();
+    });
+    juce::CallOutBox::launchAsynchronously(std::move(panel), presetBrowserButton, this);
+}
+
+void HypercolorAudioProcessorEditor::showSaveAs()
+{
+    juce::Component::SafePointer<HypercolorAudioProcessorEditor> safeEditor(this);
+    auto panel = std::make_unique<PresetSavePanel>(*presetManager, [safeEditor]
+    {
+        if (safeEditor != nullptr) safeEditor->refreshPresetHeader();
+    });
+    juce::CallOutBox::launchAsynchronously(std::move(panel), presetSaveAsButton, this);
+}
+
+void HypercolorAudioProcessorEditor::saveCurrentPreset()
+{
+    if (presetManager->currentId().isEmpty() || presetManager->currentIsFactory())
+    { showSaveAs(); return; }
+    const auto id = presetManager->currentId();
+    juce::AlertWindow::showAsync(juce::MessageBoxOptions()
+        .withIconType(juce::MessageBoxIconType::WarningIcon)
+        .withTitle("Overwrite User Preset?")
+        .withMessage("Replace the saved state of “" + presetManager->currentName() + "”?")
+        .withButton("Overwrite", 1).withButton("Cancel", 0),
+        [this, id](int result)
+        {
+            if (result == 1) (void) presetManager->overwrite(id);
+            refreshPresetHeader();
+        });
+}
+
+void HypercolorAudioProcessorEditor::refreshPresetHeader()
+{
+    if (presetManager == nullptr) return;
+    const auto name = presetManager->currentName().isNotEmpty()
+        ? presetManager->currentName() : juce::String("Init");
+    const auto source = presetManager->currentId().isEmpty() ? "CURRENT"
+        : (presetManager->currentIsFactory() ? "FACTORY" : "USER");
+    presetNameLabel.setText(name + (presetManager->isModified() ? " *" : ""), juce::dontSendNotification);
+    presetNameLabel.setTooltip(juce::String(source) + "  ·  " + presetManager->currentCategory());
+    repaint(headerArea);
 }
 
 HypercolorAudioProcessorEditor::DensityMode
@@ -2601,7 +2708,7 @@ void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
         header.getRight()
     );
 
-    const auto headerControlWidth = 244.0f;
+    const auto headerControlWidth = juce::jmin(574.0f, header.getWidth() - 204.0f);
     const auto brandWidth = juce::jmin(208.0f, header.getWidth() * 0.32f);
     auto brandArea = header.withTrimmedRight(headerControlWidth + 14.0f)
         .removeFromLeft(brandWidth)
@@ -2636,8 +2743,12 @@ void HypercolorAudioProcessorEditor::paint(juce::Graphics& graphics)
         false
     );
     graphics.setColour(hypercolor::ui::palette::lime());
+    const auto presetStatus = presetManager != nullptr && presetManager->currentId().isNotEmpty()
+        ? juce::String(presetManager->currentIsFactory() ? "FACTORY" : "USER")
+            + "  ·  " + presetManager->currentCategory()
+        : juce::String("UNSAVED STATE");
     graphics.drawText(
-        "PRESET  /  CURRENT STATE",
+        presetStatus,
         statusArea.removeFromTop(18.0f),
         juce::Justification::centredRight,
         false
@@ -3276,11 +3387,9 @@ void HypercolorAudioProcessorEditor::updateEffectVisualTargets(
 
 void HypercolorAudioProcessorEditor::timerCallback()
 {
+    refreshPresetHeader();
     if (selectedModule < 0)
-    {
-        stopTimer();
         return;
-    }
 
     auto stillMoving = false;
     for (std::size_t index = 0; index < effectVisualCurrent.size(); ++index)
@@ -3300,7 +3409,7 @@ void HypercolorAudioProcessorEditor::timerCallback()
 
     repaint(inspectorPanel);
     if (!stillMoving)
-        stopTimer();
+        startTimerHz(2);
 }
 
 void HypercolorAudioProcessorEditor::resized()
@@ -3330,7 +3439,16 @@ void HypercolorAudioProcessorEditor::resized()
     masterPanel = {};
 
     // Global controls stay in the header on every workspace.
-    auto headerControls = headerArea.reduced(8, 6).removeFromRight(244);
+    const auto headerControlWidth = juce::jmin(574, headerArea.getWidth() - 204);
+    auto headerControls = headerArea.reduced(8, 6).removeFromRight(headerControlWidth);
+    auto presetControls = headerControls.removeFromLeft(headerControlWidth - 232);
+    presetNameLabel.setBounds(presetControls.removeFromLeft(80).reduced(3, 2));
+    previousPresetButton.setBounds(presetControls.removeFromLeft(22).reduced(1, 4));
+    nextPresetButton.setBounds(presetControls.removeFromLeft(22).reduced(1, 4));
+    presetControls.removeFromLeft(3);
+    presetBrowserButton.setBounds(presetControls.removeFromLeft(58).reduced(1, 4));
+    presetSaveButton.setBounds(presetControls.removeFromLeft(40).reduced(1, 4));
+    presetSaveAsButton.setBounds(presetControls.removeFromLeft(55).reduced(1, 4));
     auto dryWetBounds = headerControls.removeFromLeft(116).reduced(6, 0);
     auto outputGainBounds = headerControls.removeFromLeft(116).reduced(6, 0);
     // Keep the caption in its own row.  The deliberate gap is larger than

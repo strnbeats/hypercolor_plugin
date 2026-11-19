@@ -2,6 +2,7 @@
 #include "PluginEditor.h"
 #include "GranularVisualizer.h"
 #include "DensitySync.h"
+#include "PresetManager.h"
 
 #include <algorithm>
 #include <array>
@@ -4448,6 +4449,139 @@ void testStateRoundTrip(TestContext& context)
         );
     }
 }
+
+void testPresetLibrary(TestContext& context)
+{
+    HypercolorAudioProcessor processor;
+    const auto testRoot = juce::File::getSpecialLocation(juce::File::tempDirectory)
+        .getChildFile("hypercolor-preset-tests-" + juce::Uuid().toString());
+    hypercolor::plugin::PresetManager presets(processor, testRoot.getChildFile("Presets"));
+    const auto entries = presets.getPresets();
+    context.expect(hypercolor::plugin::PresetManager::factoryCount() == 50,
+                   "factory library contains 50 entries");
+    context.expect(entries.size() == 50, "fresh library lists 50 factory presets");
+    std::array<int, 11> counts {};
+    juce::StringArray ids;
+    for (const auto& entry : entries)
+    {
+        context.expect(entry.factory, "built-in preset is marked factory");
+        context.expect(!ids.contains(entry.id), "factory preset IDs are unique");
+        ids.add(entry.id);
+        const auto& categories = presets.factoryCategories();
+        for (int i = 0; i < categories.size(); ++i)
+            if (categories[i] == entry.category) ++counts[static_cast<std::size_t>(i)];
+    }
+    constexpr std::array<int, 11> expectedCounts { 7, 5, 6, 6, 5, 4, 4, 5, 4, 2, 2 };
+    context.expect(counts == expectedCounts, "factory category counts match specification");
+
+    bool foundDuplicateFx = false, foundMacroPreset = false;
+    bool foundLfoPreset = false, foundCustomLfoPreset = false;
+    for (const auto& entry : entries)
+    {
+        const auto loaded = presets.load(entry.id);
+        context.expect(loaded, "every factory state loads successfully");
+        if (loaded)
+        {
+            juce::MemoryBlock state;
+            processor.getStateInformation(state);
+            const auto xml = juce::AudioProcessor::getXmlFromBinary(
+                state.getData(), static_cast<int>(state.getSize()));
+            context.expect(xml != nullptr, "loaded factory state serializes as valid XML");
+            const auto chain = processor.getFxChainConfiguration();
+            context.expect(chain.count >= 2 && chain.count <= 3,
+                           "factory preset has a bounded, nonempty FX chain");
+            for (std::size_t i = 0; i < chain.count; ++i)
+                for (std::size_t j = i + 1; j < chain.count; ++j)
+                {
+                    context.expect(chain.order[i].stableIdentity != chain.order[j].stableIdentity,
+                                   "FX stable identities are unique within each preset");
+                    foundDuplicateFx |= chain.order[i].type == chain.order[j].type;
+                }
+            foundMacroPreset |= processor.getFxMacroAssignments().count > 0;
+            const auto lfo = processor.getLfoConfiguration();
+            foundLfoPreset |= lfo.moduleCount > 0;
+            for (std::size_t i = 0; i < lfo.moduleCount; ++i)
+                foundCustomLfoPreset |= lfo.modules[i].waveform
+                    == hypercolor::dsp::modulation::LfoWaveform::custom;
+        }
+        context.expect(!presets.isModified(), "factory load starts in clean state");
+    }
+    context.expect(foundDuplicateFx, "factory library includes a meaningful duplicate FX instance");
+    context.expect(foundMacroPreset, "factory library includes XY Macro assignments");
+    context.expect(foundLfoPreset && foundCustomLfoPreset,
+                   "factory library includes standard and Custom LFO configurations");
+    context.expect(!presets.overwrite("factory.01"), "factory preset cannot be overwritten");
+    context.expect(presets.load("factory.06"), "factory preset with macro and LFO bindings loads");
+    auto customState = processor.getLfoConfiguration();
+    if (customState.moduleCount > 0)
+    {
+        customState.modules[0].waveform = hypercolor::dsp::modulation::LfoWaveform::custom;
+        customState.modules[0].customWaveform =
+            hypercolor::dsp::modulation::Lfo::makeDefaultCustomWaveform();
+        customState.modules[0].customWaveform[40] = 0.82f;
+        (void) processor.setLfoConfiguration(customState);
+    }
+    setParameter(processor, hypercolor::ParameterIDs::grainSize, 321.0f);
+    context.expect(presets.isModified(), "parameter changes mark loaded factory as modified");
+    const auto savedChain = processor.getFxChainConfiguration();
+    const auto savedMacros = processor.getFxMacroAssignments();
+    const auto savedLfos = processor.getLfoConfiguration();
+    context.expect(presets.saveAs("User Sketch", "Atmosphere", "Temporary test preset"),
+                   "Save As writes a user preset");
+    const auto userId = presets.currentId();
+    context.expect(!userId.startsWith("factory."), "Save As creates a distinct user identity");
+    setParameter(processor, hypercolor::ParameterIDs::grainSize, 410.0f);
+    context.expect(presets.overwrite(userId), "user preset can be overwritten");
+    context.expect(presets.setFavorite(userId, true), "user preset can be favorited");
+    context.expect(presets.rename(userId, "Renamed Sketch"), "user preset can be renamed");
+    setParameter(processor, hypercolor::ParameterIDs::grainSize, 100.0f);
+    context.expect(presets.load(userId), "saved user preset can be loaded");
+    context.expect(std::abs(getParameterValue(processor, hypercolor::ParameterIDs::grainSize) - 410.0f) < 0.1f,
+                   "user load restores the saved parameter value");
+    const auto listed = presets.getPresets();
+    const auto renamed = std::find_if(listed.begin(), listed.end(), [&userId](const auto& p) { return p.id == userId; });
+    context.expect(renamed != listed.end() && renamed->name == "Renamed Sketch" && renamed->favorite,
+                   "renamed user preset and favorite persist in library listing");
+    HypercolorAudioProcessor restartedProcessor;
+    hypercolor::plugin::PresetManager restarted(restartedProcessor, testRoot.getChildFile("Presets"));
+    context.expect(restarted.load(userId), "user preset loads from a new manager instance");
+    context.expect(std::abs(getParameterValue(restartedProcessor, hypercolor::ParameterIDs::grainSize) - 410.0f) < 0.1f,
+                   "user preset survives manager and processor recreation");
+    const auto restartedChain = restartedProcessor.getFxChainConfiguration();
+    context.expect(restartedChain.count == savedChain.count,
+                   "user state restores the complete FX chain");
+    for (std::size_t i = 0; i < juce::jmin<std::size_t>(restartedChain.count, savedChain.count); ++i)
+        context.expect(restartedChain.order[i].stableIdentity == savedChain.order[i].stableIdentity,
+                       "user state preserves stable FX instance identities");
+    context.expect(restartedProcessor.getFxMacroAssignments().count == savedMacros.count,
+                   "user state restores XY macro assignments");
+    const auto restoredLfos = restartedProcessor.getLfoConfiguration();
+    context.expect(restoredLfos.moduleCount == savedLfos.moduleCount,
+                   "user state restores LFO modules");
+    if (restoredLfos.moduleCount > 0 && savedLfos.moduleCount > 0)
+    {
+        context.expect(restoredLfos.modules[0].waveform == savedLfos.modules[0].waveform,
+                       "user state restores Custom LFO waveform selection");
+        context.expect(std::abs(restoredLfos.modules[0].customWaveform[40]
+                                - savedLfos.modules[0].customWaveform[40]) < 0.001f,
+                       "user state restores Custom LFO waveform samples");
+    }
+    const auto restartedListing = restarted.getPresets();
+    const auto restartedUser = std::find_if(restartedListing.begin(), restartedListing.end(), [&userId](const auto& p) { return p.id == userId; });
+    context.expect(restartedUser != restartedListing.end() && restartedUser->favorite,
+                   "favorite status persists across manager recreation");
+    const auto brokenFile = testRoot.getChildFile("Presets").getChildFile("broken.hxpreset");
+    context.expect(brokenFile.replaceWithText("not a preset"), "malformed preset test file can be created");
+    const auto afterMalformed = restarted.getPresets();
+    context.expect(std::none_of(afterMalformed.begin(), afterMalformed.end(),
+                   [](const auto& p) { return p.id == "broken"; }),
+                   "malformed user preset is ignored safely");
+    context.expect(presets.erase(userId), "user preset can be deleted");
+    context.expect(!presets.load(userId), "deleted preset cannot be loaded");
+    context.expect(!presets.rename("factory.01", "Changed Factory"), "factory preset cannot be renamed");
+    context.expect(!presets.erase("factory.01"), "factory preset cannot be deleted");
+    (void) testRoot.deleteRecursively();
+}
 }
 
 int main()
@@ -4483,6 +4617,7 @@ int main()
     testFxRotaryPagesAndReactiveBackdrop(context);
     testGranularVisualizerTelemetry(context);
     testGranularVisualizerGrainsAndLifecycle(context);
+    testPresetLibrary(context);
 
     if (context.getFailures() == 0)
     {
