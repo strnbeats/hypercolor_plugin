@@ -394,8 +394,9 @@ juce::MemoryBlock PresetManager::makeFactoryState(const juce::String& id) const
     static constexpr float densities[5] { 18.0f, 28.0f, 42.0f, 64.0f, 92.0f };
     static constexpr float positions[5] { 0.12f, 0.31f, 0.52f, 0.73f, 0.88f };
     static constexpr float pitches[5] { -7.0f, -2.0f, 0.0f, 3.0f, 7.0f };
-    auto set = [](const char* parameter, float value)
-    { (void) setRaw(factoryProcessor, parameter, value); };
+    auto* factoryProcessorPtr = &factoryProcessor;
+    auto set = [factoryProcessorPtr](const char* parameter, float value)
+    { (void) setRaw(*factoryProcessorPtr, parameter, value); };
     set(ParameterIDs::dryWet, cat >= 5 ? 82.0f : 88.0f);
     set(ParameterIDs::outputGain, cat == 10 ? -5.0f : -2.0f);
     set(ParameterIDs::grainDensity, densities[(variantIndex + cat) % 5]);
