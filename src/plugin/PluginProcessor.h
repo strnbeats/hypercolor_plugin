@@ -1,9 +1,11 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <optional>
 
 #include "PluginParameters.h"
 #include "FxRackConfig.h"
+#include "LfoConfig.h"
 #include "dsp/granular/GranularEngine.h"
 #include "dsp/fx/EffectChain.h"
 #include "dsp/fx/SpaceReverb.h"
@@ -58,6 +60,18 @@ public:
     [[nodiscard]] bool setFxChainConfiguration(
         const hypercolor::plugin::FxChainConfiguration& configuration
     ) noexcept;
+    [[nodiscard]] std::uint64_t allocateFxInstanceIdentity() noexcept;
+    [[nodiscard]] hypercolor::plugin::FxMacroAssignmentSet
+        getFxMacroAssignments() const;
+    [[nodiscard]] bool setFxMacroAssignments(
+        const hypercolor::plugin::FxMacroAssignmentSet& assignments
+    );
+    [[nodiscard]] hypercolor::plugin::LfoConfiguration getLfoConfiguration() const;
+    [[nodiscard]] std::uint32_t getLfoConfigurationRevision() const noexcept;
+    [[nodiscard]] bool setLfoConfiguration(
+        const hypercolor::plugin::LfoConfiguration& configuration
+    );
+    [[nodiscard]] std::uint64_t allocateLfoIdentity() noexcept;
 
     // Single-consumer API for the message thread. Sequence numbers identify
     // publication attempts; gaps mean snapshots were dropped because the
@@ -87,6 +101,19 @@ private:
     ) noexcept;
     void publishGranularTelemetry(int processedSamples) noexcept;
     void applyFxChainConfiguration() noexcept;
+    void applyFxMacroAssignmentSnapshot() noexcept;
+    void applyLfoConfigurationSnapshot() noexcept;
+    void updateFxModuleParameters(double bpm) noexcept;
+    void updateLfoOverrides(double bpm, std::optional<double> ppqPosition,
+                            int segmentSamples) noexcept;
+    [[nodiscard]] float readFxParameterValue(
+        std::size_t type, std::size_t slot, std::size_t parameterIndex,
+        float fallback = 0.0f
+    ) const noexcept;
+    [[nodiscard]] float readFxBaseParameterValue(
+        std::size_t type, std::size_t slot, std::size_t parameterIndex,
+        float fallback = 0.0f
+    ) const noexcept;
 
     juce::AudioProcessorValueTreeState parameters;
 
@@ -107,6 +134,8 @@ private:
     std::atomic<float>* grainStereoSpreadParameter = nullptr;
     std::atomic<float>* grainPanRandomParameter = nullptr;
     std::atomic<float>* grainEnvelopeParameter = nullptr;
+    std::atomic<float>* macroXParameter = nullptr;
+    std::atomic<float>* macroYParameter = nullptr;
     std::atomic<float>* reverbEnabledParameter = nullptr;
     std::atomic<float>* reverbMixParameter = nullptr;
     std::atomic<float>* reverbSizeParameter = nullptr;
@@ -206,6 +235,117 @@ private:
     std::atomic<std::uint8_t> fxConfigurationCount { 0 };
     std::array<std::atomic<std::uint8_t>, hypercolor::plugin::maximumFxChainModules>
         fxConfigurationPacked {};
+    std::array<std::atomic<std::uint64_t>, hypercolor::plugin::maximumFxChainModules>
+        fxConfigurationIdentities {};
+    std::atomic<std::uint64_t> nextFxInstanceIdentity { 25 };
+    std::array<std::array<std::uint64_t, hypercolor::plugin::maximumFxInstancesPerType>,
+               hypercolor::plugin::fxTypeCount> audioFxInstanceIdentities {};
+
+    struct MacroAssignmentRuntimeAtomic
+    {
+        std::atomic<bool> active { false };
+        std::atomic<std::uint8_t> axis { 0 };
+        std::atomic<std::uint8_t> type { 0 };
+        std::atomic<std::uint8_t> slot { 0 };
+        std::atomic<std::uint8_t> parameterIndex { 0 };
+        std::atomic<std::uint64_t> instanceIdentity { 0 };
+        std::atomic<float> minimum { 0.0f };
+        std::atomic<float> maximum { 1.0f };
+        std::atomic<float> parameterStart { 0.0f };
+        std::atomic<float> parameterInterval { 0.0f };
+    };
+    struct MacroAssignmentRuntime
+    {
+        bool active = false;
+        hypercolor::plugin::MacroAxis axis = hypercolor::plugin::MacroAxis::x;
+        std::uint8_t type = 0;
+        std::uint8_t slot = 0;
+        std::uint8_t parameterIndex = 0;
+        std::uint64_t instanceIdentity = 0;
+        float minimum = 0.0f;
+        float maximum = 1.0f;
+        float parameterStart = 0.0f;
+        float parameterInterval = 0.0f;
+    };
+    struct MacroOverride
+    {
+        bool active = false;
+        float value = 0.0f;
+    };
+    std::array<MacroAssignmentRuntimeAtomic,
+               hypercolor::plugin::maximumFxMacroAssignments> macroAssignmentRuntimeAtomic {};
+    std::array<MacroAssignmentRuntime,
+               hypercolor::plugin::maximumFxMacroAssignments> audioMacroAssignments {};
+    std::array<std::array<std::array<MacroOverride, 9>,
+                          hypercolor::plugin::maximumFxInstancesPerType>,
+               hypercolor::plugin::fxTypeCount> audioFxMacroOverrides {};
+    std::atomic<std::uint32_t> macroAssignmentSequence { 0 };
+    std::atomic<std::uint8_t> macroAssignmentCount { 0 };
+    juce::CriticalSection macroAssignmentsLock;
+    hypercolor::plugin::FxMacroAssignmentSet macroAssignmentsMessageThread;
+    struct LfoModuleRuntime
+    {
+        std::uint64_t identity = 0;
+        bool enabled = false;
+        hypercolor::dsp::modulation::LfoWaveform waveform
+            = hypercolor::dsp::modulation::LfoWaveform::sine;
+        hypercolor::plugin::LfoRateMode rateMode = hypercolor::plugin::LfoRateMode::free;
+        hypercolor::plugin::LfoDivision division = hypercolor::plugin::LfoDivision::quarter;
+        float rateHz = 1.0f, depth = 1.0f, phase = 0.0f, offset = 0.0f;
+    };
+    struct LfoAssignmentRuntime
+    {
+        bool active = false;
+        std::uint64_t lfoIdentity = 0, fxIdentity = 0;
+        std::uint8_t type = 0, slot = 0, parameterIndex = 0, lfoSlot = 0;
+        float amount = 1.0f;
+        bool bipolar = true, inverted = false;
+        float parameterStart = 0.0f, parameterEnd = 1.0f, parameterInterval = 0.0f;
+        float parameterSkew = 1.0f;
+    };
+    struct LfoOverride { bool active = false; float value = 0.0f; };
+    struct LfoTargetRange
+    {
+        float start = 0.0f, end = 1.0f, skew = 1.0f, interval = 0.0f;
+    };
+    struct LfoModuleRuntimeAtomic
+    {
+        std::atomic<std::uint64_t> identity { 0 };
+        std::atomic<bool> enabled { false };
+        std::atomic<std::uint8_t> waveform { 0 }, rateMode { 0 }, division { 3 };
+        std::atomic<float> rateHz { 1.0f }, depth { 1.0f }, phase { 0.0f }, offset { 0.0f };
+    };
+    struct LfoAssignmentRuntimeAtomic
+    {
+        std::atomic<bool> active { false }, bipolar { true }, inverted { false };
+        std::atomic<std::uint64_t> lfoIdentity { 0 }, fxIdentity { 0 };
+        std::atomic<std::uint8_t> type { 0 }, slot { 0 }, parameterIndex { 0 }, lfoSlot { 0 };
+        std::atomic<float> amount { 1.0f }, parameterStart { 0.0f }, parameterEnd { 1.0f }, parameterInterval { 0.0f }, parameterSkew { 1.0f };
+    };
+    std::array<LfoModuleRuntimeAtomic, hypercolor::plugin::maximumLfoModules>
+        lfoRuntimeAtomic {};
+    std::array<LfoAssignmentRuntimeAtomic, hypercolor::plugin::maximumLfoAssignments>
+        lfoAssignmentRuntimeAtomic {};
+    std::array<LfoModuleRuntime, hypercolor::plugin::maximumLfoModules>
+        audioLfoModules {};
+    std::array<LfoAssignmentRuntime, hypercolor::plugin::maximumLfoAssignments>
+        audioLfoAssignments {};
+    std::array<hypercolor::dsp::modulation::Lfo, hypercolor::plugin::maximumLfoModules>
+        lfoOscillators {};
+    std::array<std::array<std::array<LfoOverride, 9>, hypercolor::plugin::maximumFxInstancesPerType>,
+               hypercolor::plugin::fxTypeCount> audioFxLfoOverrides {};
+    std::array<std::array<std::array<LfoTargetRange, 9>, hypercolor::plugin::maximumFxInstancesPerType>,
+               hypercolor::plugin::fxTypeCount> audioFxLfoRanges {};
+    std::atomic<std::uint32_t> lfoConfigurationSequence { 0 };
+    std::atomic<std::uint8_t> lfoModuleCount { 0 };
+    std::atomic<std::uint16_t> lfoAssignmentCount { 0 };
+    std::atomic<std::uint64_t> nextLfoIdentity { 1 };
+    juce::CriticalSection lfoConfigurationLock;
+    hypercolor::plugin::LfoConfiguration lfoConfigurationMessageThread;
+    double currentBlockBpm = 120.0;
+    double currentBlockPpq = 0.0;
+    bool currentBlockPpqValid = false;
+    std::uint32_t audioLfoSnapshotSequence = 0;
     bool granularEnginePrepared = false;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear>
         dryWetSmoother;

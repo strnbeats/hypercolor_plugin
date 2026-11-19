@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace
 {
@@ -42,6 +43,761 @@ constexpr std::array<const char*, 8> effectEnableParameterIDs {
 };
 
 constexpr float fxLineOpacityScale = 1.10f;
+
+class FxMacroAssignmentPanel final : public juce::Component
+{
+public:
+    explicit FxMacroAssignmentPanel(HypercolorAudioProcessor& processor)
+        : processorToEdit(processor)
+    {
+        setSize(430, 330);
+        title.setText("XY MACRO ASSIGNMENTS", juce::dontSendNotification);
+        title.setColour(juce::Label::textColourId, hypercolor::ui::palette::text());
+        addAndMakeVisible(title);
+        axis.addItem("MACRO X", 1);
+        axis.addItem("MACRO Y", 2);
+        addAndMakeVisible(axis);
+        addAndMakeVisible(instance);
+        addAndMakeVisible(parameter);
+        addAndMakeVisible(assignment);
+        for (auto* combo : { &axis, &instance, &parameter, &assignment })
+        {
+            combo->setColour(juce::ComboBox::backgroundColourId, hypercolor::ui::palette::panelRaised());
+            combo->setColour(juce::ComboBox::textColourId, hypercolor::ui::palette::text());
+            combo->setColour(juce::ComboBox::outlineColourId, hypercolor::ui::palette::border());
+            combo->setColour(juce::ComboBox::arrowColourId, hypercolor::ui::palette::cyan());
+        }
+        configureRangeSlider(minimum, "MIN");
+        configureRangeSlider(maximum, "MAX");
+        minLabel.setText("MIN", juce::dontSendNotification);
+        maxLabel.setText("MAX", juce::dontSendNotification);
+        minLabel.setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
+        maxLabel.setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
+        addAndMakeVisible(minLabel);
+        addAndMakeVisible(maxLabel);
+        addAndMakeVisible(addOrUpdate);
+        addAndMakeVisible(remove);
+        addOrUpdate.setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
+        addOrUpdate.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::cyan());
+        remove.setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
+        remove.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::mutedText());
+        addAndMakeVisible(hint);
+        hint.setText("XY is active while mapped; the rotary value remains stored as the base.",
+                     juce::dontSendNotification);
+        hint.setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
+        axis.onChange = [this] { updateHint(); updateSaveButtonLabel(); };
+        instance.onChange = [this] { rebuildParameters(); };
+        parameter.onChange = [this] { updateSaveButtonLabel(); };
+        assignment.onChange = [this] { loadSelectedAssignment(); };
+        minimum.onValueChange = [this]
+        {
+            maximum.setRange(minimum.getValue(), maximum.getMaximum(), maximum.getInterval());
+        };
+        maximum.onValueChange = [this]
+        {
+            minimum.setRange(minimum.getMinimum(), maximum.getValue(), minimum.getInterval());
+        };
+        addOrUpdate.onClick = [this] { saveAssignment(); };
+        remove.onClick = [this] { removeAssignment(); };
+        refreshAll();
+    }
+
+    void paint(juce::Graphics& graphics) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        graphics.setColour(hypercolor::ui::palette::panel().darker(0.1f));
+        graphics.fillRoundedRectangle(bounds, 8.0f);
+        graphics.setColour(hypercolor::ui::palette::border());
+        graphics.drawRoundedRectangle(bounds.reduced(0.5f), 8.0f, 1.0f);
+        graphics.setColour(hypercolor::ui::palette::cyan());
+        graphics.fillRect(0.0f, 0.0f, 52.0f, 2.0f);
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced(14, 12);
+        title.setBounds(area.removeFromTop(23));
+        area.removeFromTop(9);
+        auto assignmentRow = area.removeFromTop(28);
+        assignmentRow.removeFromLeft(4);
+        assignment.setBounds(assignmentRow);
+        area.removeFromTop(9);
+        auto axisRow = area.removeFromTop(28);
+        axis.setBounds(axisRow.removeFromLeft(104));
+        axisRow.removeFromLeft(8);
+        instance.setBounds(axisRow);
+        area.removeFromTop(8);
+        parameter.setBounds(area.removeFromTop(28));
+        area.removeFromTop(8);
+        auto ranges = area.removeFromTop(54);
+        auto minColumn = ranges.removeFromLeft(ranges.getWidth() / 2);
+        minLabel.setBounds(minColumn.removeFromLeft(28));
+        minimum.setBounds(minColumn.reduced(1, 0));
+        maxLabel.setBounds(ranges.removeFromLeft(28));
+        maximum.setBounds(ranges.reduced(1, 0));
+        area.removeFromTop(7);
+        auto buttons = area.removeFromTop(30);
+        addOrUpdate.setBounds(buttons.removeFromLeft(buttons.getWidth() / 2 - 4));
+        buttons.removeFromLeft(8);
+        remove.setBounds(buttons);
+        area.removeFromTop(5);
+        hint.setBounds(area.removeFromTop(28));
+    }
+
+private:
+    void configureRangeSlider(juce::Slider& slider, const juce::String& name)
+    {
+        slider.setSliderStyle(juce::Slider::LinearHorizontal);
+        slider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 76, 20);
+        slider.setName(name);
+        slider.setColour(juce::Slider::trackColourId, hypercolor::ui::palette::cyan());
+        slider.setColour(juce::Slider::thumbColourId, hypercolor::ui::palette::text());
+        slider.setColour(juce::Slider::textBoxTextColourId, hypercolor::ui::palette::text());
+        slider.setColour(juce::Slider::textBoxBackgroundColourId, hypercolor::ui::palette::background());
+        slider.setColour(juce::Slider::textBoxOutlineColourId, hypercolor::ui::palette::border());
+        slider.setRange(0.0, 1.0, 0.001);
+        addAndMakeVisible(slider);
+    }
+
+    void refreshAll()
+    {
+        const auto oldIdentity = selectedIdentity;
+        instance.clear(juce::dontSendNotification);
+        instances.clear();
+        const auto chain = processorToEdit.getFxChainConfiguration();
+        for (std::size_t i = 0; i < chain.count; ++i)
+        {
+            const auto id = chain.order[i];
+            instances.push_back(id);
+            const auto name = effectNames[hypercolor::plugin::toIndex(id.type)];
+            instance.addItem(juce::String(name) + " #" + juce::String(static_cast<int>(id.slot + 1)),
+                             static_cast<int>(instances.size()));
+        }
+        auto selectedIndex = 0;
+        for (std::size_t i = 0; i < instances.size(); ++i)
+            if (instances[i].stableIdentity == oldIdentity)
+                selectedIndex = static_cast<int>(i + 1);
+        instance.setSelectedId(selectedIndex == 0 && instance.getNumItems() > 0 ? 1 : selectedIndex,
+                               juce::dontSendNotification);
+        rebuildParameters();
+        rebuildAssignments();
+    }
+
+    void rebuildParameters()
+    {
+        parameter.clear(juce::dontSendNotification);
+        parameterIDs.clear();
+        const auto selected = instance.getSelectedId() - 1;
+        if (selected >= 0 && static_cast<std::size_t>(selected) < instances.size())
+        {
+            const auto id = instances[static_cast<std::size_t>(selected)];
+            const auto type = hypercolor::plugin::toIndex(id.type);
+            for (std::size_t i = 0; i < effectParameterCounts[type]; ++i)
+            {
+                const auto legacy = effectParameters[type][i];
+                if (legacy == nullptr)
+                    continue;
+                const auto parameterID = hypercolor::plugin::fxParameterID(id.type, id.slot, legacy);
+                auto* candidate = processorToEdit.getValueTreeState().getParameter(parameterID);
+                auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(candidate);
+                if (ranged == nullptr)
+                    continue;
+                parameterIDs.push_back(parameterID);
+                parameter.addItem(candidate->getName(36), static_cast<int>(parameterIDs.size()));
+            }
+        }
+        parameter.setSelectedId(parameter.getNumItems() > 0 ? 1 : 0,
+                                juce::dontSendNotification);
+        const auto selectedParam = parameter.getSelectedId() - 1;
+        if (selectedParam >= 0 && static_cast<std::size_t>(selectedParam) < parameterIDs.size())
+        {
+            auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(
+                processorToEdit.getValueTreeState().getParameter(parameterIDs[static_cast<std::size_t>(selectedParam)]));
+            const auto range = ranged->getNormalisableRange();
+            minimum.setRange(range.start, range.end, range.interval);
+            maximum.setRange(range.start, range.end, range.interval);
+            minimum.setValue(range.start, juce::dontSendNotification);
+            maximum.setValue(range.end, juce::dontSendNotification);
+        }
+        addOrUpdate.setEnabled(!parameterIDs.empty());
+        updateSaveButtonLabel();
+        updateHint();
+    }
+
+    void rebuildAssignments()
+    {
+        assignment.clear(juce::dontSendNotification);
+        const auto stored = processorToEdit.getFxMacroAssignments();
+        for (std::size_t i = 0; i < stored.count; ++i)
+        {
+            const auto& item = stored.assignments[i];
+            juce::String effect = "Missing FX";
+            for (std::size_t row = 0; row < instances.size(); ++row)
+                if (instances[row].stableIdentity == item.instanceIdentity)
+                    effect = juce::String(effectNames[hypercolor::plugin::toIndex(instances[row].type)])
+                        + " #" + juce::String(static_cast<int>(instances[row].slot + 1));
+            const auto* parameterObject = processorToEdit.getValueTreeState().getParameter(item.parameterID);
+            const auto parameterName = parameterObject != nullptr ? parameterObject->getName(32) : item.parameterID;
+            assignment.addItem(juce::String(item.axis == hypercolor::plugin::MacroAxis::x ? "X" : "Y")
+                + "  ·  " + effect + "  ·  " + parameterName,
+                static_cast<int>(i + 1));
+        }
+        if (stored.count > 0 && assignment.getSelectedId() == 0)
+            assignment.setSelectedId(1, juce::dontSendNotification);
+        remove.setEnabled(stored.count > 0 && assignment.getSelectedId() > 0);
+        addOrUpdate.setButtonText("ADD ASSIGNMENT");
+    }
+
+    void loadSelectedAssignment()
+    {
+        const auto selected = assignment.getSelectedId() - 1;
+        const auto stored = processorToEdit.getFxMacroAssignments();
+        if (selected < 0 || static_cast<std::size_t>(selected) >= stored.count)
+        {
+            remove.setEnabled(false);
+            addOrUpdate.setButtonText("ADD ASSIGNMENT");
+            return;
+        }
+        const auto& item = stored.assignments[static_cast<std::size_t>(selected)];
+        const auto selectedAssignmentId = selected + 1;
+        axis.setSelectedId(item.axis == hypercolor::plugin::MacroAxis::x ? 1 : 2,
+                           juce::dontSendNotification);
+        selectedIdentity = item.instanceIdentity;
+        refreshAll();
+        assignment.setSelectedId(selectedAssignmentId, juce::dontSendNotification);
+        for (std::size_t row = 0; row < instances.size(); ++row)
+            if (instances[row].stableIdentity == item.instanceIdentity)
+                instance.setSelectedId(static_cast<int>(row + 1), juce::dontSendNotification);
+        rebuildParameters();
+        for (std::size_t i = 0; i < parameterIDs.size(); ++i)
+            if (parameterIDs[i] == item.parameterID)
+                parameter.setSelectedId(static_cast<int>(i + 1), juce::dontSendNotification);
+        minimum.setValue(item.minimum, juce::dontSendNotification);
+        maximum.setValue(item.maximum, juce::dontSendNotification);
+        addOrUpdate.setButtonText("UPDATE ASSIGNMENT");
+        updateSaveButtonLabel();
+        remove.setEnabled(true);
+        updateHint();
+    }
+
+    void updateSaveButtonLabel()
+    {
+        const auto selectedInstance = instance.getSelectedId() - 1;
+        const auto selectedParameter = parameter.getSelectedId() - 1;
+        const auto stored = processorToEdit.getFxMacroAssignments();
+        bool matchesExisting = false;
+        if (selectedInstance >= 0 && static_cast<std::size_t>(selectedInstance) < instances.size()
+            && selectedParameter >= 0 && static_cast<std::size_t>(selectedParameter) < parameterIDs.size())
+        {
+            const auto identity = instances[static_cast<std::size_t>(selectedInstance)].stableIdentity;
+            const auto& parameterID = parameterIDs[static_cast<std::size_t>(selectedParameter)];
+            for (std::size_t i = 0; i < stored.count; ++i)
+                matchesExisting = matchesExisting
+                    || (stored.assignments[i].instanceIdentity == identity
+                        && stored.assignments[i].parameterID == parameterID);
+        }
+        addOrUpdate.setButtonText(matchesExisting ? "UPDATE ASSIGNMENT" : "ADD ASSIGNMENT");
+    }
+
+    void saveAssignment()
+    {
+        const auto selectedInstance = instance.getSelectedId() - 1;
+        const auto selectedParameter = parameter.getSelectedId() - 1;
+        if (selectedInstance < 0 || static_cast<std::size_t>(selectedInstance) >= instances.size()
+            || selectedParameter < 0 || static_cast<std::size_t>(selectedParameter) >= parameterIDs.size())
+            return;
+        auto stored = processorToEdit.getFxMacroAssignments();
+        const auto identity = instances[static_cast<std::size_t>(selectedInstance)].stableIdentity;
+        const auto& id = parameterIDs[static_cast<std::size_t>(selectedParameter)];
+        int replace = -1;
+        for (std::size_t i = 0; i < stored.count; ++i)
+            if (stored.assignments[i].instanceIdentity == identity
+                && stored.assignments[i].parameterID == id)
+                replace = static_cast<int>(i);
+        if (replace < 0 || static_cast<std::size_t>(replace) >= stored.count)
+        {
+            if (stored.count >= hypercolor::plugin::maximumFxMacroAssignments)
+                return;
+            replace = stored.count++;
+        }
+        stored.assignments[static_cast<std::size_t>(replace)] = {
+            axis.getSelectedId() == 2 ? hypercolor::plugin::MacroAxis::y : hypercolor::plugin::MacroAxis::x,
+            identity, id, static_cast<float>(minimum.getValue()), static_cast<float>(maximum.getValue())
+        };
+        if (processorToEdit.setFxMacroAssignments(stored))
+            rebuildAssignments();
+    }
+
+    void removeAssignment()
+    {
+        auto stored = processorToEdit.getFxMacroAssignments();
+        const auto selected = assignment.getSelectedId() - 1;
+        if (selected < 0 || static_cast<std::size_t>(selected) >= stored.count)
+            return;
+        for (std::size_t i = static_cast<std::size_t>(selected) + 1; i < stored.count; ++i)
+            stored.assignments[i - 1] = stored.assignments[i];
+        --stored.count;
+        if (processorToEdit.setFxMacroAssignments(stored))
+            rebuildAssignments();
+    }
+
+    void updateHint()
+    {
+        hint.setText(axis.getSelectedId() == 2
+            ? "Macro Y follows the vertical XY coordinate."
+            : "Macro X follows the horizontal XY coordinate.", juce::dontSendNotification);
+    }
+
+    HypercolorAudioProcessor& processorToEdit;
+    juce::Label title, hint, minLabel, maxLabel;
+    juce::ComboBox axis, instance, parameter, assignment;
+    juce::Slider minimum, maximum;
+    juce::TextButton addOrUpdate { "ADD ASSIGNMENT" }, remove { "REMOVE" };
+    std::vector<hypercolor::plugin::FxInstanceId> instances;
+    std::vector<juce::String> parameterIDs;
+    std::uint64_t selectedIdentity = 0;
+};
+
+class LfoWavePreview final : public juce::Component
+{
+public:
+    void setWaveform(hypercolor::dsp::modulation::LfoWaveform value)
+    { waveform = value; repaint(); }
+    void paint(juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat().reduced(2.0f);
+        g.setColour(hypercolor::ui::palette::background());
+        g.fillRoundedRectangle(r, 4.0f);
+        g.setColour(hypercolor::ui::palette::border());
+        g.drawRoundedRectangle(r, 4.0f, 1.0f);
+        juce::Path path;
+        if (waveform == hypercolor::dsp::modulation::LfoWaveform::sampleAndHold)
+        {
+            constexpr std::array held { -0.72f, 0.24f, 0.68f, -0.18f,
+                                         0.82f, -0.45f, 0.12f, -0.62f };
+            const auto dx = r.getWidth() / static_cast<float>(held.size());
+            auto previousY = r.getCentreY() - held[0] * r.getHeight() * 0.36f;
+            path.startNewSubPath(r.getX(), previousY);
+            for (std::size_t i = 0; i < held.size(); ++i)
+            {
+                const auto x = r.getX() + static_cast<float>(i + 1) * dx;
+                path.lineTo(x, previousY);
+                if (i + 1 < held.size())
+                {
+                    previousY = r.getCentreY() - held[i + 1] * r.getHeight() * 0.36f;
+                    path.lineTo(x, previousY);
+                }
+            }
+        }
+        else
+        {
+            for (int i = 0; i <= 96; ++i)
+            {
+                const auto x = static_cast<float>(i) / 96.0f;
+                const auto y = hypercolor::dsp::modulation::Lfo::evaluate(waveform, x);
+                const auto point = juce::Point<float>(r.getX() + x * r.getWidth(),
+                    r.getCentreY() - y * r.getHeight() * 0.36f);
+                if (i == 0) path.startNewSubPath(point); else path.lineTo(point);
+            }
+        }
+        g.setColour(hypercolor::ui::palette::space());
+        g.strokePath(path, juce::PathStrokeType(1.8f));
+    }
+private:
+    hypercolor::dsp::modulation::LfoWaveform waveform
+        = hypercolor::dsp::modulation::LfoWaveform::sine;
+};
+
+class LfoWorkspacePanel final : public juce::Component, private juce::Timer
+{
+public:
+    LfoWorkspacePanel(HypercolorAudioProcessor& processor,
+                      std::function<void(std::uint64_t)> onFocus)
+        : owner(processor), focusCallback(std::move(onFocus))
+    {
+        setSize(520, 590);
+        title.setText("LFO MODULATION", juce::dontSendNotification);
+        title.setColour(juce::Label::textColourId, hypercolor::ui::palette::text());
+        addAndMakeVisible(title);
+        auto styleCombo = [](juce::ComboBox& c)
+        {
+            c.setColour(juce::ComboBox::backgroundColourId, hypercolor::ui::palette::panelRaised());
+            c.setColour(juce::ComboBox::textColourId, hypercolor::ui::palette::text());
+            c.setColour(juce::ComboBox::outlineColourId, hypercolor::ui::palette::border());
+            c.setColour(juce::ComboBox::arrowColourId, hypercolor::ui::palette::space());
+        };
+        for (auto* c : { &waveform, &rateMode, &division, &fxInstance, &parameter, &mapping })
+        { styleCombo(*c); addAndMakeVisible(*c); }
+        module.setTextWhenNothingSelected("Select LFO");
+        module.setVisible(false);
+        for (std::size_t i = 0; i < moduleCards.size(); ++i)
+        {
+            auto& card = moduleCards[i];
+            card.setClickingTogglesState(true);
+            card.setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
+            card.setColour(juce::TextButton::buttonOnColourId, hypercolor::ui::palette::space().withAlpha(0.22f));
+            card.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::mutedText());
+            card.setColour(juce::TextButton::textColourOnId, hypercolor::ui::palette::space());
+            card.onClick = [this, i]
+            {
+                selectedModule = static_cast<int>(i);
+                for (std::size_t cardIndex = 0; cardIndex < moduleCards.size(); ++cardIndex)
+                    moduleCards[cardIndex].setToggleState(cardIndex == i, juce::dontSendNotification);
+                module.setSelectedId(static_cast<int>(i + 1), juce::dontSendNotification);
+                loadModule();
+            };
+            addAndMakeVisible(card);
+        }
+        waveform.addItemList({ "Sine", "Triangle", "Saw Up", "Saw Down", "Square", "Random / S&H" }, 1);
+        rateMode.addItemList({ "FREE RATE", "BPM SYNC" }, 1);
+        for (std::size_t i = 0; i < hypercolor::plugin::lfoDivisionLabels.size(); ++i)
+            division.addItem(hypercolor::plugin::lfoDivisionLabels[i], static_cast<int>(i + 1));
+        for (auto* s : { &rate, &depth, &phase, &offset, &amount })
+        {
+            s->setSliderStyle(juce::Slider::LinearHorizontal);
+            s->setTextBoxStyle(juce::Slider::TextBoxRight, false, 58, 18);
+            s->setColour(juce::Slider::trackColourId, hypercolor::ui::palette::space());
+            s->setColour(juce::Slider::thumbColourId, hypercolor::ui::palette::text());
+            s->setColour(juce::Slider::textBoxTextColourId, hypercolor::ui::palette::text());
+            s->setColour(juce::Slider::textBoxBackgroundColourId, hypercolor::ui::palette::background());
+            addAndMakeVisible(*s);
+        }
+        rate.setRange(0.0, 40.0, 0.01); rate.setTextValueSuffix(" Hz");
+        depth.setRange(0.0, 1.0, 0.001); phase.setRange(0.0, 1.0, 0.001);
+        offset.setRange(-1.0, 1.0, 0.001); amount.setRange(0.0, 1.0, 0.001);
+        amount.setValue(0.5, juce::dontSendNotification);
+        for (auto* b : { &enabled, &bipolar, &inverted, &addModule, &removeModule, &addMapping, &removeMapping })
+        { addAndMakeVisible(*b); b->setColour(juce::TextButton::buttonColourId, hypercolor::ui::palette::panelRaised());
+          b->setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::space()); }
+        enabled.setButtonText("ON"); enabled.setClickingTogglesState(true);
+        bipolar.setButtonText("BIPOLAR"); bipolar.setClickingTogglesState(true);
+        inverted.setButtonText("INVERT"); inverted.setClickingTogglesState(true);
+        addModule.setButtonText("+ ADD LFO"); removeModule.setButtonText("REMOVE LFO");
+        addMapping.setButtonText("ADD ASSIGNMENT"); removeMapping.setButtonText("REMOVE");
+        addAndMakeVisible(preview);
+        addAndMakeVisible(title2);
+        addAndMakeVisible(rateLabel); addAndMakeVisible(depthLabel); addAndMakeVisible(phaseLabel);
+        addAndMakeVisible(offsetLabel); addAndMakeVisible(amountLabel); addAndMakeVisible(help);
+        title2.setColour(juce::Label::textColourId, hypercolor::ui::palette::space());
+        for (auto* label : { &rateLabel, &depthLabel, &phaseLabel, &offsetLabel, &amountLabel })
+            label->setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
+        rateLabel.setText("RATE", juce::dontSendNotification); depthLabel.setText("DEPTH", juce::dontSendNotification);
+        phaseLabel.setText("PHASE", juce::dontSendNotification); offsetLabel.setText("OFFSET", juce::dontSendNotification);
+        amountLabel.setText("AMOUNT", juce::dontSendNotification);
+        help.setText("Continuous controls only. LFO sums after XY Macro; base FX values remain stored.",
+                     juce::dontSendNotification);
+        help.setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
+        module.onChange = [this] { loadModule(); };
+        waveform.onChange = [this] { preview.setWaveform(static_cast<hypercolor::dsp::modulation::LfoWaveform>(waveform.getSelectedId() - 1)); saveModule(); };
+        rateMode.onChange = [this] { division.setEnabled(rateMode.getSelectedId() == 2); rate.setEnabled(rateMode.getSelectedId() == 1); saveModule(); };
+        division.onChange = [this] { saveModule(); };
+        enabled.onClick = [this] { enabled.setButtonText(enabled.getToggleState() ? "ON" : "OFF"); saveModule(); };
+        rate.onValueChange = [this] { saveModule(); };
+        depth.onValueChange = [this] { saveModule(); };
+        phase.onValueChange = [this] { saveModule(); };
+        offset.onValueChange = [this] { saveModule(); };
+        fxInstance.onChange = [this] { rebuildParameters(); };
+        mapping.onChange = [this] { loadMapping(); };
+        amount.onValueChange = [this] { saveMapping(); };
+        bipolar.onClick = [this] { saveMapping(); };
+        inverted.onClick = [this] { saveMapping(); };
+        addModule.onClick = [this] { createModule(); };
+        removeModule.onClick = [this] { deleteModule(); };
+        addMapping.onClick = [this] { createMapping(); };
+        removeMapping.onClick = [this] { deleteMapping(); };
+        refresh();
+        startTimerHz(10);
+    }
+
+    ~LfoWorkspacePanel() override { stopTimer(); }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        g.setColour(hypercolor::ui::palette::panel().darker(0.08f)); g.fillRoundedRectangle(r, 9.0f);
+        g.setColour(hypercolor::ui::palette::border()); g.drawRoundedRectangle(r.reduced(0.5f), 9.0f, 1.0f);
+        g.setColour(hypercolor::ui::palette::space()); g.fillRect(0.0f, 0.0f, 70.0f, 2.0f);
+    }
+    void resized() override
+    {
+        auto a = getLocalBounds().reduced(14, 12);
+        title.setBounds(a.removeFromTop(24)); a.removeFromTop(6);
+        auto row = a.removeFromTop(28); addModule.setBounds(row.removeFromLeft(120));
+        row.removeFromLeft(8); removeModule.setBounds(row);
+        a.removeFromTop(4); row = a.removeFromTop(28);
+        const auto visibleCards = juce::jmax(1, module.getNumItems());
+        const auto cardWidth = juce::jmax(48, row.getWidth() / visibleCards);
+        for (std::size_t i = 0; i < moduleCards.size(); ++i)
+            if (moduleCards[i].isVisible())
+                moduleCards[i].setBounds(row.removeFromLeft(cardWidth).reduced(2, 0));
+        a.removeFromTop(8); row = a.removeFromTop(28); enabled.setBounds(row.removeFromLeft(56));
+        row.removeFromLeft(8); waveform.setBounds(row.removeFromLeft(140)); row.removeFromLeft(8);
+        rateMode.setBounds(row.removeFromLeft(116)); row.removeFromLeft(8); division.setBounds(row);
+        a.removeFromTop(7); preview.setBounds(a.removeFromTop(48)); a.removeFromTop(6);
+        auto sliderRow = [&](juce::Label& l, juce::Slider& s)
+        { auto r = a.removeFromTop(25); l.setBounds(r.removeFromLeft(62)); s.setBounds(r); a.removeFromTop(2); };
+        sliderRow(rateLabel, rate); sliderRow(depthLabel, depth); sliderRow(phaseLabel, phase); sliderRow(offsetLabel, offset);
+        a.removeFromTop(2); row = a.removeFromTop(24); row.removeFromLeft(0); row.removeFromRight(0);
+        row.removeFromLeft(0); bipolar.setBounds(row.removeFromLeft(100)); row.removeFromLeft(6); inverted.setBounds(row.removeFromLeft(100));
+        a.removeFromTop(9); title2.setBounds(a.removeFromTop(20));
+        row = a.removeFromTop(28); mapping.setBounds(row); a.removeFromTop(6);
+        row = a.removeFromTop(28); fxInstance.setBounds(row.removeFromLeft(row.getWidth() / 2 - 4)); row.removeFromLeft(8); parameter.setBounds(row);
+        a.removeFromTop(5); row = a.removeFromTop(25); amountLabel.setBounds(row.removeFromLeft(62)); amount.setBounds(row);
+        a.removeFromTop(5); row = a.removeFromTop(28); addMapping.setBounds(row.removeFromLeft(row.getWidth() / 2 - 4));
+        row.removeFromLeft(8); removeMapping.setBounds(row); a.removeFromTop(5); help.setBounds(a.removeFromTop(28));
+    }
+
+private:
+    void timerCallback() override
+    {
+        const auto revision = owner.getLfoConfigurationRevision();
+        if ((revision & 1u) == 0u && revision != observedRevision)
+            refresh();
+    }
+    void refresh()
+    {
+        refreshing = true;
+        configuration = owner.getLfoConfiguration();
+        observedRevision = owner.getLfoConfigurationRevision();
+        addModule.setEnabled(configuration.moduleCount < hypercolor::plugin::maximumLfoModules);
+        removeModule.setEnabled(configuration.moduleCount > 0);
+        module.clear(juce::dontSendNotification);
+        for (std::size_t i = 0; i < configuration.moduleCount; ++i)
+            module.addItem("LFO " + juce::String(static_cast<int>(i + 1)), static_cast<int>(i + 1));
+        for (std::size_t i = 0; i < moduleCards.size(); ++i)
+        {
+            const bool active = i < configuration.moduleCount;
+            moduleCards[i].setVisible(active);
+            if (active)
+            {
+                moduleCards[i].setButtonText("L" + juce::String(static_cast<int>(i + 1))
+                    + (configuration.modules[i].enabled ? "  ON" : "  OFF"));
+                moduleCards[i].setToggleState(static_cast<int>(i) == selectedModule,
+                                              juce::dontSendNotification);
+            }
+        }
+        if (configuration.moduleCount > 0)
+            module.setSelectedId(juce::jlimit(1, static_cast<int>(configuration.moduleCount), selectedModule + 1), juce::dontSendNotification);
+        else
+            selectedModule = -1;
+        refreshInstances();
+        refreshing = false;
+        loadModule();
+        resized();
+    }
+    void refreshInstances()
+    {
+        instances.clear(); fxInstance.clear(juce::dontSendNotification);
+        const auto chain = owner.getFxChainConfiguration();
+        for (std::size_t i = 0; i < chain.count; ++i)
+        {
+            instances.push_back(chain.order[i]);
+            const auto id = chain.order[i];
+            fxInstance.addItem(juce::String(effectNames[hypercolor::plugin::toIndex(id.type)])
+                + " #" + juce::String(static_cast<int>(id.slot + 1)), static_cast<int>(instances.size()));
+        }
+        if (!instances.empty()) fxInstance.setSelectedId(1, juce::dontSendNotification);
+        rebuildParameters();
+    }
+    void rebuildParameters()
+    {
+        parameter.clear(juce::dontSendNotification); parameterIDs.clear();
+        const auto selected = fxInstance.getSelectedId() - 1;
+        if (selected >= 0 && static_cast<std::size_t>(selected) < instances.size())
+        {
+            const auto id = instances[static_cast<std::size_t>(selected)];
+            const auto type = hypercolor::plugin::toIndex(id.type);
+            for (std::size_t i = 0; i < effectParameterCounts[type]; ++i)
+                if (effectParameters[type][i] != nullptr)
+                {
+                    const auto pid = hypercolor::plugin::fxParameterID(id.type, id.slot, effectParameters[type][i]);
+                    auto* target = owner.getValueTreeState().getParameter(pid);
+                    if (target != nullptr
+                        && dynamic_cast<juce::AudioParameterChoice*>(target) == nullptr
+                        && dynamic_cast<juce::AudioParameterBool*>(target) == nullptr)
+                    { parameterIDs.push_back(pid); parameter.addItem(target->getName(32), static_cast<int>(parameterIDs.size())); }
+                }
+        }
+        if (parameter.getNumItems() > 0) parameter.setSelectedId(1, juce::dontSendNotification);
+    }
+    void loadModule()
+    {
+        if (refreshing) return;
+        selectedModule = module.getSelectedId() - 1;
+        for (std::size_t i = 0; i < moduleCards.size(); ++i)
+            moduleCards[i].setToggleState(static_cast<int>(i) == selectedModule,
+                                          juce::dontSendNotification);
+        configuration = owner.getLfoConfiguration();
+        if (selectedModule < 0 || static_cast<std::size_t>(selectedModule) >= configuration.moduleCount)
+        { title.setText("LFO MODULATION", juce::dontSendNotification);
+          setControlsEnabled(false); rebuildMappings(); return; }
+        const auto& m = configuration.modules[static_cast<std::size_t>(selectedModule)];
+        title.setText("LFO MODULATION  /  LFO " + juce::String(selectedModule + 1),
+                      juce::dontSendNotification);
+        if (focusCallback) focusCallback(m.stableIdentity);
+        waveform.setSelectedId(static_cast<int>(m.waveform) + 1, juce::dontSendNotification);
+        preview.setWaveform(m.waveform);
+        rateMode.setSelectedId(static_cast<int>(m.rateMode) + 1, juce::dontSendNotification);
+        division.setSelectedId(static_cast<int>(m.division) + 1, juce::dontSendNotification);
+        enabled.setToggleState(m.enabled, juce::dontSendNotification);
+        enabled.setButtonText(m.enabled ? "ON" : "OFF");
+        rate.setValue(m.rateHz, juce::dontSendNotification); depth.setValue(m.depth, juce::dontSendNotification);
+        phase.setValue(m.phase, juce::dontSendNotification); offset.setValue(m.offset, juce::dontSendNotification);
+        setControlsEnabled(true); rate.setEnabled(m.rateMode == hypercolor::plugin::LfoRateMode::free);
+        division.setEnabled(m.rateMode == hypercolor::plugin::LfoRateMode::bpmSync);
+        rebuildMappings();
+    }
+    void setControlsEnabled(bool value)
+    { enabled.setEnabled(value); waveform.setEnabled(value); rateMode.setEnabled(value); rate.setEnabled(value); depth.setEnabled(value); phase.setEnabled(value); offset.setEnabled(value); bipolar.setEnabled(value); inverted.setEnabled(value); addMapping.setEnabled(value); }
+    void saveModule()
+    {
+        if (refreshing || selectedModule < 0) return;
+        configuration = owner.getLfoConfiguration();
+        if (static_cast<std::size_t>(selectedModule) >= configuration.moduleCount) return;
+        auto& m = configuration.modules[static_cast<std::size_t>(selectedModule)];
+        m.enabled = enabled.getToggleState();
+        m.waveform = static_cast<hypercolor::dsp::modulation::LfoWaveform>(juce::jmax(0, waveform.getSelectedId() - 1));
+        m.rateMode = static_cast<hypercolor::plugin::LfoRateMode>(juce::jmax(0, rateMode.getSelectedId() - 1));
+        m.division = static_cast<hypercolor::plugin::LfoDivision>(juce::jmax(0, division.getSelectedId() - 1));
+        m.rateHz = static_cast<float>(rate.getValue()); m.depth = static_cast<float>(depth.getValue());
+        m.phase = static_cast<float>(phase.getValue()); m.offset = static_cast<float>(offset.getValue());
+        moduleCards[static_cast<std::size_t>(selectedModule)].setButtonText(
+            "L" + juce::String(selectedModule + 1) + (m.enabled ? " ON" : " OFF"));
+        if (owner.setLfoConfiguration(configuration))
+            observedRevision = owner.getLfoConfigurationRevision();
+        preview.setWaveform(m.waveform);
+    }
+    void rebuildMappings()
+    {
+        mapping.clear(juce::dontSendNotification);
+        if (selectedModule < 0 || static_cast<std::size_t>(selectedModule) >= configuration.moduleCount) return;
+        int item = 0;
+        for (std::size_t i = 0; i < configuration.assignmentCount; ++i)
+        {
+            const auto& a = configuration.assignments[i];
+            if (a.lfoIdentity != configuration.modules[static_cast<std::size_t>(selectedModule)].stableIdentity) continue;
+            auto targetName = a.parameterID;
+            for (const auto& fx : instances)
+                if (fx.stableIdentity == a.fxInstanceIdentity)
+                {
+                    targetName = juce::String(effectNames[hypercolor::plugin::toIndex(fx.type)])
+                        + " #" + juce::String(static_cast<int>(fx.slot + 1))
+                        + "  /  " + owner.getValueTreeState().getParameter(a.parameterID)->getName(30);
+                    break;
+                }
+            mapping.addItem(targetName + "  × " + juce::String(a.amount, 2), ++item);
+        }
+        if (item > 0) mapping.setSelectedId(1, juce::dontSendNotification);
+        loadMapping();
+    }
+    void loadMapping()
+    {
+        if (refreshing) return;
+        amount.setValue(0.0, juce::dontSendNotification); bipolar.setToggleState(true, juce::dontSendNotification); inverted.setToggleState(false, juce::dontSendNotification);
+        const auto selected = mapping.getSelectedId() - 1;
+        if (selected < 0 || selectedModule < 0) return;
+        std::size_t filtered = 0;
+        const auto identity = configuration.modules[static_cast<std::size_t>(selectedModule)].stableIdentity;
+        for (std::size_t i = 0; i < configuration.assignmentCount; ++i)
+            if (configuration.assignments[i].lfoIdentity == identity)
+            {
+                if (filtered++ == static_cast<std::size_t>(selected))
+                { amount.setValue(configuration.assignments[i].amount, juce::dontSendNotification); bipolar.setToggleState(configuration.assignments[i].bipolar, juce::dontSendNotification); inverted.setToggleState(configuration.assignments[i].inverted, juce::dontSendNotification); break; }
+            }
+    }
+    int selectedAssignmentIndex() const
+    {
+        if (selectedModule < 0) return -1;
+        const auto selected = mapping.getSelectedId() - 1;
+        if (selected < 0) return -1;
+        const auto identity = configuration.modules[static_cast<std::size_t>(selectedModule)].stableIdentity;
+        int filtered = 0;
+        for (std::size_t i = 0; i < configuration.assignmentCount; ++i)
+            if (configuration.assignments[i].lfoIdentity == identity && filtered++ == selected)
+                return static_cast<int>(i);
+        return -1;
+    }
+    void saveMapping()
+    {
+        if (refreshing) return;
+        configuration = owner.getLfoConfiguration();
+        const auto selected = selectedAssignmentIndex();
+        if (selected < 0) return;
+        auto& a = configuration.assignments[static_cast<std::size_t>(selected)];
+        a.amount = static_cast<float>(amount.getValue()); a.bipolar = bipolar.getToggleState(); a.inverted = inverted.getToggleState();
+        if (owner.setLfoConfiguration(configuration))
+            observedRevision = owner.getLfoConfigurationRevision();
+        if (focusCallback && selectedModule >= 0
+            && static_cast<std::size_t>(selectedModule) < configuration.moduleCount)
+            focusCallback(configuration.modules[static_cast<std::size_t>(selectedModule)].stableIdentity);
+        rebuildMappings();
+    }
+    void createModule()
+    {
+        configuration = owner.getLfoConfiguration();
+        if (configuration.moduleCount >= hypercolor::plugin::maximumLfoModules) return;
+        auto& m = configuration.modules[configuration.moduleCount++];
+        m.stableIdentity = owner.allocateLfoIdentity();
+        m.enabled = true;
+        if (owner.setLfoConfiguration(configuration)) { selectedModule = static_cast<int>(configuration.moduleCount - 1); refresh(); }
+    }
+    void deleteModule()
+    {
+        configuration = owner.getLfoConfiguration();
+        const auto selected = module.getSelectedId() - 1;
+        if (selected < 0 || static_cast<std::size_t>(selected) >= configuration.moduleCount) return;
+        const auto identity = configuration.modules[static_cast<std::size_t>(selected)].stableIdentity;
+        for (std::size_t i = 0; i < configuration.assignmentCount;)
+        {
+            if (configuration.assignments[i].lfoIdentity == identity)
+            { for (std::size_t j = i + 1; j < configuration.assignmentCount; ++j) configuration.assignments[j - 1] = configuration.assignments[j]; --configuration.assignmentCount; }
+            else ++i;
+        }
+        for (std::size_t i = static_cast<std::size_t>(selected) + 1; i < configuration.moduleCount; ++i) configuration.modules[i - 1] = configuration.modules[i];
+        --configuration.moduleCount; selectedModule = juce::jmax(0, selected - 1);
+        if (owner.setLfoConfiguration(configuration)) refresh();
+    }
+    void createMapping()
+    {
+        configuration = owner.getLfoConfiguration();
+        const auto m = module.getSelectedId() - 1, fx = fxInstance.getSelectedId() - 1, p = parameter.getSelectedId() - 1;
+        if (m < 0 || fx < 0 || p < 0 || static_cast<std::size_t>(m) >= configuration.moduleCount
+            || static_cast<std::size_t>(fx) >= instances.size() || static_cast<std::size_t>(p) >= parameterIDs.size()
+            || configuration.assignmentCount >= hypercolor::plugin::maximumLfoAssignments) return;
+        const auto instanceID = instances[static_cast<std::size_t>(fx)];
+        auto& a = configuration.assignments[configuration.assignmentCount++];
+        a.lfoIdentity = configuration.modules[static_cast<std::size_t>(m)].stableIdentity;
+        a.fxInstanceIdentity = instanceID.stableIdentity; a.parameterID = parameterIDs[static_cast<std::size_t>(p)];
+        a.amount = static_cast<float>(amount.getValue()); a.bipolar = bipolar.getToggleState(); a.inverted = inverted.getToggleState();
+        if (owner.setLfoConfiguration(configuration))
+        {
+            if (focusCallback) focusCallback(configuration.modules[static_cast<std::size_t>(m)].stableIdentity);
+            refresh(); mapping.setSelectedId(mapping.getNumItems(), juce::dontSendNotification);
+        }
+    }
+    void deleteMapping()
+    {
+        configuration = owner.getLfoConfiguration(); const auto selected = selectedAssignmentIndex();
+        if (selected < 0) return;
+        for (std::size_t i = static_cast<std::size_t>(selected) + 1; i < configuration.assignmentCount; ++i) configuration.assignments[i - 1] = configuration.assignments[i];
+        --configuration.assignmentCount; if (owner.setLfoConfiguration(configuration)) refresh();
+    }
+
+    HypercolorAudioProcessor& owner;
+    std::function<void(std::uint64_t)> focusCallback;
+    hypercolor::plugin::LfoConfiguration configuration;
+    juce::Label title, title2 { "ASSIGNMENTS" }, rateLabel, depthLabel, phaseLabel, offsetLabel, amountLabel, help;
+    juce::ComboBox module, waveform, rateMode, division, fxInstance, parameter, mapping;
+    std::array<juce::TextButton, hypercolor::plugin::maximumLfoModules> moduleCards;
+    juce::Slider rate, depth, phase, offset, amount;
+    juce::TextButton enabled { "ON" }, bipolar { "BIPOLAR" }, inverted { "INVERT" }, addModule, removeModule, addMapping, removeMapping { "REMOVE" };
+    LfoWavePreview preview;
+    std::vector<hypercolor::plugin::FxInstanceId> instances;
+    std::vector<juce::String> parameterIDs;
+    int selectedModule = -1;
+    bool refreshing = false;
+    std::uint32_t observedRevision = 0;
+};
 
 float fxLineAlpha(float alpha) noexcept
 {
@@ -635,7 +1391,19 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
 
     addAndMakeVisible(granularVisualizer);
     addAndMakeVisible(xyController);
+    xyController.setComponentID("xy.controller");
     xyController.setCoordinates({ 0.5f, 0.5f }, false);
+    macroAssignmentButton.setComponentID("xy.macroAssignments");
+    macroAssignmentButton.setTooltip("Assign XY Macro X and Y to FX parameters");
+    macroAssignmentButton.setColour(juce::TextButton::buttonColourId, panelRaised);
+    macroAssignmentButton.setColour(juce::TextButton::buttonOnColourId, cyan.withAlpha(0.25f));
+    macroAssignmentButton.setColour(juce::TextButton::textColourOffId, cyan);
+    addAndMakeVisible(macroAssignmentButton);
+    macroAssignmentButton.onClick = [this]
+    {
+        auto panel = std::make_unique<FxMacroAssignmentPanel>(audioProcessor);
+        juce::CallOutBox::launchAsynchronously(std::move(panel), macroAssignmentButton, this);
+    };
 
     const auto configurePremiumKnob = [
         this,
@@ -963,6 +1731,12 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
     addFxButton.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::lime());
     addFxButton.onClick = [this] { showAddEffectMenu(); };
     addAndMakeVisible(addFxButton);
+    lfoWorkspaceButton.setComponentID("lfo.workspace");
+    lfoWorkspaceButton.setTooltip("Create DSP LFOs and assign them to FX parameters");
+    lfoWorkspaceButton.setColour(juce::TextButton::buttonColourId, panelRaised);
+    lfoWorkspaceButton.setColour(juce::TextButton::textColourOffId, hypercolor::ui::palette::space());
+    addAndMakeVisible(lfoWorkspaceButton);
+    lfoWorkspaceButton.onClick = [this] { showLfoWorkspace(); };
     granularNavButton.setToggleState(true, juce::dontSendNotification);
     moduleTitleLabel.setText("GRANULAR CORE", juce::dontSendNotification);
     moduleSubtitleLabel.setText("XY CHARACTER FIELD  //  REAL-TIME HISTORY  //  64 VOICES", juce::dontSendNotification);
@@ -987,6 +1761,23 @@ HypercolorAudioProcessorEditor::HypercolorAudioProcessorEditor(
         hypercolor::ParameterIDs::grainDensityMode,
         this
     );
+    state.addParameterListener(hypercolor::ParameterIDs::macroX, this);
+    state.addParameterListener(hypercolor::ParameterIDs::macroY, this);
+    const auto* macroX = state.getRawParameterValue(hypercolor::ParameterIDs::macroX);
+    const auto* macroY = state.getRawParameterValue(hypercolor::ParameterIDs::macroY);
+    const auto initialX = macroX != nullptr ? macroX->load(std::memory_order_relaxed) : 0.5f;
+    const auto initialY = macroY != nullptr ? macroY->load(std::memory_order_relaxed) : 0.5f;
+    pendingMacroX.store(initialX, std::memory_order_relaxed);
+    pendingMacroY.store(initialY, std::memory_order_relaxed);
+    xyController.setCoordinates({ initialX, initialY }, false);
+    xyController.setOnChange([this](hypercolor::ui::XYCoordinates coordinates)
+    {
+        auto& valueTree = audioProcessor.getValueTreeState();
+        if (auto* parameter = valueTree.getParameter(hypercolor::ParameterIDs::macroX))
+            parameter->setValueNotifyingHost(coordinates.x);
+        if (auto* parameter = valueTree.getParameter(hypercolor::ParameterIDs::macroY))
+            parameter->setValueNotifyingHost(coordinates.y);
+    });
     appliedDensityMode = readDensityMode();
     rebindDensityControl(appliedDensityMode);
     rebuildInspector();
@@ -1002,14 +1793,36 @@ HypercolorAudioProcessorEditor::~HypercolorAudioProcessorEditor()
         hypercolor::ParameterIDs::grainDensityMode,
         this
     );
+    audioProcessor.getValueTreeState().removeParameterListener(
+        hypercolor::ParameterIDs::macroX, this);
+    audioProcessor.getValueTreeState().removeParameterListener(
+        hypercolor::ParameterIDs::macroY, this);
     cancelPendingUpdate();
     stopTimer();
     densitySlider.onInteractionFinished = nullptr;
     densityModeSelector.onChange = nullptr;
+    macroAssignmentButton.onClick = nullptr;
+    lfoWorkspaceButton.onClick = nullptr;
+    xyController.setOnChange(nullptr);
     densityAttachment.reset();
     densityModeAttachment.reset();
     sourceModeAttachment.reset();
     setLookAndFeel(nullptr);
+}
+
+void HypercolorAudioProcessorEditor::showLfoWorkspace()
+{
+    juce::Component::SafePointer<HypercolorAudioProcessorEditor> safeEditor(this);
+    auto panel = std::make_unique<LfoWorkspacePanel>(audioProcessor,
+        [safeEditor](std::uint64_t identity)
+        {
+            if (safeEditor != nullptr)
+            {
+                safeEditor->focusedLfoIdentity = identity;
+                safeEditor->rebuildInspector();
+            }
+        });
+    juce::CallOutBox::launchAsynchronously(std::move(panel), lfoWorkspaceButton, this);
 }
 
 HypercolorAudioProcessorEditor::DensityMode
@@ -1034,7 +1847,16 @@ void HypercolorAudioProcessorEditor::parameterChanged(
 )
 {
     if (parameterID != hypercolor::ParameterIDs::grainDensityMode)
+    {
+        if (parameterID == hypercolor::ParameterIDs::macroX)
+            pendingMacroX.store(juce::jlimit(0.0f, 1.0f, newValue), std::memory_order_release);
+        else if (parameterID == hypercolor::ParameterIDs::macroY)
+            pendingMacroY.store(juce::jlimit(0.0f, 1.0f, newValue), std::memory_order_release);
+        else
+            return;
+        triggerAsyncUpdate();
         return;
+    }
 
     pendingDensityMode.store(
         newValue >= 0.5f ? 1 : 0,
@@ -1046,6 +1868,10 @@ void HypercolorAudioProcessorEditor::parameterChanged(
 void HypercolorAudioProcessorEditor::handleAsyncUpdate()
 {
     synchronizeDensityMode();
+    xyController.setCoordinates({
+        pendingMacroX.load(std::memory_order_acquire),
+        pendingMacroY.load(std::memory_order_acquire)
+    }, false);
 }
 
 void HypercolorAudioProcessorEditor::synchronizeDensityMode()
@@ -1511,6 +2337,10 @@ void HypercolorAudioProcessorEditor::addEffect(hypercolor::plugin::FxType type)
         return;
     const auto slot = static_cast<std::uint8_t>(std::distance(used.begin(), free));
     configuration.order[configuration.count++] = { type, slot };
+    configuration.order[configuration.count - 1].stableIdentity =
+        audioProcessor.allocateFxInstanceIdentity();
+    if (configuration.order[configuration.count - 1].stableIdentity == 0)
+        return;
     if (!audioProcessor.setFxChainConfiguration(configuration))
         return;
     selectedModule = static_cast<int>(configuration.count - 1);
@@ -1654,6 +2484,42 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
         if (parameter == nullptr)
             continue;
 
+        if (selectedModule >= 0)
+        {
+            auto tooltip = parameter->getName(48);
+            const auto currentIdentity = audioProcessor.getFxChainConfiguration()
+                .order[static_cast<std::size_t>(selectedModule)].stableIdentity;
+            const auto assignments = audioProcessor.getFxMacroAssignments();
+            for (std::size_t assignmentIndex = 0; assignmentIndex < assignments.count; ++assignmentIndex)
+            {
+                const auto& mapping = assignments.assignments[assignmentIndex];
+                if (mapping.instanceIdentity == currentIdentity
+                    && mapping.parameterID == parameterID)
+                {
+                    tooltip << " — mapped to Macro "
+                            << (mapping.axis == hypercolor::plugin::MacroAxis::x ? "X" : "Y")
+                            << "; the XY value controls DSP while the base value remains stored.";
+                    break;
+                }
+            }
+            if (focusedLfoIdentity != 0)
+            {
+                const auto lfoConfig = audioProcessor.getLfoConfiguration();
+                for (std::size_t assignmentIndex = 0; assignmentIndex < lfoConfig.assignmentCount; ++assignmentIndex)
+                {
+                    const auto& mapping = lfoConfig.assignments[assignmentIndex];
+                    if (mapping.lfoIdentity == focusedLfoIdentity
+                        && mapping.fxInstanceIdentity == currentIdentity
+                        && mapping.parameterID == parameterID)
+                    {
+                        tooltip << " — modulated by selected LFO";
+                        break;
+                    }
+                }
+            }
+            fxRotaryKnobs[i].setTooltip(tooltip);
+        }
+
         const auto isEffect = selectedModule >= 0;
         auto& slider = isEffect
             ? static_cast<juce::Slider&>(fxRotaryKnobs[i])
@@ -1661,10 +2527,27 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
         auto& label = inspectorLabels[i];
         const auto range = parameter->getNormalisableRange();
         const auto isEffectMix = isEffect && i == effectMixIndices[selectedEffect];
-        const auto accent = isEffect
+        auto accent = isEffect
             ? effectAccent(selectedEffect)
             : (i == 1 || i == 2 ? hypercolor::ui::palette::pink()
                                 : hypercolor::ui::palette::cyan());
+        bool mappedByFocusedLfo = false;
+        if (isEffect && focusedLfoIdentity != 0)
+        {
+            const auto chain = audioProcessor.getFxChainConfiguration();
+            const auto identity = chain.order[static_cast<std::size_t>(selectedModule)].stableIdentity;
+            const auto lfoConfig = audioProcessor.getLfoConfiguration();
+            for (std::size_t assignmentIndex = 0; assignmentIndex < lfoConfig.assignmentCount; ++assignmentIndex)
+            {
+                const auto& mapping = lfoConfig.assignments[assignmentIndex];
+                if (mapping.lfoIdentity == focusedLfoIdentity
+                    && mapping.fxInstanceIdentity == identity
+                    && mapping.parameterID == parameterID)
+                { mappedByFocusedLfo = true; break; }
+            }
+            if (mappedByFocusedLfo)
+                accent = hypercolor::ui::palette::space();
+        }
         slider.setSliderStyle(isEffect
             ? juce::Slider::RotaryHorizontalVerticalDrag
             : juce::Slider::LinearHorizontal);
@@ -1727,6 +2610,8 @@ void HypercolorAudioProcessorEditor::rebuildInspector()
         label.setComponentID("inspector.label." + juce::String(static_cast<int>(i)));
         label.setText(displayName, juce::dontSendNotification);
         label.setColour(juce::Label::textColourId, hypercolor::ui::palette::mutedText());
+        if (mappedByFocusedLfo)
+            label.setColour(juce::Label::textColourId, hypercolor::ui::palette::space());
         label.setFont(juce::FontOptions(10.0f).withStyle("Bold"));
         addAndMakeVisible(label);
         addAndMakeVisible(slider);
@@ -1904,6 +2789,16 @@ void HypercolorAudioProcessorEditor::resized()
             navigationArea.removeFromTop(2);
     }
     addFxButton.setBounds(navigationArea.removeFromTop(addRowHeight));
+    if (navigationArea.getHeight() >= 25)
+    {
+        navigationArea.removeFromTop(4);
+        lfoWorkspaceButton.setBounds(navigationArea.removeFromTop(26));
+    }
+    else
+    {
+        lfoWorkspaceButton.setBounds(rackPanel.getX() + 10, rackPanel.getBottom() - 31,
+                                     rackPanel.getWidth() - 20, 25);
+    }
 
     moduleTitleLabel.setBounds(workspace.removeFromTop(24));
     moduleSubtitleLabel.setBounds(workspace.removeFromTop(16));
@@ -1918,6 +2813,7 @@ void HypercolorAudioProcessorEditor::resized()
              static_cast<juce::Component*>(&densitySlider),
              static_cast<juce::Component*>(&densityModeSelector),
              static_cast<juce::Component*>(&sourceModeSelector),
+             static_cast<juce::Component*>(&macroAssignmentButton),
              static_cast<juce::Component*>(&sizeSlider),
              static_cast<juce::Component*>(&positionSlider),
              static_cast<juce::Component*>(&pitchSlider),
@@ -1973,11 +2869,14 @@ void HypercolorAudioProcessorEditor::resized()
         granularControlsArea = inspectorArea.removeFromTop(primaryHeight);
         auto primaryArea = granularControlsArea.reduced(10, 8);
         auto sectionHeader = primaryArea.removeFromTop(21);
+        auto macroButtonBounds = sectionHeader.removeFromRight(78);
+        sectionHeader.removeFromRight(4);
         auto sourceSelectorBounds = sectionHeader.removeFromRight(
-            juce::jmin(112, juce::jmax(96, sectionHeader.getWidth() / 3))
+            juce::jmin(104, juce::jmax(84, sectionHeader.getWidth() / 3))
         );
         granularSectionLabel.setBounds(sectionHeader);
         sourceModeSelector.setBounds(sourceSelectorBounds.reduced(1, 1));
+        macroAssignmentButton.setBounds(macroButtonBounds.reduced(1, 1));
         primaryArea.removeFromTop(4);
 
         std::array<juce::Component*, 5> granularControls {

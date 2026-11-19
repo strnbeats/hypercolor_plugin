@@ -62,6 +62,7 @@ target_sources(HYPERCOLOR
         src/dsp/fx/BitcrushEffect.cpp
         src/dsp/fx/FilterEffect.cpp
         src/dsp/fx/CompressorEffect.cpp
+        src/dsp/modulation/Lfo.cpp
         src/dsp/granular/CircularAudioBuffer.cpp
         src/dsp/granular/CausalReadPlan.cpp
         src/dsp/granular/GranularCharacter.cpp
@@ -609,4 +610,16 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME HYPERCOLOR.DensitySync COMMAND HYPERCOLORDensitySyncTests)
+
+    add_executable(HYPERCOLORLfoTests
+        src/dsp/modulation/Lfo.cpp
+        tests/LfoTests.cpp
+    )
+    target_include_directories(HYPERCOLORLfoTests PRIVATE src)
+    target_compile_features(HYPERCOLORLfoTests PRIVATE cxx_std_20)
+    target_link_libraries(HYPERCOLORLfoTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+    add_test(NAME HYPERCOLOR.Lfo COMMAND HYPERCOLORLfoTests)
 endif()

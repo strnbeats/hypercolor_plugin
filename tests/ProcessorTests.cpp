@@ -102,6 +102,25 @@ private:
     int failures = 0;
 };
 
+class FixedPositionPlayHead final : public juce::AudioPlayHead
+{
+public:
+    juce::Optional<PositionInfo> getPosition() const override
+    {
+        return position;
+    }
+
+    void setTransport(double bpm, double ppq)
+    {
+        position.setBpm(bpm);
+        position.setPpqPosition(ppq);
+        position.setIsPlaying(true);
+    }
+
+private:
+    PositionInfo position;
+};
+
 class TestPlayHead final : public juce::AudioPlayHead
 {
 public:
@@ -1064,10 +1083,10 @@ void testDynamicFxRackAndInstanceState(TestContext& context)
     HypercolorAudioProcessor source;
     FxChainConfiguration configuration;
     configuration.count = 4;
-    configuration.order[0] = { FxType::space, 0 };
-    configuration.order[1] = { FxType::drive, 0 };
-    configuration.order[2] = { FxType::space, 1 };
-    configuration.order[3] = { FxType::delay, 2 };
+    configuration.order[0] = { FxType::space, 0, 101 };
+    configuration.order[1] = { FxType::drive, 0, 102 };
+    configuration.order[2] = { FxType::space, 1, 103 };
+    configuration.order[3] = { FxType::delay, 2, 104 };
     context.expect(source.setFxChainConfiguration(configuration), "valid dynamic chain accepted");
 
     const auto secondSpaceSize = fxParameterID(FxType::space, 1, hypercolor::ParameterIDs::reverbSize);
@@ -1158,9 +1177,222 @@ void testDynamicFxRackAndInstanceState(TestContext& context)
         legacyRestored.setStateInformation(legacyState.getData(), static_cast<int>(legacyState.getSize()));
         const auto migrated = legacyRestored.getFxChainConfiguration();
         context.expect(migrated.count == 8, "legacy state restores original eight-module chain");
-        context.expect(migrated.order[0] == FxInstanceId { FxType::space, 0 }
-                           && migrated.order[7] == FxInstanceId { FxType::delay, 0 },
+        context.expect(migrated.order[0] == FxInstanceId { FxType::space, 0, legacyFxIdentity(FxType::space, 0) }
+                           && migrated.order[7] == FxInstanceId { FxType::delay, 0, legacyFxIdentity(FxType::delay, 0) },
                        "legacy chain order is preserved");
+    }
+}
+
+void testFxMacroAssignments(TestContext& context)
+{
+    using namespace hypercolor::plugin;
+    HypercolorAudioProcessor processor;
+    auto* macroX = processor.getValueTreeState().getParameter(hypercolor::ParameterIDs::macroX);
+    auto* macroY = processor.getValueTreeState().getParameter(hypercolor::ParameterIDs::macroY);
+    context.expect(macroX != nullptr && macroY != nullptr,
+                   "Macro X and Y are APVTS parameters");
+    if (macroX != nullptr && macroY != nullptr)
+    {
+        context.expectNear(macroX->convertFrom0to1(macroX->getValue()), 0.5, 0.002,
+                           "Macro X defaults to neutral midpoint");
+        context.expectNear(macroY->convertFrom0to1(macroY->getValue()), 0.5, 0.002,
+                           "Macro Y defaults to neutral midpoint");
+    }
+
+    context.expectNear(mapMacroRange(0.0f, 20.0f, 100.0f), 20.0, 1.0e-6,
+                       "macro minimum maps to assigned minimum");
+    context.expectNear(mapMacroRange(0.5f, 20.0f, 100.0f), 60.0, 1.0e-6,
+                       "macro midpoint maps linearly in real parameter units");
+    context.expectNear(mapMacroRange(1.0f, 20.0f, 100.0f), 100.0, 1.0e-6,
+                       "macro maximum maps to assigned maximum");
+
+    HypercolorAudioProcessor runtime;
+    configureGranularRuntimeTest(runtime);
+    setParameter(runtime, hypercolor::ParameterIDs::driveEnabled, 1.0f);
+    setParameter(runtime, hypercolor::ParameterIDs::driveMix, 100.0f);
+    setParameter(runtime, hypercolor::ParameterIDs::driveAmount, 0.0f);
+    FxMacroAssignmentSet driveMapping;
+    driveMapping.count = 3;
+    driveMapping.assignments[0] = {
+        MacroAxis::x, legacyFxIdentity(FxType::drive, 0),
+        fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveAmount),
+        0.0f, 36.0f
+    };
+    driveMapping.assignments[1] = {
+        MacroAxis::y, legacyFxIdentity(FxType::drive, 0),
+        fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveTone),
+        0.0f, 100.0f
+    };
+    driveMapping.assignments[2] = {
+        MacroAxis::y, legacyFxIdentity(FxType::drive, 0),
+        fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveMode),
+        0.0f, 2.0f
+    };
+    context.expect(runtime.setFxMacroAssignments(driveMapping),
+                   "Drive macro assignment is accepted for runtime test");
+    runtime.prepareToPlay(sampleRate, 64);
+    setParameter(runtime, hypercolor::ParameterIDs::macroX, 0.0f);
+    setParameter(runtime, hypercolor::ParameterIDs::macroY, 0.0f);
+    juce::AudioBuffer<float> lowMacro(1, 4096);
+    fillBuffer(lowMacro, 0.22f);
+    juce::MidiBuffer runtimeMidi;
+    runtime.processBlock(lowMacro, runtimeMidi);
+    setParameter(runtime, hypercolor::ParameterIDs::macroX, 1.0f);
+    juce::AudioBuffer<float> highMacro(1, 4096);
+    fillBuffer(highMacro, 0.22f);
+    runtime.processBlock(highMacro, runtimeMidi);
+    context.expect(buffersDiffer(lowMacro, highMacro, 1.0e-5f),
+                   "Macro X changes the effective FX parameter in audio processing");
+    setParameter(runtime, hypercolor::ParameterIDs::macroX, 1.0f);
+    setParameter(runtime, hypercolor::ParameterIDs::macroY, 1.0f);
+    juce::AudioBuffer<float> highY(1, 4096);
+    fillBuffer(highY, 0.22f);
+    runtime.processBlock(highY, runtimeMidi);
+    context.expect(buffersDiffer(highMacro, highY, 1.0e-5f),
+                   "Macro Y independently changes its assigned parameter while X remains fixed");
+    context.expectNear(getParameterValue(runtime, hypercolor::ParameterIDs::driveAmount),
+                       0.0, 0.01,
+                       "macro overlay does not overwrite the independently stored rotary parameter");
+
+    FxChainConfiguration chain;
+    chain.count = 4;
+    chain.order[0] = { FxType::space, 0, 501 };
+    chain.order[1] = { FxType::drive, 0, 502 };
+    chain.order[2] = { FxType::drive, 1, 503 };
+    chain.order[3] = { FxType::filter, 0, 504 };
+    context.expect(processor.setFxChainConfiguration(chain),
+                   "macro test chain with distinct stable identities is accepted");
+
+    FxMacroAssignmentSet mappings;
+    mappings.count = 4;
+    mappings.assignments[0] = {
+        MacroAxis::x, 502,
+        fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveAmount),
+        0.0f, 28.0f
+    };
+    mappings.assignments[1] = {
+        MacroAxis::x, 503,
+        fxParameterID(FxType::drive, 1, hypercolor::ParameterIDs::driveAmount),
+        8.0f, 20.0f
+    };
+    mappings.assignments[2] = {
+        MacroAxis::y, 504,
+        fxParameterID(FxType::filter, 0, hypercolor::ParameterIDs::filterCutoff),
+        200.0f, 12000.0f
+    };
+    mappings.assignments[3] = {
+        MacroAxis::y, 504,
+        fxParameterID(FxType::filter, 0, hypercolor::ParameterIDs::filterMode),
+        0.0f, 3.0f
+    };
+    context.expect(processor.setFxMacroAssignments(mappings),
+                   "one axis can drive several parameters on different instances and FX types");
+
+    auto reordered = chain;
+    std::swap(reordered.order[0], reordered.order[3]);
+    context.expect(processor.setFxChainConfiguration(reordered),
+                   "reordered chain remains valid");
+    const auto afterReorder = processor.getFxMacroAssignments();
+    context.expect(afterReorder.count == mappings.count
+                       && afterReorder.assignments[0].instanceIdentity == 502
+                       && afterReorder.assignments[1].instanceIdentity == 503,
+                   "FX reordering does not alter stable macro targets");
+
+    auto withoutSecondDrive = reordered;
+    for (std::size_t i = 0; i < withoutSecondDrive.count; ++i)
+        if (withoutSecondDrive.order[i].stableIdentity == 503)
+        {
+            for (std::size_t j = i + 1; j < withoutSecondDrive.count; ++j)
+                withoutSecondDrive.order[j - 1] = withoutSecondDrive.order[j];
+            --withoutSecondDrive.count;
+            break;
+        }
+    context.expect(processor.setFxChainConfiguration(withoutSecondDrive),
+                   "removing mapped instance leaves the remaining chain valid");
+    withoutSecondDrive.order[withoutSecondDrive.count++] = { FxType::drive, 1, 505 };
+    context.expect(processor.setFxChainConfiguration(withoutSecondDrive),
+                   "a new instance may reuse the DSP slot with a fresh identity");
+    context.expect(processor.setFxMacroAssignments(afterReorder),
+                   "orphan mapping can be retained safely after removal");
+    const auto orphaned = processor.getFxMacroAssignments();
+    context.expect(orphaned.assignments[1].instanceIdentity == 503
+                       && withoutSecondDrive.order[withoutSecondDrive.count - 1].stableIdentity == 505,
+                   "slot reuse does not redirect the orphaned mapping");
+
+    setParameter(processor, hypercolor::ParameterIDs::macroX, 0.23f);
+    setParameter(processor, hypercolor::ParameterIDs::macroY, 0.81f);
+    juce::MemoryBlock state;
+    processor.getStateInformation(state);
+    HypercolorAudioProcessor restored;
+    restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    const auto restoredMappings = restored.getFxMacroAssignments();
+    context.expect(restoredMappings.count == mappings.count
+                       && restoredMappings.assignments[0].instanceIdentity == 502
+                       && restoredMappings.assignments[1].instanceIdentity == 503
+                       && restoredMappings.assignments[2].minimum == 200.0f
+                       && restoredMappings.assignments[3].parameterID
+                            == fxParameterID(FxType::filter, 0, hypercolor::ParameterIDs::filterMode),
+                   "assignments and per-instance min/max round-trip through plugin state");
+    context.expectNear(getParameterValue(restored, hypercolor::ParameterIDs::macroX),
+                       0.23, 0.002, "Macro X automation value round-trips");
+    context.expectNear(getParameterValue(restored, hypercolor::ParameterIDs::macroY),
+                       0.81, 0.002, "Macro Y automation value round-trips");
+
+    auto legacyXml = juce::AudioProcessor::getXmlFromBinary(state.getData(),
+        static_cast<int>(state.getSize()));
+    context.expect(legacyXml != nullptr, "macro state XML is readable for legacy test");
+    if (legacyXml != nullptr)
+    {
+        legacyXml->setAttribute("schemaVersion", 5);
+        if (auto* assignments = legacyXml->getChildByName("FX_MACRO_ASSIGNMENTS"); assignments != nullptr)
+            legacyXml->removeChildElement(assignments, true);
+        if (auto* chainNode = legacyXml->getChildByName("FX_CHAIN"); chainNode != nullptr)
+            for (auto* module = chainNode->getFirstChildElement(); module != nullptr; module = module->getNextElement())
+                module->removeAttribute("identity");
+        legacyXml->removeAttribute("nextFxIdentity");
+        for (auto* child = legacyXml->getFirstChildElement(); child != nullptr; child = child->getNextElement())
+            if (child->hasTagName("PARAM")
+                && (child->getStringAttribute("id") == hypercolor::ParameterIDs::macroX
+                    || child->getStringAttribute("id") == hypercolor::ParameterIDs::macroY))
+                child->setAttribute("value", 0.5);
+        juce::MemoryBlock legacy;
+        juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacy);
+        HypercolorAudioProcessor legacyProcessor;
+        legacyProcessor.setStateInformation(legacy.getData(), static_cast<int>(legacy.getSize()));
+        context.expect(legacyProcessor.getFxMacroAssignments().count == 0,
+                       "pre-macro state loads with no assignments");
+        context.expectNear(getParameterValue(legacyProcessor, hypercolor::ParameterIDs::macroX),
+                           0.5, 0.002, "pre-macro state receives neutral Macro X");
+        context.expectNear(getParameterValue(legacyProcessor, hypercolor::ParameterIDs::macroY),
+                           0.5, 0.002, "pre-macro state receives neutral Macro Y");
+        const auto legacyChain = legacyProcessor.getFxChainConfiguration();
+        context.expect(std::any_of(legacyChain.order.begin(),
+                                   legacyChain.order.begin() + legacyChain.count,
+            [](const FxInstanceId& instance)
+            {
+                return instance.type == FxType::space && instance.slot == 0
+                    && instance.stableIdentity == legacyFxIdentity(FxType::space, 0);
+            }),
+                       "schema 5 rack receives deterministic identities");
+    }
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor(processor.createEditor());
+    context.expect(editor != nullptr, "editor creates for macro integration test");
+    if (editor != nullptr)
+    {
+        auto* pad = dynamic_cast<hypercolor::ui::XYController*>(
+            editor->findChildWithID("xy.controller"));
+        context.expect(pad != nullptr, "existing XY pad remains the macro controller");
+        if (pad != nullptr)
+        {
+            pad->setCoordinates({ 0.2f, 0.7f }, true);
+            context.expectNear(getParameterValue(processor, hypercolor::ParameterIDs::macroX),
+                               0.2, 0.002, "XY horizontal movement writes Macro X to APVTS");
+            context.expectNear(getParameterValue(processor, hypercolor::ParameterIDs::macroY),
+                               0.7, 0.002, "XY vertical movement writes Macro Y to APVTS");
+        }
+        context.expect(editor->findChildWithID("xy.macroAssignments") != nullptr,
+                       "compact macro assignment entry point exists in the Granular workspace");
     }
 }
 
@@ -1429,11 +1661,233 @@ void testFallbackResetAndReprepare(TestContext& context)
     );
 }
 
+void testLfoConfigurationAndRuntime(TestContext& context)
+{
+    using namespace hypercolor::plugin;
+    using hypercolor::dsp::modulation::LfoWaveform;
+    context.expect(lfoDivisionLabels.size() == 12,
+        "LFO BPM Sync exposes straight and triplet divisions from whole to thirty-second notes");
+    context.expectNear(lfoFrequencyHz(LfoRateMode::bpmSync, 1.0f,
+        LfoDivision::eighthTriplet, 120.0), 6.0, 1.0e-6,
+        "BPM division maps eighth-note triplets to 6 cycles per second at 120 BPM");
+    context.expectNear(lfoFrequencyHz(LfoRateMode::bpmSync, 1.0f,
+        LfoDivision::wholeTriplet, 120.0), 0.75, 1.0e-6,
+        "whole-note triplet maps to 0.75 cycles per second at 120 BPM");
+    context.expectNear(lfoFrequencyHz(LfoRateMode::free, 3.25f,
+        LfoDivision::quarter, 120.0), 3.25, 1.0e-6,
+        "Free rate remains independent of host tempo");
+
+    HypercolorAudioProcessor source;
+    FxChainConfiguration chain;
+    chain.count = 3;
+    chain.order[0] = { FxType::drive, 0, 801 };
+    chain.order[1] = { FxType::drive, 1, 803 };
+    chain.order[2] = { FxType::filter, 0, 802 };
+    context.expect(source.setFxChainConfiguration(chain), "LFO test configures stable FX identities");
+    LfoConfiguration configuration;
+    configuration.moduleCount = 2;
+    configuration.modules[0] = { 901, true, LfoWaveform::sawUp, LfoRateMode::free,
+        2.5f, LfoDivision::quarter, 0.8f, 0.125f, 0.0f };
+    configuration.modules[1] = { 902, true, LfoWaveform::triangle, LfoRateMode::bpmSync,
+        1.0f, LfoDivision::eighthTriplet, 0.35f, 0.5f, 0.1f };
+    configuration.assignmentCount = 4;
+    configuration.assignments[0] = { 901, 801,
+        fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveAmount), 0.7f, true, false };
+    configuration.assignments[1] = { 902, 801,
+        fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveAmount), 0.3f, false, true };
+    configuration.assignments[2] = { 901, 802,
+        fxParameterID(FxType::filter, 0, hypercolor::ParameterIDs::filterCutoff), 0.45f, true, false };
+    configuration.assignments[3] = { 901, 803,
+        fxParameterID(FxType::drive, 1, hypercolor::ParameterIDs::driveAmount), 0.2f, true, true };
+    context.expect(source.setLfoConfiguration(configuration),
+        "multiple LFO sources can target one FX parameter and one source can target several FX instances");
+    const auto copied = source.getLfoConfiguration();
+    context.expect(copied.moduleCount == 2 && copied.assignmentCount == 4
+        && copied.modules[1].rateMode == LfoRateMode::bpmSync
+        && copied.assignments[1].fxInstanceIdentity == 801,
+        "LFO configuration API retains module and stable assignment data");
+    auto reordered = chain;
+    std::swap(reordered.order[0], reordered.order[2]);
+    context.expect(source.setFxChainConfiguration(reordered), "FX reorder with LFO mappings is accepted");
+    context.expect(source.getLfoConfiguration().assignments[0].fxInstanceIdentity == 801,
+        "FX reorder does not change the LFO assignment's stable target identity");
+    auto reusedSlot = chain;
+    reusedSlot.count = 1;
+    reusedSlot.order[0] = { FxType::drive, 0, 899 };
+    context.expect(source.setFxChainConfiguration(reusedSlot), "FX slot reuse is accepted");
+    context.expect(source.getLfoConfiguration().assignments[0].fxInstanceIdentity == 801,
+        "deleting an assigned FX leaves an orphaned stable assignment instead of retargeting a reused slot");
+    LfoConfiguration invalid = configuration;
+    invalid.assignments[0].fxInstanceIdentity = 899;
+    invalid.assignments[0].parameterID = fxParameterID(FxType::filter, 0,
+        hypercolor::ParameterIDs::filterCutoff);
+    context.expect(!source.setLfoConfiguration(invalid),
+        "an active FX identity cannot be paired with a different module parameter ID");
+    invalid = configuration;
+    invalid.assignments[0].parameterID = fxParameterID(FxType::drive, 0,
+        hypercolor::ParameterIDs::driveMode);
+    context.expect(!source.setLfoConfiguration(invalid),
+        "discrete FX mode parameters are not accepted as continuous LFO targets");
+
+    juce::MemoryBlock state;
+    source.getStateInformation(state);
+    HypercolorAudioProcessor restored;
+    restored.setStateInformation(state.getData(), static_cast<int>(state.getSize()));
+    const auto restoredConfig = restored.getLfoConfiguration();
+    context.expect(restoredConfig.moduleCount == 2 && restoredConfig.assignmentCount == 4,
+        "LFO modules and mappings survive plugin state round trip");
+    context.expect(restoredConfig.modules[0].stableIdentity == 901
+        && restoredConfig.modules[1].division == LfoDivision::eighthTriplet
+        && restoredConfig.assignments[2].parameterID
+            == fxParameterID(FxType::filter, 0, hypercolor::ParameterIDs::filterCutoff),
+        "state restore preserves stable IDs and BPM division mapping");
+    auto legacyXml = juce::AudioProcessor::getXmlFromBinary(
+        state.getData(), static_cast<int>(state.getSize()));
+    if (legacyXml != nullptr)
+    {
+        legacyXml->setAttribute("schemaVersion", 6);
+        legacyXml->removeChildElement(legacyXml->getChildByName("LFO_CONFIGURATION"), true);
+        legacyXml->removeAttribute("nextLfoIdentity");
+        juce::MemoryBlock legacyState;
+        juce::AudioProcessor::copyXmlToBinary(*legacyXml, legacyState);
+        HypercolorAudioProcessor legacyRestored;
+        legacyRestored.setStateInformation(legacyState.getData(), static_cast<int>(legacyState.getSize()));
+        context.expect(legacyRestored.getLfoConfiguration().moduleCount == 0
+            && legacyRestored.getLfoConfiguration().assignmentCount == 0,
+            "schema 6 project without LFO data restores with a neutral empty modulation state");
+    }
+
+    HypercolorAudioProcessor withLfo, withoutLfo;
+    const auto configure = [&](HypercolorAudioProcessor& processor, bool useLfo)
+    {
+        (void) processor.setBusesLayout({ juce::AudioChannelSet::mono(), juce::AudioChannelSet::mono() });
+        FxChainConfiguration oneDrive; oneDrive.count = 1; oneDrive.order[0] = { FxType::drive, 0, 811 };
+        (void) processor.setFxChainConfiguration(oneDrive);
+        setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+        setParameter(processor, hypercolor::ParameterIDs::grainDensity, 120.0f);
+        setParameter(processor, hypercolor::ParameterIDs::grainSize, 10.0f);
+        setParameter(processor, hypercolor::ParameterIDs::driveEnabled, 1.0f);
+        setParameter(processor, hypercolor::ParameterIDs::driveMix, 100.0f);
+        setParameter(processor, hypercolor::ParameterIDs::driveAmount, 0.0f);
+        FxMacroAssignmentSet macro;
+        macro.count = 1;
+        macro.assignments[0] = { MacroAxis::x, 811,
+            fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveAmount), 4.0f, 28.0f };
+        (void) processor.setFxMacroAssignments(macro);
+        setParameter(processor, hypercolor::ParameterIDs::macroX, 0.5f);
+        if (useLfo)
+        {
+            LfoConfiguration active;
+            active.moduleCount = 2;
+            active.modules[0] = { 912, true, LfoWaveform::sawUp, LfoRateMode::free,
+                1.0f, LfoDivision::quarter, 1.0f, 0.0f, 0.0f };
+            active.modules[1] = { 913, true, LfoWaveform::sine, LfoRateMode::free,
+                3.0f, LfoDivision::quarter, 0.45f, 0.25f, 0.0f };
+            active.assignmentCount = 2;
+            active.assignments[0] = { 912, 811,
+                fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveAmount),
+                1.0f, true, false };
+            active.assignments[1] = { 913, 811,
+                fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveAmount),
+                0.4f, true, true };
+            (void) processor.setLfoConfiguration(active);
+        }
+        processor.prepareToPlay(sampleRate, 257);
+    };
+    configure(withLfo, true); configure(withoutLfo, false);
+    juce::MidiBuffer midi;
+    bool different = false;
+    for (int blockIndex = 0; blockIndex < 190; ++blockIndex)
+    {
+        juce::AudioBuffer<float> a(1, 257), b(1, 257);
+        for (int i = 0; i < 257; ++i)
+        {
+            const auto x = 0.36f * std::sin(0.031f * static_cast<float>(blockIndex * 257 + i));
+            a.setSample(0, i, x); b.setSample(0, i, x);
+        }
+        withLfo.processBlock(a, midi); withoutLfo.processBlock(b, midi);
+        different = different || buffersDiffer(a, b, 1.0e-5f);
+    }
+    context.expect(different, "audio-thread LFO modulation changes the mapped FX response");
+    context.expectNear(getParameterValue(withLfo, hypercolor::ParameterIDs::driveAmount), 0.0, 0.01,
+        "XY and LFO overlays do not write the effective value back to the base FX parameter");
+
+    const auto processSynced = [&](double ppq)
+    {
+        HypercolorAudioProcessor processor;
+        (void) processor.setBusesLayout({ juce::AudioChannelSet::mono(), juce::AudioChannelSet::mono() });
+        FxChainConfiguration oneDrive; oneDrive.count = 1; oneDrive.order[0] = { FxType::drive, 0, 821 };
+        (void) processor.setFxChainConfiguration(oneDrive);
+        setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
+        setParameter(processor, hypercolor::ParameterIDs::grainDensity, 120.0f);
+        setParameter(processor, hypercolor::ParameterIDs::grainSize, 10.0f);
+        setParameter(processor, hypercolor::ParameterIDs::driveEnabled, 1.0f);
+        setParameter(processor, hypercolor::ParameterIDs::driveMix, 100.0f);
+        setParameter(processor, hypercolor::ParameterIDs::driveAmount, 0.0f);
+        LfoConfiguration synced;
+        synced.moduleCount = 1;
+        synced.modules[0] = { 922, true, LfoWaveform::sine, LfoRateMode::bpmSync,
+            1.0f, LfoDivision::quarter, 1.0f, 0.0f, 0.0f };
+        synced.assignmentCount = 1;
+        synced.assignments[0] = { 922, 821,
+            fxParameterID(FxType::drive, 0, hypercolor::ParameterIDs::driveAmount),
+            1.0f, true, false };
+        (void) processor.setLfoConfiguration(synced);
+        FixedPositionPlayHead playHead;
+        playHead.setTransport(120.0, ppq);
+        processor.setPlayHead(&playHead);
+        processor.prepareToPlay(sampleRate, 512);
+        juce::AudioBuffer<float> input(1, 512);
+        for (int i = 0; i < input.getNumSamples(); ++i)
+            input.setSample(0, i, 0.35f * std::sin(0.03f * static_cast<float>(i)));
+        juce::MidiBuffer syncMidi;
+        processor.processBlock(input, syncMidi);
+        return input;
+    };
+    const auto syncAtZero = processSynced(0.0);
+    const auto syncAtQuarterPhase = processSynced(0.25);
+    context.expect(buffersDiffer(syncAtZero, syncAtQuarterPhase, 1.0e-5f),
+        "BPM-synced LFO phase follows host PPQ position");
+
+    allocationProbe::count.store(0, std::memory_order_relaxed);
+    allocationProbe::enabled.store(true, std::memory_order_relaxed);
+    juce::AudioBuffer<float> realtime(1, 257); fillBuffer(realtime, 0.2f);
+    withLfo.processBlock(realtime, midi);
+    allocationProbe::enabled.store(false, std::memory_order_relaxed);
+    context.expect(allocationProbe::count.load(std::memory_order_relaxed) == 0,
+        "prepared LFO modulation path performs no heap allocation");
+
+    constexpr std::array<std::pair<double, int>, 4> lfoRateAndBlockCases {{
+        { 44100.0, 1 }, { 48000.0, 7 }, { 88200.0, 64 }, { 96000.0, 512 }
+    }};
+    for (const auto [rate, blockSize] : lfoRateAndBlockCases)
+    {
+        withLfo.prepareToPlay(rate, blockSize);
+        juce::AudioBuffer<float> varying(1, blockSize);
+        fillBuffer(varying, 0.17f);
+        withLfo.processBlock(varying, midi);
+        context.expect(isFinite(varying),
+            "LFO processing remains finite after reprepare across sample rates and block sizes");
+    }
+}
+
 void testNonFiniteInputAndRealtimeAllocations(TestContext& context)
 {
     HypercolorAudioProcessor processor;
     setParameter(processor, hypercolor::ParameterIDs::dryWet, 100.0f);
     setParameter(processor, hypercolor::ParameterIDs::grainTimingJitter, 100.0f);
+    hypercolor::plugin::FxMacroAssignmentSet assignments;
+    assignments.count = 1;
+    assignments.assignments[0] = {
+        hypercolor::plugin::MacroAxis::x,
+        hypercolor::plugin::legacyFxIdentity(hypercolor::plugin::FxType::space, 0),
+        hypercolor::plugin::fxParameterID(hypercolor::plugin::FxType::space, 0,
+            hypercolor::ParameterIDs::reverbSize),
+        20.0f, 90.0f
+    };
+    context.expect(processor.setFxMacroAssignments(assignments),
+                   "allocation test enables a live macro assignment");
+    setParameter(processor, hypercolor::ParameterIDs::macroX, 0.73f);
     processor.prepareToPlay(sampleRate, 64);
 
     juce::AudioBuffer<float> history(2, 10000);
@@ -1457,7 +1911,7 @@ void testNonFiniteInputAndRealtimeAllocations(TestContext& context)
     context.expect(isFinite(buffer), "non-finite input must not reach plugin output");
     context.expect(
         allocationProbe::count.load(std::memory_order_relaxed) == 0,
-        "prepared processBlock should perform no heap allocations"
+        "prepared processBlock with active macro assignment should perform no heap allocations"
     );
 }
 
@@ -2237,7 +2691,7 @@ void testDensitySyncStateMigration(TestContext& context)
         );
         context.expect(
             migratedXml != nullptr
-                && migratedXml->getIntAttribute("schemaVersion") == 5,
+                && migratedXml->getIntAttribute("schemaVersion") == 7,
             "Migrated state should be saved with the current schema version"
         );
 
@@ -2622,8 +3076,8 @@ void testFxEnableStateMigration(TestContext& context)
     if (currentXml != nullptr)
     {
         context.expect(
-            currentXml->getIntAttribute("schemaVersion") == 5,
-            "Newly saved states should use schema 5"
+            currentXml->getIntAttribute("schemaVersion") == 7,
+            "Newly saved states should use schema 7"
         );
 
         HypercolorAudioProcessor currentRestored;
@@ -2690,6 +3144,9 @@ void testEditorControlsStateAndResize(TestContext& context)
         : nullptr;
     context.expect(defaultSourceMode != nullptr,
                    "new editor should expose Live / History selector");
+    context.expect(defaultEditor != nullptr
+        && defaultEditor->findChildWithID("lfo.workspace") != nullptr,
+        "FX Rack should expose the LFO modulation workspace entry");
     if (defaultSourceMode != nullptr)
     {
         context.expect(
@@ -3877,7 +4334,7 @@ void testStateRoundTrip(TestContext& context)
 
     if (futureXml != nullptr)
     {
-        futureXml->setAttribute("schemaVersion", 6);
+        futureXml->setAttribute("schemaVersion", 8);
         juce::MemoryBlock futureState;
         juce::AudioProcessor::copyXmlToBinary(*futureXml, futureState);
 
@@ -3910,6 +4367,8 @@ int main()
     testFxEnableRuntimeIntegration(context);
     testFxEnableStateAndTransition(context);
     testDynamicFxRackAndInstanceState(context);
+    testFxMacroAssignments(context);
+    testLfoConfigurationAndRuntime(context);
     testGranularParametersReachEngine(context);
     testStereoGranularProcessing(context);
     testFallbackResetAndReprepare(context);

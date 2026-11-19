@@ -39,6 +39,7 @@ private:
     void selectGranular();
     void selectEffect(std::size_t rackIndex);
     void showAddEffectMenu();
+    void showLfoWorkspace();
     void addEffect(hypercolor::plugin::FxType type);
     void removeEffect(std::size_t rackIndex);
     void moveEffect(std::size_t from, std::size_t to);
@@ -82,6 +83,7 @@ private:
     juce::TextButton reverseButton;
     juce::ComboBox densityModeSelector;
     juce::ComboBox sourceModeSelector;
+    juce::TextButton macroAssignmentButton { "MACRO MAP" };
 
     juce::Label dryWetLabel;
     juce::Label outputGainLabel;
@@ -103,6 +105,7 @@ private:
     std::array<juce::TextButton, hypercolor::plugin::maximumFxChainModules> fxEnableButtons;
     std::array<juce::TextButton, hypercolor::plugin::maximumFxChainModules> fxRemoveButtons;
     juce::TextButton addFxButton;
+    juce::TextButton lfoWorkspaceButton { "MODULATION / LFO" };
     std::array<juce::Slider, 9> inspectorSliders;
     std::array<hypercolor::ui::PremiumRotaryKnob, 9> fxRotaryKnobs;
     std::array<juce::Label, 9> inspectorLabels;
@@ -115,6 +118,7 @@ private:
     int draggingRackIndex = -1;
     int dropRackIndex = -1;
     int selectedModule = -1;
+    std::uint64_t focusedLfoIdentity = 0;
 
     SliderAttachment dryWetAttachment;
     SliderAttachment outputGainAttachment;
@@ -128,6 +132,8 @@ private:
     std::unique_ptr<ComboBoxAttachment> sourceModeAttachment;
 
     std::atomic<int> pendingDensityMode { -1 };
+    std::atomic<float> pendingMacroX { 0.5f };
+    std::atomic<float> pendingMacroY { 0.5f };
     DensityMode appliedDensityMode = DensityMode::free;
     bool densityRebindDeferred = false;
     juce::TooltipWindow tooltipWindow;

@@ -16,13 +16,20 @@ static_assert(
     "Host BPM cache must remain lock-free on the audio thread"
 );
 static_assert(std::atomic<std::uint8_t>::is_always_lock_free
-              && std::atomic<std::uint32_t>::is_always_lock_free,
-              "FX chain snapshots must remain lock-free on the audio thread");
+              && std::atomic<std::uint32_t>::is_always_lock_free
+              && std::atomic<std::uint16_t>::is_always_lock_free
+              && std::atomic<std::uint64_t>::is_always_lock_free
+              && std::atomic<bool>::is_always_lock_free,
+              "FX and macro snapshots must remain lock-free on the audio thread");
 
 constexpr auto stateTreeType = "HYPERCOLOR_STATE";
 constexpr auto stateSchemaProperty = "schemaVersion";
 constexpr auto fxChainStateType = "FX_CHAIN";
-constexpr int currentStateSchemaVersion = 5;
+constexpr auto fxMacroAssignmentsStateType = "FX_MACRO_ASSIGNMENTS";
+constexpr auto lfoConfigurationStateType = "LFO_CONFIGURATION";
+constexpr auto nextFxIdentityProperty = "nextFxIdentity";
+constexpr auto nextLfoIdentityProperty = "nextLfoIdentity";
+constexpr int currentStateSchemaVersion = 7;
 // Large enough to leave room for future bounded preset/state data while still
 // rejecting clearly unreasonable input before parsing it as XML.
 constexpr int maxStateSizeBytes = 64 * 1024 * 1024;
@@ -338,7 +345,10 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
         hypercolor::plugin::FxType::delay
     };
     for (std::size_t i = 0; i < initialTypes.size(); ++i)
-        defaultFxConfiguration.order[i] = { initialTypes[i], 0 };
+        defaultFxConfiguration.order[i] = {
+            initialTypes[i], 0,
+            hypercolor::plugin::legacyFxIdentity(initialTypes[i], 0)
+        };
     (void) setFxChainConfiguration(defaultFxConfiguration);
 
     for (std::size_t type = 0; type < hypercolor::plugin::fxTypeCount; ++type)
@@ -423,6 +433,12 @@ HypercolorAudioProcessor::HypercolorAudioProcessor()
     );
     grainEnvelopeParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::grainEnvelope
+    );
+    macroXParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::macroX
+    );
+    macroYParameter = parameters.getRawParameterValue(
+        hypercolor::ParameterIDs::macroY
     );
     reverbEnabledParameter = parameters.getRawParameterValue(
         hypercolor::ParameterIDs::reverbEnabled
@@ -623,6 +639,19 @@ HypercolorAudioProcessor::createParameterLayout()
         "Grain Envelope",
         juce::StringArray { "Hann", "Triangle", "Smooth", "Exponential" },
         grainEnvelopeDefaultIndex
+    ));
+
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::macroX, 1 },
+        "Macro X",
+        juce::NormalisableRange<float> { 0.0f, 1.0f, 0.001f },
+        0.5f
+    ));
+    layout.add(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID { hypercolor::ParameterIDs::macroY, 1 },
+        "Macro Y",
+        juce::NormalisableRange<float> { 0.0f, 1.0f, 0.001f },
+        0.5f
     ));
 
     layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID { hypercolor::ParameterIDs::reverbEnabled, 1 }, "Reverb Enabled", false));
@@ -991,6 +1020,8 @@ void HypercolorAudioProcessor::prepareToPlay(
     const auto inputChannels = getTotalNumInputChannels();
 
     dryBuffer.setSize(2, scratchBlockSize, false, false, true);
+    for (std::size_t i = 0; i < lfoOscillators.size(); ++i)
+        (void) lfoOscillators[i].prepare(safeSampleRate);
     // EffectChain samples module bypass state while it is prepared. Sync the
     // APVTS targets first so a state loaded before prepareToPlay starts in the
     // correct enabled/bypassed state.
@@ -1077,119 +1108,32 @@ void HypercolorAudioProcessor::processBlock(
     updateParameterTargets();
     updateEffectBypassTargets();
     applyFxChainConfiguration();
+    applyFxMacroAssignmentSnapshot();
+    applyLfoConfigurationSnapshot();
     const auto bpmForBlock = readHostBpm();
+    currentBlockBpm = bpmForBlock;
+    currentBlockPpqValid = false;
+    if (const auto* playHead = getPlayHead())
+    {
+        if (const auto position = playHead->getPosition())
+        {
+            if (const auto ppq = position->getPpqPosition(); ppq
+                && std::isfinite(*ppq))
+            {
+                currentBlockPpq = *ppq;
+                currentBlockPpqValid = true;
+            }
+        }
+    }
     const auto densityBpm = static_cast<double>(lastValidHostBpm.load(
         std::memory_order_acquire
     ));
     const auto granularParameters = readGranularParameters(densityBpm);
-    spaceReverb.setParameters(readReverbParameters());
-    modulationEffect.setParameters({
-        modulationModeParameter->load(std::memory_order_relaxed) >= 0.5f
-            ? hypercolor::dsp::fx::ModulationMode::flanger
-            : hypercolor::dsp::fx::ModulationMode::chorus,
-        modulationRateParameter->load(std::memory_order_relaxed),
-        modulationDepthParameter->load(std::memory_order_relaxed) / 100.0f,
-        modulationBaseDelayParameter->load(std::memory_order_relaxed),
-        modulationFeedbackParameter->load(std::memory_order_relaxed) / 100.0f,
-        modulationMixParameter->load(std::memory_order_relaxed) / 100.0f,
-        modulationWidthParameter->load(std::memory_order_relaxed) / 100.0f
-    });
-    driveEffect.setParameters({
-        driveModeParameter->load(std::memory_order_relaxed) >= 1.5f
-            ? hypercolor::dsp::fx::DriveMode::tube
-            : (driveModeParameter->load(std::memory_order_relaxed) >= 0.5f
-                ? hypercolor::dsp::fx::DriveMode::hardClip
-                : hypercolor::dsp::fx::DriveMode::softClip),
-        driveAmountParameter->load(std::memory_order_relaxed),
-        driveToneParameter->load(std::memory_order_relaxed) / 100.0f,
-        driveMixParameter->load(std::memory_order_relaxed) / 100.0f,
-        driveOutputParameter->load(std::memory_order_relaxed)
-    });
-    delayEffect.setParameters({
-        delayModeParameter->load(std::memory_order_relaxed) >= 0.5f ? hypercolor::dsp::fx::DelayMode::pingPong : hypercolor::dsp::fx::DelayMode::stereo,
-        delaySyncParameter->load(std::memory_order_relaxed) >= 0.5f,
-        delayTimeParameter->load(std::memory_order_relaxed),
-        static_cast<hypercolor::dsp::fx::DelayDivision>(std::clamp(delayDivisionParameter->load(std::memory_order_relaxed), 0.0f, 8.0f)),
-        delayFeedbackParameter->load(std::memory_order_relaxed) / 100.0f,
-        delayLowCutParameter->load(std::memory_order_relaxed),
-        delayHighCutParameter->load(std::memory_order_relaxed),
-        delayMixParameter->load(std::memory_order_relaxed) / 100.0f,
-        delayWidthParameter->load(std::memory_order_relaxed) / 100.0f,
-        static_cast<float>(bpmForBlock)
-    });
-    tapeEffect.setParameters({
-        tapeDriveParameter->load(std::memory_order_relaxed) / 100.0f,
-        tapeWowParameter->load(std::memory_order_relaxed) / 100.0f,
-        tapeFlutterParameter->load(std::memory_order_relaxed) / 100.0f,
-        tapeWearParameter->load(std::memory_order_relaxed) / 100.0f,
-        tapeMixParameter->load(std::memory_order_relaxed) / 100.0f,
-        tapeOutputParameter->load(std::memory_order_relaxed)
-    });
-    bitcrushEffect.setParameters({
-        bitcrushBitsParameter->load(std::memory_order_relaxed),
-        bitcrushRateParameter->load(std::memory_order_relaxed),
-        bitcrushModeParameter->load(std::memory_order_relaxed) >= 0.5f ? hypercolor::dsp::fx::BitcrushMode::truncate : hypercolor::dsp::fx::BitcrushMode::round,
-        bitcrushMixParameter->load(std::memory_order_relaxed) / 100.0f,
-        bitcrushOutputParameter->load(std::memory_order_relaxed)
-    });
-    filterEffect.setParameters({
-        static_cast<hypercolor::dsp::fx::FilterMode>(std::clamp(filterModeParameter->load(std::memory_order_relaxed), 0.0f, 3.0f)),
-        filterCutoffParameter->load(std::memory_order_relaxed),
-        filterResonanceParameter->load(std::memory_order_relaxed) / 100.0f,
-        filterDriveParameter->load(std::memory_order_relaxed) / 100.0f,
-        filterMixParameter->load(std::memory_order_relaxed) / 100.0f,
-        filterOutputParameter->load(std::memory_order_relaxed)
-    });
-    compressorEffect.setParameters({
-        compressorThresholdParameter->load(std::memory_order_relaxed),
-        compressorRatioParameter->load(std::memory_order_relaxed),
-        compressorAttackParameter->load(std::memory_order_relaxed),
-        compressorReleaseParameter->load(std::memory_order_relaxed),
-        compressorKneeParameter->load(std::memory_order_relaxed),
-        compressorMakeupParameter->load(std::memory_order_relaxed),
-        compressorMixParameter->load(std::memory_order_relaxed) / 100.0f,
-        compressorStereoLinkParameter->load(std::memory_order_relaxed) / 100.0f
-    });
-
-    for (std::size_t type = 0; type < hypercolor::plugin::fxTypeCount; ++type)
-    {
-        for (std::size_t slot = 1; slot < hypercolor::plugin::maximumFxInstancesPerType; ++slot)
-        {
-            const auto& raw = fxRawParameters[type][slot].values;
-            const auto value = [&raw](std::size_t i, float fallback = 0.0f)
-            {
-                return raw[i] != nullptr ? raw[i]->load(std::memory_order_relaxed) : fallback;
-            };
-            switch (type)
-            {
-                case 0:
-                    extraSpaceReverbs[slot - 1].setParameters({ value(0, 30.0f) / 100.0f, value(1, 50.0f) / 100.0f, value(2, 4.0f), value(3, 40.0f) / 100.0f, value(4, 20.0f), value(5, 100.0f) / 100.0f });
-                    break;
-                case 1:
-                    extraModulationEffects[slot - 1].setParameters({ value(0) >= 0.5f ? hypercolor::dsp::fx::ModulationMode::flanger : hypercolor::dsp::fx::ModulationMode::chorus, value(1, 0.3f), value(2, 50.0f) / 100.0f, value(3, 7.0f), value(4) / 100.0f, value(5, 30.0f) / 100.0f, value(6, 100.0f) / 100.0f });
-                    break;
-                case 2:
-                    extraDriveEffects[slot - 1].setParameters({ value(0) >= 1.5f ? hypercolor::dsp::fx::DriveMode::tube : (value(0) >= 0.5f ? hypercolor::dsp::fx::DriveMode::hardClip : hypercolor::dsp::fx::DriveMode::softClip), value(1), value(2, 50.0f) / 100.0f, value(3, 100.0f) / 100.0f, value(4) });
-                    break;
-                case 3:
-                    extraTapeEffects[slot - 1].setParameters({ value(0, 35.0f) / 100.0f, value(1, 15.0f) / 100.0f, value(2, 10.0f) / 100.0f, value(3, 15.0f) / 100.0f, value(4, 100.0f) / 100.0f, value(5) });
-                    break;
-                case 4:
-                    extraBitcrushEffects[slot - 1].setParameters({ value(0, 16.0f), value(1, 22050.0f), value(2) >= 0.5f ? hypercolor::dsp::fx::BitcrushMode::truncate : hypercolor::dsp::fx::BitcrushMode::round, value(3, 100.0f) / 100.0f, value(4) });
-                    break;
-                case 5:
-                    extraFilterEffects[slot - 1].setParameters({ static_cast<hypercolor::dsp::fx::FilterMode>(std::clamp(value(0), 0.0f, 3.0f)), value(1, 10000.0f), value(2, 20.0f) / 100.0f, value(3) / 100.0f, value(4, 100.0f) / 100.0f, value(5) });
-                    break;
-                case 6:
-                    extraCompressorEffects[slot - 1].setParameters({ value(0, -18.0f), value(1, 4.0f), value(2, 10.0f), value(3, 100.0f), value(4, 6.0f), value(5), value(6, 100.0f) / 100.0f, value(7, 100.0f) / 100.0f });
-                    break;
-                case 7:
-                    extraDelayEffects[slot - 1].setParameters({ value(0) >= 0.5f ? hypercolor::dsp::fx::DelayMode::pingPong : hypercolor::dsp::fx::DelayMode::stereo, value(1) >= 0.5f, value(2, 350.0f), static_cast<hypercolor::dsp::fx::DelayDivision>(std::clamp(value(3, 2.0f), 0.0f, 8.0f)), value(4, 35.0f) / 100.0f, value(5, 100.0f), value(6, 12000.0f), value(7, 30.0f) / 100.0f, value(8, 100.0f) / 100.0f, static_cast<float>(bpmForBlock) });
-                    break;
-                default: break;
-            }
-        }
-    }
+    for (auto& type : audioFxLfoOverrides)
+        for (auto& slot : type)
+            for (auto& parameter : slot)
+                parameter = {};
+    updateFxModuleParameters(bpmForBlock);
 
     const auto numChannels = juce::jmin(
         totalInputChannels,
@@ -1240,6 +1184,119 @@ bool HypercolorAudioProcessor::tryPopGranularTelemetry(
 ) noexcept
 {
     return granularTelemetryQueue.tryPop(destination);
+}
+
+void HypercolorAudioProcessor::updateFxModuleParameters(double bpm) noexcept
+{
+    spaceReverb.setParameters(readReverbParameters());
+    modulationEffect.setParameters({
+        readFxParameterValue(1, 0, 0) >= 0.5f
+            ? hypercolor::dsp::fx::ModulationMode::flanger
+            : hypercolor::dsp::fx::ModulationMode::chorus,
+        readFxParameterValue(1, 0, 1, 0.3f),
+        readFxParameterValue(1, 0, 2, 50.0f) / 100.0f,
+        readFxParameterValue(1, 0, 3, 7.0f),
+        readFxParameterValue(1, 0, 4) / 100.0f,
+        readFxParameterValue(1, 0, 5, 30.0f) / 100.0f,
+        readFxParameterValue(1, 0, 6, 100.0f) / 100.0f
+    });
+    driveEffect.setParameters({
+        readFxParameterValue(2, 0, 0) >= 1.5f
+            ? hypercolor::dsp::fx::DriveMode::tube
+            : (readFxParameterValue(2, 0, 0) >= 0.5f
+                ? hypercolor::dsp::fx::DriveMode::hardClip
+                : hypercolor::dsp::fx::DriveMode::softClip),
+        readFxParameterValue(2, 0, 1),
+        readFxParameterValue(2, 0, 2, 50.0f) / 100.0f,
+        readFxParameterValue(2, 0, 3, 100.0f) / 100.0f,
+        readFxParameterValue(2, 0, 4)
+    });
+    delayEffect.setParameters({
+        readFxParameterValue(7, 0, 0) >= 0.5f ? hypercolor::dsp::fx::DelayMode::pingPong : hypercolor::dsp::fx::DelayMode::stereo,
+        readFxParameterValue(7, 0, 1) >= 0.5f,
+        readFxParameterValue(7, 0, 2, 350.0f),
+        static_cast<hypercolor::dsp::fx::DelayDivision>(std::clamp(readFxParameterValue(7, 0, 3, 2.0f), 0.0f, 8.0f)),
+        readFxParameterValue(7, 0, 4, 35.0f) / 100.0f,
+        readFxParameterValue(7, 0, 5, 100.0f),
+        readFxParameterValue(7, 0, 6, 12000.0f),
+        readFxParameterValue(7, 0, 7, 30.0f) / 100.0f,
+        readFxParameterValue(7, 0, 8, 100.0f) / 100.0f,
+        static_cast<float>(bpm)
+    });
+    tapeEffect.setParameters({
+        readFxParameterValue(3, 0, 0, 35.0f) / 100.0f,
+        readFxParameterValue(3, 0, 1, 15.0f) / 100.0f,
+        readFxParameterValue(3, 0, 2, 10.0f) / 100.0f,
+        readFxParameterValue(3, 0, 3, 15.0f) / 100.0f,
+        readFxParameterValue(3, 0, 4, 100.0f) / 100.0f,
+        readFxParameterValue(3, 0, 5)
+    });
+    bitcrushEffect.setParameters({
+        readFxParameterValue(4, 0, 0, 16.0f),
+        readFxParameterValue(4, 0, 1, 22050.0f),
+        readFxParameterValue(4, 0, 2) >= 0.5f ? hypercolor::dsp::fx::BitcrushMode::truncate : hypercolor::dsp::fx::BitcrushMode::round,
+        readFxParameterValue(4, 0, 3, 100.0f) / 100.0f,
+        readFxParameterValue(4, 0, 4)
+    });
+    filterEffect.setParameters({
+        static_cast<hypercolor::dsp::fx::FilterMode>(std::clamp(readFxParameterValue(5, 0, 0), 0.0f, 3.0f)),
+        readFxParameterValue(5, 0, 1, 10000.0f),
+        readFxParameterValue(5, 0, 2, 20.0f) / 100.0f,
+        readFxParameterValue(5, 0, 3) / 100.0f,
+        readFxParameterValue(5, 0, 4, 100.0f) / 100.0f,
+        readFxParameterValue(5, 0, 5)
+    });
+    compressorEffect.setParameters({
+        readFxParameterValue(6, 0, 0, -18.0f),
+        readFxParameterValue(6, 0, 1, 4.0f),
+        readFxParameterValue(6, 0, 2, 10.0f),
+        readFxParameterValue(6, 0, 3, 100.0f),
+        readFxParameterValue(6, 0, 4, 6.0f),
+        readFxParameterValue(6, 0, 5),
+        readFxParameterValue(6, 0, 6, 100.0f) / 100.0f,
+        readFxParameterValue(6, 0, 7, 100.0f) / 100.0f
+    });
+
+    for (std::size_t type = 0; type < hypercolor::plugin::fxTypeCount; ++type)
+    {
+        for (std::size_t slot = 1; slot < hypercolor::plugin::maximumFxInstancesPerType; ++slot)
+        {
+            const auto& raw = fxRawParameters[type][slot].values;
+            const auto value = [this, type, slot, &raw](std::size_t i, float fallback = 0.0f)
+            {
+                return raw[i] != nullptr ? readFxParameterValue(type, slot, i, fallback) : fallback;
+            };
+            switch (type)
+            {
+                case 0:
+                    extraSpaceReverbs[slot - 1].setParameters({ value(0, 30.0f) / 100.0f, value(1, 50.0f) / 100.0f, value(2, 4.0f), value(3, 40.0f) / 100.0f, value(4, 20.0f), value(5, 100.0f) / 100.0f });
+                    break;
+                case 1:
+                    extraModulationEffects[slot - 1].setParameters({ value(0) >= 0.5f ? hypercolor::dsp::fx::ModulationMode::flanger : hypercolor::dsp::fx::ModulationMode::chorus, value(1, 0.3f), value(2, 50.0f) / 100.0f, value(3, 7.0f), value(4) / 100.0f, value(5, 30.0f) / 100.0f, value(6, 100.0f) / 100.0f });
+                    break;
+                case 2:
+                    extraDriveEffects[slot - 1].setParameters({ value(0) >= 1.5f ? hypercolor::dsp::fx::DriveMode::tube : (value(0) >= 0.5f ? hypercolor::dsp::fx::DriveMode::hardClip : hypercolor::dsp::fx::DriveMode::softClip), value(1), value(2, 50.0f) / 100.0f, value(3, 100.0f) / 100.0f, value(4) });
+                    break;
+                case 3:
+                    extraTapeEffects[slot - 1].setParameters({ value(0, 35.0f) / 100.0f, value(1, 15.0f) / 100.0f, value(2, 10.0f) / 100.0f, value(3, 15.0f) / 100.0f, value(4, 100.0f) / 100.0f, value(5) });
+                    break;
+                case 4:
+                    extraBitcrushEffects[slot - 1].setParameters({ value(0, 16.0f), value(1, 22050.0f), value(2) >= 0.5f ? hypercolor::dsp::fx::BitcrushMode::truncate : hypercolor::dsp::fx::BitcrushMode::round, value(3, 100.0f) / 100.0f, value(4) });
+                    break;
+                case 5:
+                    extraFilterEffects[slot - 1].setParameters({ static_cast<hypercolor::dsp::fx::FilterMode>(std::clamp(value(0), 0.0f, 3.0f)), value(1, 10000.0f), value(2, 20.0f) / 100.0f, value(3) / 100.0f, value(4, 100.0f) / 100.0f, value(5) });
+                    break;
+                case 6:
+                    extraCompressorEffects[slot - 1].setParameters({ value(0, -18.0f), value(1, 4.0f), value(2, 10.0f), value(3, 100.0f), value(4, 6.0f), value(5), value(6, 100.0f) / 100.0f, value(7, 100.0f) / 100.0f });
+                    break;
+                case 7:
+                    extraDelayEffects[slot - 1].setParameters({ value(0) >= 0.5f ? hypercolor::dsp::fx::DelayMode::pingPong : hypercolor::dsp::fx::DelayMode::stereo, value(1) >= 0.5f, value(2, 350.0f), static_cast<hypercolor::dsp::fx::DelayDivision>(std::clamp(value(3, 2.0f), 0.0f, 8.0f)), value(4, 35.0f) / 100.0f, value(5, 100.0f), value(6, 12000.0f), value(7, 30.0f) / 100.0f, value(8, 100.0f) / 100.0f, static_cast<float>(bpm) });
+                    break;
+                default: break;
+            }
+        }
+    }
+
 }
 
 void HypercolorAudioProcessor::updateParameterTargets() noexcept
@@ -1400,12 +1457,12 @@ hypercolor::dsp::fx::SpaceReverbParameters
 HypercolorAudioProcessor::readReverbParameters() const noexcept
 {
     return {
-        reverbMixParameter->load(std::memory_order_relaxed) / 100.0f,
-        reverbSizeParameter->load(std::memory_order_relaxed) / 100.0f,
-        reverbDecayParameter->load(std::memory_order_relaxed),
-        reverbDampingParameter->load(std::memory_order_relaxed) / 100.0f,
-        reverbPreDelayParameter->load(std::memory_order_relaxed),
-        reverbWidthParameter->load(std::memory_order_relaxed) / 100.0f
+        readFxParameterValue(0, 0, 0, 30.0f) / 100.0f,
+        readFxParameterValue(0, 0, 1, 50.0f) / 100.0f,
+        readFxParameterValue(0, 0, 2, 4.0f),
+        readFxParameterValue(0, 0, 3, 40.0f) / 100.0f,
+        readFxParameterValue(0, 0, 4, 20.0f),
+        readFxParameterValue(0, 0, 5, 100.0f) / 100.0f
     };
 }
 
@@ -1460,7 +1517,53 @@ void HypercolorAudioProcessor::processChunk(
             static_cast<std::size_t>(numSamples)
         };
     }
-    const auto effectResult = effectChain.process(effectBlock);
+    auto effectResult = hypercolor::dsp::fx::EffectChainResult::success;
+    bool hasLfo = false;
+    if (lfoModuleCount.load(std::memory_order_relaxed) > 0
+        && lfoAssignmentCount.load(std::memory_order_relaxed) > 0)
+    {
+        for (const auto& assignment : audioLfoAssignments)
+        {
+            if (!assignment.active || assignment.type >= hypercolor::plugin::fxTypeCount
+                || assignment.slot >= hypercolor::plugin::maximumFxInstancesPerType
+                || audioFxInstanceIdentities[assignment.type][assignment.slot] != assignment.fxIdentity)
+                continue;
+            for (const auto& module : audioLfoModules)
+                if (module.identity == assignment.lfoIdentity && module.enabled)
+                { hasLfo = true; break; }
+            if (hasLfo) break;
+        }
+    }
+    constexpr int modulationQuantum = 16;
+    if (hasLfo)
+    {
+        for (int offset = 0; offset < numSamples; offset += modulationQuantum)
+        {
+            const auto segmentLength = juce::jmin(modulationQuantum, numSamples - offset);
+            updateLfoOverrides(currentBlockBpm,
+                currentBlockPpqValid
+                    ? std::optional<double>(currentBlockPpq
+                        + static_cast<double>(startSample + offset) * currentBlockBpm / 60.0
+                            / juce::jmax(1.0, getSampleRate()))
+                    : std::nullopt,
+                segmentLength);
+            updateFxModuleParameters(currentBlockBpm);
+            hypercolor::dsp::fx::EffectAudioBlock segment;
+            segment.numChannels = static_cast<std::uint32_t>(numChannels);
+            for (int channel = 0; channel < numChannels; ++channel)
+                segment.channels[static_cast<std::size_t>(channel)] = {
+                    buffer.getWritePointer(channel, startSample + offset),
+                    static_cast<std::size_t>(segmentLength)
+                };
+            if (effectChain.process(segment)
+                == hypercolor::dsp::fx::EffectChainResult::invalidConfiguration)
+                effectResult = hypercolor::dsp::fx::EffectChainResult::invalidConfiguration;
+        }
+    }
+    else
+    {
+        effectResult = effectChain.process(effectBlock);
+    }
     const auto useDryFallback = granularResult
             == hypercolor::dsp::granular::GranularEngineProcessResult::engineNotPrepared
         || granularResult
@@ -1617,9 +1720,60 @@ void HypercolorAudioProcessor::getStateInformation(
         juce::ValueTree entry("MODULE");
         entry.setProperty("type", hypercolor::plugin::toIndex(chainConfiguration.order[i].type), nullptr);
         entry.setProperty("slot", chainConfiguration.order[i].slot, nullptr);
+        entry.setProperty("identity", static_cast<juce::int64>(chainConfiguration.order[i].stableIdentity), nullptr);
         fxChainState.addChild(entry, -1, nullptr);
     }
     state.addChild(fxChainState, -1, nullptr);
+    state.setProperty(nextFxIdentityProperty,
+        static_cast<juce::int64>(nextFxInstanceIdentity.load(std::memory_order_relaxed)), nullptr);
+
+    const auto assignments = getFxMacroAssignments();
+    juce::ValueTree assignmentState(fxMacroAssignmentsStateType);
+    for (std::size_t i = 0; i < assignments.count; ++i)
+    {
+        const auto& assignment = assignments.assignments[i];
+        juce::ValueTree entry("ASSIGNMENT");
+        entry.setProperty("axis", static_cast<int>(assignment.axis), nullptr);
+        entry.setProperty("identity", static_cast<juce::int64>(assignment.instanceIdentity), nullptr);
+        entry.setProperty("parameter", assignment.parameterID, nullptr);
+        entry.setProperty("minimum", assignment.minimum, nullptr);
+        entry.setProperty("maximum", assignment.maximum, nullptr);
+        assignmentState.addChild(entry, -1, nullptr);
+    }
+    state.addChild(assignmentState, -1, nullptr);
+
+    const auto lfoConfiguration = getLfoConfiguration();
+    juce::ValueTree lfoState(lfoConfigurationStateType);
+    for (std::size_t i = 0; i < lfoConfiguration.moduleCount; ++i)
+    {
+        const auto& module = lfoConfiguration.modules[i];
+        juce::ValueTree entry("LFO");
+        entry.setProperty("identity", static_cast<juce::int64>(module.stableIdentity), nullptr);
+        entry.setProperty("enabled", module.enabled, nullptr);
+        entry.setProperty("waveform", static_cast<int>(module.waveform), nullptr);
+        entry.setProperty("rateMode", static_cast<int>(module.rateMode), nullptr);
+        entry.setProperty("rateHz", module.rateHz, nullptr);
+        entry.setProperty("division", static_cast<int>(module.division), nullptr);
+        entry.setProperty("depth", module.depth, nullptr);
+        entry.setProperty("phase", module.phase, nullptr);
+        entry.setProperty("offset", module.offset, nullptr);
+        lfoState.addChild(entry, -1, nullptr);
+    }
+    for (std::size_t i = 0; i < lfoConfiguration.assignmentCount; ++i)
+    {
+        const auto& assignment = lfoConfiguration.assignments[i];
+        juce::ValueTree entry("ASSIGNMENT");
+        entry.setProperty("lfoIdentity", static_cast<juce::int64>(assignment.lfoIdentity), nullptr);
+        entry.setProperty("fxIdentity", static_cast<juce::int64>(assignment.fxInstanceIdentity), nullptr);
+        entry.setProperty("parameter", assignment.parameterID, nullptr);
+        entry.setProperty("amount", assignment.amount, nullptr);
+        entry.setProperty("bipolar", assignment.bipolar, nullptr);
+        entry.setProperty("inverted", assignment.inverted, nullptr);
+        lfoState.addChild(entry, -1, nullptr);
+    }
+    state.addChild(lfoState, -1, nullptr);
+    state.setProperty(nextLfoIdentityProperty,
+        static_cast<juce::int64>(nextLfoIdentity.load(std::memory_order_relaxed)), nullptr);
 
     if (const auto xml = state.createXml())
         copyXmlToBinary(*xml, destData);
@@ -1684,7 +1838,8 @@ void HypercolorAudioProcessor::setStateInformation(
     };
     restoredFxChain.count = 8;
     for (std::size_t i = 0; i < legacyFxOrder.size(); ++i)
-        restoredFxChain.order[i] = { legacyFxOrder[i], 0 };
+        restoredFxChain.order[i] = { legacyFxOrder[i], 0,
+            hypercolor::plugin::legacyFxIdentity(legacyFxOrder[i], 0) };
     const auto chainNode = restoredState.getChildWithName(fxChainStateType);
     if (!chainNode.isValid() && schemaVersion >= currentStateSchemaVersion)
         return;
@@ -1702,9 +1857,23 @@ void HypercolorAudioProcessor::setStateInformation(
             if (type < 0 || type >= static_cast<int>(hypercolor::plugin::fxTypeCount)
                 || slot < 0 || slot >= static_cast<int>(hypercolor::plugin::maximumFxInstancesPerType))
                 return;
+            std::uint64_t identity = hypercolor::plugin::legacyFxIdentity(
+                static_cast<hypercolor::plugin::FxType>(type),
+                static_cast<std::uint8_t>(slot));
+            if (schemaVersion >= 6)
+            {
+                double identityNumber = 0.0;
+                if (!entry.hasProperty("identity")
+                    || !readFiniteNumber(entry.getProperty("identity"), identityNumber)
+                    || identityNumber < 1.0
+                    || identityNumber > 9007199254740991.0
+                    || identityNumber != std::floor(identityNumber))
+                    return;
+                identity = static_cast<std::uint64_t>(identityNumber);
+            }
             restoredFxChain.order[static_cast<std::size_t>(i)] = {
                 static_cast<hypercolor::plugin::FxType>(type),
-                static_cast<std::uint8_t>(slot)
+                static_cast<std::uint8_t>(slot), identity
             };
         }
         std::array<bool, hypercolor::plugin::fxTypeCount * hypercolor::plugin::maximumFxInstancesPerType> seen {};
@@ -1716,8 +1885,134 @@ void HypercolorAudioProcessor::setStateInformation(
             if (seen[flat])
                 return;
             seen[flat] = true;
+            for (std::size_t previous = 0; previous < i; ++previous)
+                if (restoredFxChain.order[previous].stableIdentity == id.stableIdentity)
+                    return;
         }
     }
+
+    auto restoredAssignments = hypercolor::plugin::FxMacroAssignmentSet {};
+    const auto assignmentNode = restoredState.getChildWithName(fxMacroAssignmentsStateType);
+    if (assignmentNode.isValid())
+    {
+        if (assignmentNode.getNumChildren() > static_cast<int>(hypercolor::plugin::maximumFxMacroAssignments))
+            return;
+        restoredAssignments.count = static_cast<std::uint8_t>(assignmentNode.getNumChildren());
+        for (int i = 0; i < assignmentNode.getNumChildren(); ++i)
+        {
+            const auto entry = assignmentNode.getChild(i);
+            double identity = 0.0, minimum = 0.0, maximum = 0.0;
+            const auto axis = static_cast<int>(entry.getProperty("axis", -1));
+            if (axis < 0 || axis > 1
+                || !readFiniteNumber(entry.getProperty("identity"), identity)
+                || identity < 1.0 || identity > 9007199254740991.0
+                || identity != std::floor(identity)
+                || !readFiniteNumber(entry.getProperty("minimum"), minimum)
+                || !readFiniteNumber(entry.getProperty("maximum"), maximum))
+                return;
+            auto& assignment = restoredAssignments.assignments[static_cast<std::size_t>(i)];
+            assignment.axis = static_cast<hypercolor::plugin::MacroAxis>(axis);
+            assignment.instanceIdentity = static_cast<std::uint64_t>(identity);
+            assignment.parameterID = entry.getProperty("parameter").toString();
+            assignment.minimum = static_cast<float>(minimum);
+            assignment.maximum = static_cast<float>(maximum);
+            if (assignment.parameterID.isEmpty())
+                return;
+        }
+    }
+    else if (schemaVersion >= 6)
+        return;
+
+    hypercolor::plugin::LfoConfiguration restoredLfos;
+    const auto lfoNode = restoredState.getChildWithName(lfoConfigurationStateType);
+    if (!lfoNode.isValid() && schemaVersion >= 7)
+        return;
+    if (lfoNode.isValid())
+    {
+        for (int i = 0; i < lfoNode.getNumChildren(); ++i)
+        {
+            const auto entry = lfoNode.getChild(i);
+            if (entry.hasType("LFO"))
+            {
+                if (restoredLfos.moduleCount >= hypercolor::plugin::maximumLfoModules)
+                    return;
+                double identity = 0.0, rate = 0.0, depth = 0.0, phase = 0.0, offset = 0.0;
+                const auto waveform = static_cast<int>(entry.getProperty("waveform", -1));
+                const auto rateMode = static_cast<int>(entry.getProperty("rateMode", -1));
+                const auto division = static_cast<int>(entry.getProperty("division", -1));
+                if (!readFiniteNumber(entry.getProperty("identity"), identity)
+                    || identity < 1.0 || identity > 9007199254740991.0 || identity != std::floor(identity)
+                    || !readFiniteNumber(entry.getProperty("rateHz"), rate)
+                    || !readFiniteNumber(entry.getProperty("depth"), depth)
+                    || !readFiniteNumber(entry.getProperty("phase"), phase)
+                    || !readFiniteNumber(entry.getProperty("offset"), offset)
+                    || waveform < 0 || waveform > 5 || rateMode < 0 || rateMode > 1
+                    || division < 0 || division >= static_cast<int>(hypercolor::plugin::lfoDivisionLabels.size()))
+                    return;
+                auto& module = restoredLfos.modules[restoredLfos.moduleCount++];
+                module.stableIdentity = static_cast<std::uint64_t>(identity);
+                module.enabled = static_cast<bool>(entry.getProperty("enabled", true));
+                module.waveform = static_cast<hypercolor::dsp::modulation::LfoWaveform>(waveform);
+                module.rateMode = static_cast<hypercolor::plugin::LfoRateMode>(rateMode);
+                module.rateHz = static_cast<float>(rate);
+                module.division = static_cast<hypercolor::plugin::LfoDivision>(division);
+                module.depth = static_cast<float>(depth);
+                module.phase = static_cast<float>(phase);
+                module.offset = static_cast<float>(offset);
+            }
+            else if (entry.hasType("ASSIGNMENT"))
+            {
+                if (restoredLfos.assignmentCount >= hypercolor::plugin::maximumLfoAssignments)
+                    return;
+                double lfoIdentity = 0.0, fxIdentity = 0.0, amount = 0.0;
+                if (!readFiniteNumber(entry.getProperty("lfoIdentity"), lfoIdentity)
+                    || !readFiniteNumber(entry.getProperty("fxIdentity"), fxIdentity)
+                    || !readFiniteNumber(entry.getProperty("amount"), amount)
+                    || lfoIdentity < 1.0 || fxIdentity < 1.0
+                    || lfoIdentity > 9007199254740991.0 || fxIdentity > 9007199254740991.0
+                    || lfoIdentity != std::floor(lfoIdentity) || fxIdentity != std::floor(fxIdentity))
+                    return;
+                auto& assignment = restoredLfos.assignments[restoredLfos.assignmentCount++];
+                assignment.lfoIdentity = static_cast<std::uint64_t>(lfoIdentity);
+                assignment.fxInstanceIdentity = static_cast<std::uint64_t>(fxIdentity);
+                assignment.parameterID = entry.getProperty("parameter").toString();
+                assignment.amount = static_cast<float>(amount);
+                assignment.bipolar = static_cast<bool>(entry.getProperty("bipolar", true));
+                assignment.inverted = static_cast<bool>(entry.getProperty("inverted", false));
+                if (assignment.parameterID.isEmpty())
+                    return;
+            }
+            else
+                return;
+        }
+    }
+
+    std::uint64_t restoredNextLfoIdentity = 1;
+    if (restoredState.hasProperty(nextLfoIdentityProperty))
+    {
+        double identity = 0.0;
+        if (!readFiniteNumber(restoredState.getProperty(nextLfoIdentityProperty), identity)
+            || identity < 1.0 || identity > 9007199254740991.0 || identity != std::floor(identity))
+            return;
+        restoredNextLfoIdentity = static_cast<std::uint64_t>(identity);
+    }
+    for (std::size_t i = 0; i < restoredLfos.moduleCount; ++i)
+        restoredNextLfoIdentity = std::max(restoredNextLfoIdentity,
+            restoredLfos.modules[i].stableIdentity + 1);
+
+    std::uint64_t restoredNextIdentity = 25;
+    if (restoredState.hasProperty(nextFxIdentityProperty))
+    {
+        double nextIdentity = 0.0;
+        if (!readFiniteNumber(restoredState.getProperty(nextFxIdentityProperty), nextIdentity)
+            || nextIdentity < 25.0 || nextIdentity > 9007199254740991.0
+            || nextIdentity != std::floor(nextIdentity))
+            return;
+        restoredNextIdentity = static_cast<std::uint64_t>(nextIdentity);
+    }
+    for (std::size_t i = 0; i < restoredFxChain.count; ++i)
+        restoredNextIdentity = std::max(restoredNextIdentity,
+            restoredFxChain.order[i].stableIdentity + 1);
 
     if (!migrateLegacyDensityDivisionOrder(restoredState, schemaVersion))
         return;
@@ -1895,6 +2190,14 @@ void HypercolorAudioProcessor::setStateInformation(
             grainEnvelopeDefaultIndex
         )
         || !addDefaultParameterIfMissing(
+            restoredState, parameterTemplateState,
+            hypercolor::ParameterIDs::macroX, 0.5
+        )
+        || !addDefaultParameterIfMissing(
+            restoredState, parameterTemplateState,
+            hypercolor::ParameterIDs::macroY, 0.5
+        )
+        || !addDefaultParameterIfMissing(
             restoredState,
             parameterTemplateState,
             hypercolor::ParameterIDs::reverbMix,
@@ -2001,6 +2304,8 @@ void HypercolorAudioProcessor::setStateInformation(
             outputGainMinimumDb,
             outputGainMaximumDb
         )
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::macroX, 0.0f, 1.0f)
+        || !hasValidParameterValue(restoredState, hypercolor::ParameterIDs::macroY, 0.0f, 1.0f)
         || !hasValidParameterValue(
             restoredState,
             hypercolor::ParameterIDs::grainDensity,
@@ -2199,6 +2504,12 @@ void HypercolorAudioProcessor::setStateInformation(
     );
     parameters.replaceState(restoredState);
     (void) setFxChainConfiguration(restoredFxChain);
+    nextFxInstanceIdentity.store(restoredNextIdentity, std::memory_order_relaxed);
+    if (!setFxMacroAssignments(restoredAssignments))
+        (void) setFxMacroAssignments({});
+    if (!setLfoConfiguration(restoredLfos))
+        (void) setLfoConfiguration({});
+    nextLfoIdentity.store(restoredNextLfoIdentity, std::memory_order_relaxed);
 }
 
 hypercolor::plugin::FxChainConfiguration
@@ -2216,7 +2527,8 @@ HypercolorAudioProcessor::getFxChainConfiguration() const noexcept
             const auto packed = fxConfigurationPacked[i].load(std::memory_order_relaxed);
             result.order[i] = {
                 static_cast<hypercolor::plugin::FxType>((packed >> 2u) & 0x07u),
-                static_cast<std::uint8_t>(packed & 0x03u)
+                static_cast<std::uint8_t>(packed & 0x03u),
+                fxConfigurationIdentities[i].load(std::memory_order_relaxed)
             };
         }
         if (before == fxConfigurationSequence.load(std::memory_order_acquire))
@@ -2233,6 +2545,7 @@ bool HypercolorAudioProcessor::setFxChainConfiguration(
     if (configuration.count > hypercolor::plugin::maximumFxChainModules)
         return false;
     std::array<bool, hypercolor::plugin::fxTypeCount * hypercolor::plugin::maximumFxInstancesPerType> used {};
+    std::array<std::uint64_t, hypercolor::plugin::maximumFxChainModules> identities {};
     for (std::size_t i = 0; i < configuration.count; ++i)
     {
         const auto id = configuration.order[i];
@@ -2241,9 +2554,13 @@ bool HypercolorAudioProcessor::setFxChainConfiguration(
             return false;
         const auto flat = static_cast<std::size_t>(hypercolor::plugin::toIndex(id.type))
             * hypercolor::plugin::maximumFxInstancesPerType + id.slot;
-        if (used[flat])
+        if (used[flat] || id.stableIdentity == 0)
             return false;
         used[flat] = true;
+        for (std::size_t previous = 0; previous < i; ++previous)
+            if (identities[previous] == id.stableIdentity)
+                return false;
+        identities[i] = id.stableIdentity;
     }
     fxConfigurationSequence.fetch_add(1, std::memory_order_acq_rel);
     for (std::size_t i = 0; i < configuration.count; ++i)
@@ -2251,6 +2568,10 @@ bool HypercolorAudioProcessor::setFxChainConfiguration(
         const auto id = configuration.order[i];
         fxConfigurationPacked[i].store(
             static_cast<std::uint8_t>((hypercolor::plugin::toIndex(id.type) << 2u) | id.slot),
+            std::memory_order_relaxed
+        );
+        fxConfigurationIdentities[i].store(
+            configuration.order[i].stableIdentity,
             std::memory_order_relaxed
         );
     }
@@ -2268,15 +2589,575 @@ void HypercolorAudioProcessor::applyFxChainConfiguration() noexcept
     if (sequenceBefore != fxConfigurationSequence.load(std::memory_order_acquire))
         return;
     std::array<std::uint8_t, hypercolor::plugin::maximumFxChainModules> indices {};
+    for (auto& typeIdentities : audioFxInstanceIdentities)
+        typeIdentities.fill(0);
     for (std::size_t i = 0; i < configuration.count; ++i)
+    {
+        const auto type = hypercolor::plugin::toIndex(configuration.order[i].type);
+        const auto slot = configuration.order[i].slot;
         indices[i] = static_cast<std::uint8_t>(
-            hypercolor::plugin::toIndex(configuration.order[i].type)
+            type
                 * hypercolor::plugin::maximumFxInstancesPerType
-            + configuration.order[i].slot
+            + slot
         );
+        audioFxInstanceIdentities[type][slot] = configuration.order[i].stableIdentity;
+    }
     (void) effectChain.setActiveOrder(
         std::span<const std::uint8_t>(indices.data(), configuration.count)
     );
+}
+
+std::uint64_t HypercolorAudioProcessor::allocateFxInstanceIdentity() noexcept
+{
+    return nextFxInstanceIdentity.fetch_add(1, std::memory_order_relaxed);
+}
+
+hypercolor::plugin::FxMacroAssignmentSet
+HypercolorAudioProcessor::getFxMacroAssignments() const
+{
+    const juce::ScopedLock lock(macroAssignmentsLock);
+    return macroAssignmentsMessageThread;
+}
+
+hypercolor::plugin::LfoConfiguration
+HypercolorAudioProcessor::getLfoConfiguration() const
+{
+    const juce::ScopedLock lock(lfoConfigurationLock);
+    return lfoConfigurationMessageThread;
+}
+
+std::uint32_t HypercolorAudioProcessor::getLfoConfigurationRevision() const noexcept
+{
+    return lfoConfigurationSequence.load(std::memory_order_acquire);
+}
+
+std::uint64_t HypercolorAudioProcessor::allocateLfoIdentity() noexcept
+{
+    return nextLfoIdentity.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool HypercolorAudioProcessor::setLfoConfiguration(
+    const hypercolor::plugin::LfoConfiguration& configuration)
+{
+    using namespace hypercolor::plugin;
+    using Waveform = hypercolor::dsp::modulation::LfoWaveform;
+    if (configuration.moduleCount > maximumLfoModules
+        || configuration.assignmentCount > maximumLfoAssignments)
+        return false;
+
+    const juce::ScopedLock lock(lfoConfigurationLock);
+    const auto chain = getFxChainConfiguration();
+    std::array<LfoModuleRuntime, maximumLfoModules> modules {};
+    std::array<LfoAssignmentRuntime, maximumLfoAssignments> assignments {};
+    for (std::size_t i = 0; i < configuration.moduleCount; ++i)
+    {
+        const auto& source = configuration.modules[i];
+        if (source.stableIdentity == 0 || source.stableIdentity > 9007199254740991ull
+            || static_cast<std::uint8_t>(source.waveform) > static_cast<std::uint8_t>(Waveform::sampleAndHold)
+            || static_cast<std::uint8_t>(source.rateMode) > 1
+            || static_cast<std::uint8_t>(source.division) >= lfoDivisionLabels.size()
+            || !std::isfinite(source.rateHz) || source.rateHz < 0.0f || source.rateHz > 40.0f
+            || !std::isfinite(source.depth) || source.depth < 0.0f || source.depth > 1.0f
+            || !std::isfinite(source.phase) || source.phase < 0.0f || source.phase > 1.0f
+            || !std::isfinite(source.offset) || source.offset < -1.0f || source.offset > 1.0f)
+            return false;
+        for (std::size_t j = 0; j < i; ++j)
+            if (configuration.modules[j].stableIdentity == source.stableIdentity)
+                return false;
+        modules[i] = { source.stableIdentity, source.enabled, source.waveform,
+            source.rateMode, source.division, source.rateHz, source.depth,
+            source.phase, source.offset };
+    }
+
+    for (std::size_t i = 0; i < configuration.assignmentCount; ++i)
+    {
+        const auto& source = configuration.assignments[i];
+        if (source.lfoIdentity == 0 || source.fxInstanceIdentity == 0
+            || source.parameterID.isEmpty() || !std::isfinite(source.amount)
+            || source.amount < 0.0f || source.amount > 1.0f)
+            return false;
+        for (std::size_t previous = 0; previous < i; ++previous)
+        {
+            const auto& other = configuration.assignments[previous];
+            if (other.lfoIdentity == source.lfoIdentity
+                && other.fxInstanceIdentity == source.fxInstanceIdentity
+                && other.parameterID == source.parameterID)
+                return false;
+        }
+        std::size_t lfoSlot = maximumLfoModules;
+        for (std::size_t j = 0; j < configuration.moduleCount; ++j)
+            if (configuration.modules[j].stableIdentity == source.lfoIdentity)
+            { lfoSlot = j; break; }
+        if (lfoSlot >= maximumLfoModules)
+            return false;
+        auto* parameter = dynamic_cast<juce::RangedAudioParameter*>(
+            parameters.getParameter(source.parameterID));
+        if (parameter == nullptr)
+            return false;
+        if (dynamic_cast<juce::AudioParameterChoice*>(parameter) != nullptr
+            || dynamic_cast<juce::AudioParameterBool*>(parameter) != nullptr)
+            return false;
+        const auto range = parameter->getNormalisableRange();
+        if (!(range.end > range.start))
+            return false;
+
+        bool identityExists = false;
+        bool identityMatchesParameter = false;
+        for (std::size_t type = 0; type < fxTypeCount; ++type)
+        {
+            for (std::size_t slot = 0; slot < maximumFxInstancesPerType; ++slot)
+            {
+                const auto fxType = static_cast<FxType>(type);
+                for (std::size_t parameterIndex = 0; parameterIndex < fxLegacyParameterIDs[type].size(); ++parameterIndex)
+                {
+                    const auto* legacyID = fxLegacyParameterIDs[type][parameterIndex];
+                    if (legacyID == nullptr
+                        || fxParameterID(fxType, static_cast<std::uint8_t>(slot), legacyID) != source.parameterID)
+                        continue;
+                    LfoAssignmentRuntime resolved;
+                    resolved.lfoIdentity = source.lfoIdentity;
+                    resolved.fxIdentity = source.fxInstanceIdentity;
+                    resolved.type = static_cast<std::uint8_t>(type);
+                    resolved.slot = static_cast<std::uint8_t>(slot);
+                    resolved.parameterIndex = static_cast<std::uint8_t>(parameterIndex);
+                    resolved.lfoSlot = static_cast<std::uint8_t>(lfoSlot);
+                    resolved.amount = source.amount;
+                    resolved.bipolar = source.bipolar;
+                    resolved.inverted = source.inverted;
+                    resolved.parameterStart = range.start;
+                    resolved.parameterEnd = range.end;
+                    resolved.parameterInterval = range.interval;
+                    resolved.parameterSkew = range.skew;
+                    for (std::size_t row = 0; row < chain.count; ++row)
+                        if (chain.order[row].stableIdentity == source.fxInstanceIdentity)
+                        {
+                            identityExists = true;
+                            if (chain.order[row].type == fxType && chain.order[row].slot == slot)
+                            { resolved.active = true; identityMatchesParameter = true; }
+                        }
+                    assignments[i] = resolved;
+                }
+            }
+        }
+        bool foundFxParameter = false;
+        for (std::size_t type = 0; type < fxTypeCount; ++type)
+            for (std::size_t slot = 0; slot < maximumFxInstancesPerType; ++slot)
+                for (const auto* legacyID : fxLegacyParameterIDs[type])
+                    if (legacyID != nullptr
+                        && fxParameterID(static_cast<FxType>(type), static_cast<std::uint8_t>(slot), legacyID) == source.parameterID)
+                        foundFxParameter = true;
+        if (!foundFxParameter)
+            return false;
+        if (identityExists && !identityMatchesParameter)
+            return false;
+    }
+
+    lfoConfigurationSequence.fetch_add(1, std::memory_order_acq_rel);
+    for (std::size_t i = 0; i < maximumLfoModules; ++i)
+    {
+        auto& destination = lfoRuntimeAtomic[i];
+        const bool active = i < configuration.moduleCount;
+        destination.identity.store(active ? modules[i].identity : 0, std::memory_order_relaxed);
+        destination.enabled.store(active && modules[i].enabled, std::memory_order_relaxed);
+        destination.waveform.store(active ? static_cast<std::uint8_t>(modules[i].waveform) : 0, std::memory_order_relaxed);
+        destination.rateMode.store(active ? static_cast<std::uint8_t>(modules[i].rateMode) : 0, std::memory_order_relaxed);
+        destination.division.store(active ? static_cast<std::uint8_t>(modules[i].division) : 3, std::memory_order_relaxed);
+        destination.rateHz.store(active ? modules[i].rateHz : 1.0f, std::memory_order_relaxed);
+        destination.depth.store(active ? modules[i].depth : 1.0f, std::memory_order_relaxed);
+        destination.phase.store(active ? modules[i].phase : 0.0f, std::memory_order_relaxed);
+        destination.offset.store(active ? modules[i].offset : 0.0f, std::memory_order_relaxed);
+    }
+    for (std::size_t i = 0; i < maximumLfoAssignments; ++i)
+    {
+        auto& destination = lfoAssignmentRuntimeAtomic[i];
+        const bool active = i < configuration.assignmentCount && assignments[i].active;
+        destination.active.store(active, std::memory_order_relaxed);
+        destination.bipolar.store(i < configuration.assignmentCount && configuration.assignments[i].bipolar, std::memory_order_relaxed);
+        destination.inverted.store(i < configuration.assignmentCount && configuration.assignments[i].inverted, std::memory_order_relaxed);
+        destination.lfoIdentity.store(i < configuration.assignmentCount ? configuration.assignments[i].lfoIdentity : 0, std::memory_order_relaxed);
+        destination.fxIdentity.store(i < configuration.assignmentCount ? configuration.assignments[i].fxInstanceIdentity : 0, std::memory_order_relaxed);
+        destination.type.store(active ? assignments[i].type : 0, std::memory_order_relaxed);
+        destination.slot.store(active ? assignments[i].slot : 0, std::memory_order_relaxed);
+        destination.parameterIndex.store(active ? assignments[i].parameterIndex : 0, std::memory_order_relaxed);
+        destination.lfoSlot.store(active ? assignments[i].lfoSlot : 0, std::memory_order_relaxed);
+        destination.amount.store(i < configuration.assignmentCount ? configuration.assignments[i].amount : 1.0f, std::memory_order_relaxed);
+        destination.parameterStart.store(active ? assignments[i].parameterStart : 0.0f, std::memory_order_relaxed);
+        destination.parameterEnd.store(active ? assignments[i].parameterEnd : 1.0f, std::memory_order_relaxed);
+        destination.parameterInterval.store(active ? assignments[i].parameterInterval : 0.0f, std::memory_order_relaxed);
+        destination.parameterSkew.store(active ? assignments[i].parameterSkew : 1.0f, std::memory_order_relaxed);
+    }
+    lfoModuleCount.store(configuration.moduleCount, std::memory_order_relaxed);
+    lfoAssignmentCount.store(configuration.assignmentCount, std::memory_order_relaxed);
+    lfoConfigurationSequence.fetch_add(1, std::memory_order_release);
+    lfoConfigurationMessageThread = configuration;
+    std::uint64_t nextIdentity = 1;
+    for (std::size_t i = 0; i < configuration.moduleCount; ++i)
+        nextIdentity = std::max(nextIdentity, configuration.modules[i].stableIdentity + 1);
+    nextLfoIdentity.store(std::max(nextLfoIdentity.load(std::memory_order_relaxed), nextIdentity),
+                          std::memory_order_relaxed);
+    return true;
+}
+
+bool HypercolorAudioProcessor::setFxMacroAssignments(
+    const hypercolor::plugin::FxMacroAssignmentSet& assignments
+)
+{
+    using namespace hypercolor::plugin;
+    if (assignments.count > maximumFxMacroAssignments)
+        return false;
+
+    // Publication may come from the UI or state restore. Serialize writers
+    // here; the audio reader consumes only the atomic snapshot and never takes
+    // this lock.
+    const juce::ScopedLock lock(macroAssignmentsLock);
+    const auto chain = getFxChainConfiguration();
+    std::array<MacroAssignmentRuntime, maximumFxMacroAssignments> runtime {};
+    for (std::size_t i = 0; i < assignments.count; ++i)
+    {
+        const auto& assignment = assignments.assignments[i];
+        if (static_cast<std::uint8_t>(assignment.axis) > 1
+            || assignment.instanceIdentity == 0 || assignment.parameterID.isEmpty()
+            || !std::isfinite(assignment.minimum) || !std::isfinite(assignment.maximum)
+            || assignment.minimum > assignment.maximum)
+            return false;
+
+        auto* parameter = parameters.getParameter(assignment.parameterID);
+        auto* ranged = dynamic_cast<juce::RangedAudioParameter*>(parameter);
+        if (ranged == nullptr)
+            return false;
+        const auto range = ranged->getNormalisableRange();
+        if (assignment.minimum < range.start || assignment.maximum > range.end)
+            return false;
+
+        for (std::size_t previous = 0; previous < i; ++previous)
+        {
+            const auto& other = assignments.assignments[previous];
+            if (other.instanceIdentity == assignment.instanceIdentity
+                && other.parameterID == assignment.parameterID)
+                return false;
+        }
+
+        for (std::size_t row = 0; row < chain.count; ++row)
+        {
+            const auto instance = chain.order[row];
+            if (instance.stableIdentity != assignment.instanceIdentity)
+                continue;
+            const auto type = toIndex(instance.type);
+            for (std::size_t parameterIndex = 0;
+                 parameterIndex < fxLegacyParameterIDs[type].size();
+                 ++parameterIndex)
+            {
+                const auto* legacyID = fxLegacyParameterIDs[type][parameterIndex];
+                if (legacyID == nullptr)
+                    continue;
+                if (fxParameterID(instance.type, instance.slot, legacyID)
+                    == assignment.parameterID)
+                {
+                    runtime[i] = {
+                        true, assignment.axis, type, instance.slot,
+                        static_cast<std::uint8_t>(parameterIndex),
+                        assignment.instanceIdentity,
+                        assignment.minimum, assignment.maximum,
+                        range.start, range.interval
+                    };
+                    break;
+                }
+            }
+            if (!runtime[i].active)
+                return false;
+            break;
+        }
+        // An absent instance is retained as an orphan. It will not bind to a
+        // later effect that reuses the same DSP slot because identity differs.
+    }
+
+    macroAssignmentSequence.fetch_add(1, std::memory_order_acq_rel);
+    for (std::size_t i = 0; i < maximumFxMacroAssignments; ++i)
+    {
+        auto& destination = macroAssignmentRuntimeAtomic[i];
+        const auto active = i < assignments.count && runtime[i].active;
+        destination.active.store(active, std::memory_order_relaxed);
+        if (active)
+        {
+            destination.axis.store(static_cast<std::uint8_t>(runtime[i].axis), std::memory_order_relaxed);
+            destination.type.store(runtime[i].type, std::memory_order_relaxed);
+            destination.slot.store(runtime[i].slot, std::memory_order_relaxed);
+            destination.parameterIndex.store(runtime[i].parameterIndex, std::memory_order_relaxed);
+            destination.instanceIdentity.store(runtime[i].instanceIdentity, std::memory_order_relaxed);
+            destination.minimum.store(runtime[i].minimum, std::memory_order_relaxed);
+            destination.maximum.store(runtime[i].maximum, std::memory_order_relaxed);
+            destination.parameterStart.store(runtime[i].parameterStart, std::memory_order_relaxed);
+            destination.parameterInterval.store(runtime[i].parameterInterval, std::memory_order_relaxed);
+        }
+    }
+    macroAssignmentCount.store(assignments.count, std::memory_order_relaxed);
+    macroAssignmentSequence.fetch_add(1, std::memory_order_release);
+    macroAssignmentsMessageThread = assignments;
+    return true;
+}
+
+void HypercolorAudioProcessor::applyFxMacroAssignmentSnapshot() noexcept
+{
+    auto before = macroAssignmentSequence.load(std::memory_order_acquire);
+    if ((before & 1u) != 0u)
+        return;
+    const auto count = macroAssignmentCount.load(std::memory_order_relaxed);
+    if (count > hypercolor::plugin::maximumFxMacroAssignments)
+        return;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        const auto& source = macroAssignmentRuntimeAtomic[i];
+        audioMacroAssignments[i] = {
+            source.active.load(std::memory_order_relaxed),
+            static_cast<hypercolor::plugin::MacroAxis>(source.axis.load(std::memory_order_relaxed)),
+            source.type.load(std::memory_order_relaxed),
+            source.slot.load(std::memory_order_relaxed),
+            source.parameterIndex.load(std::memory_order_relaxed),
+            source.instanceIdentity.load(std::memory_order_relaxed),
+            source.minimum.load(std::memory_order_relaxed),
+            source.maximum.load(std::memory_order_relaxed),
+            source.parameterStart.load(std::memory_order_relaxed),
+            source.parameterInterval.load(std::memory_order_relaxed)
+        };
+    }
+    const auto after = macroAssignmentSequence.load(std::memory_order_acquire);
+    if (before != after)
+        return;
+
+    for (auto& type : audioFxMacroOverrides)
+        for (auto& slot : type)
+            for (auto& parameter : slot)
+                parameter = {};
+
+    const auto x = macroXParameter->load(std::memory_order_relaxed);
+    const auto y = macroYParameter->load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        const auto& assignment = audioMacroAssignments[i];
+        if (!assignment.active || assignment.type >= hypercolor::plugin::fxTypeCount
+            || assignment.slot >= hypercolor::plugin::maximumFxInstancesPerType
+            || assignment.parameterIndex >= 9
+            || audioFxInstanceIdentities[assignment.type][assignment.slot]
+                != assignment.instanceIdentity)
+            continue;
+        const auto macro = assignment.axis == hypercolor::plugin::MacroAxis::x ? x : y;
+        auto mapped = hypercolor::plugin::mapMacroRange(
+            macro, assignment.minimum, assignment.maximum);
+        if (assignment.parameterInterval >= 1.0f)
+            mapped = assignment.parameterStart
+                + std::round((mapped - assignment.parameterStart)
+                             / assignment.parameterInterval)
+                    * assignment.parameterInterval;
+        audioFxMacroOverrides[assignment.type][assignment.slot]
+                             [assignment.parameterIndex] = { true, mapped };
+    }
+}
+
+void HypercolorAudioProcessor::applyLfoConfigurationSnapshot() noexcept
+{
+    const auto before = lfoConfigurationSequence.load(std::memory_order_acquire);
+    if ((before & 1u) != 0u || before == audioLfoSnapshotSequence)
+        return;
+    const auto previousModules = audioLfoModules;
+    const auto previousOscillators = lfoOscillators;
+    const auto moduleCount = lfoModuleCount.load(std::memory_order_relaxed);
+    const auto assignmentCount = lfoAssignmentCount.load(std::memory_order_relaxed);
+    if (moduleCount > hypercolor::plugin::maximumLfoModules
+        || assignmentCount > hypercolor::plugin::maximumLfoAssignments)
+        return;
+    for (std::size_t i = 0; i < hypercolor::plugin::maximumLfoModules; ++i)
+    {
+        const auto& source = lfoRuntimeAtomic[i];
+        const bool active = i < moduleCount;
+        audioLfoModules[i] = {
+            active ? source.identity.load(std::memory_order_relaxed) : 0,
+            active && source.enabled.load(std::memory_order_relaxed),
+            static_cast<hypercolor::dsp::modulation::LfoWaveform>(source.waveform.load(std::memory_order_relaxed)),
+            static_cast<hypercolor::plugin::LfoRateMode>(source.rateMode.load(std::memory_order_relaxed)),
+            static_cast<hypercolor::plugin::LfoDivision>(source.division.load(std::memory_order_relaxed)),
+            source.rateHz.load(std::memory_order_relaxed), source.depth.load(std::memory_order_relaxed),
+            source.phase.load(std::memory_order_relaxed), source.offset.load(std::memory_order_relaxed)
+        };
+        bool preserved = false;
+        float preservedPhaseSetting = audioLfoModules[i].phase;
+        for (std::size_t old = 0; old < previousModules.size(); ++old)
+            if (active && previousModules[old].identity == audioLfoModules[i].identity)
+            {
+                lfoOscillators[i] = previousOscillators[old];
+                preservedPhaseSetting = previousModules[old].phase;
+                preserved = true;
+                break;
+            }
+        if (!preserved)
+        {
+            const auto identity = audioLfoModules[i].identity;
+            const auto seed = static_cast<std::uint32_t>(identity ^ (identity >> 32u));
+            lfoOscillators[i].reset(seed);
+            lfoOscillators[i].setPhase(audioLfoModules[i].phase);
+        }
+        else if (std::abs(preservedPhaseSetting - audioLfoModules[i].phase) > 1.0e-6f)
+            lfoOscillators[i].setPhase(audioLfoModules[i].phase);
+    }
+    for (std::size_t i = 0; i < hypercolor::plugin::maximumLfoAssignments; ++i)
+    {
+        const auto& source = lfoAssignmentRuntimeAtomic[i];
+        const bool active = i < assignmentCount && source.active.load(std::memory_order_relaxed);
+        audioLfoAssignments[i] = {
+            active,
+            source.lfoIdentity.load(std::memory_order_relaxed),
+            source.fxIdentity.load(std::memory_order_relaxed),
+            source.type.load(std::memory_order_relaxed), source.slot.load(std::memory_order_relaxed),
+            source.parameterIndex.load(std::memory_order_relaxed),
+            source.lfoSlot.load(std::memory_order_relaxed),
+            source.amount.load(std::memory_order_relaxed),
+            source.bipolar.load(std::memory_order_relaxed), source.inverted.load(std::memory_order_relaxed),
+            source.parameterStart.load(std::memory_order_relaxed), source.parameterEnd.load(std::memory_order_relaxed),
+            source.parameterInterval.load(std::memory_order_relaxed), source.parameterSkew.load(std::memory_order_relaxed)
+        };
+    }
+    if (before != lfoConfigurationSequence.load(std::memory_order_acquire))
+        return;
+
+    for (auto& type : audioFxLfoRanges)
+        for (auto& slot : type)
+            for (auto& parameter : slot)
+                parameter = {};
+    for (const auto& assignment : audioLfoAssignments)
+    {
+        if (!assignment.active || assignment.type >= hypercolor::plugin::fxTypeCount
+            || assignment.slot >= hypercolor::plugin::maximumFxInstancesPerType
+            || assignment.parameterIndex >= 9
+            || audioFxInstanceIdentities[assignment.type][assignment.slot] != assignment.fxIdentity)
+            continue;
+        audioFxLfoRanges[assignment.type][assignment.slot][assignment.parameterIndex] = {
+            assignment.parameterStart, assignment.parameterEnd,
+            assignment.parameterSkew, assignment.parameterInterval
+        };
+    }
+    audioLfoSnapshotSequence = before;
+}
+
+void HypercolorAudioProcessor::updateLfoOverrides(
+    double bpm, std::optional<double> ppqPosition, int segmentSamples) noexcept
+{
+    if (segmentSamples <= 0)
+        return;
+    std::array<float, hypercolor::plugin::maximumLfoModules> average {};
+    for (std::size_t i = 0; i < audioLfoModules.size(); ++i)
+    {
+        const auto& module = audioLfoModules[i];
+        if (module.identity == 0 || !module.enabled)
+            continue;
+        const auto frequency = hypercolor::plugin::lfoFrequencyHz(
+            module.rateMode, module.rateHz, module.division, bpm);
+        lfoOscillators[i].setFrequency(frequency);
+        if (ppqPosition.has_value() && module.rateMode == hypercolor::plugin::LfoRateMode::bpmSync)
+        {
+            const auto cycles = *ppqPosition
+                * hypercolor::plugin::lfoDivisionCyclesPerQuarter[
+                    static_cast<std::size_t>(module.division)];
+            lfoOscillators[i].setPhase(cycles + module.phase);
+        }
+        double total = 0.0;
+        for (int sample = 0; sample < segmentSamples; ++sample)
+            total += lfoOscillators[i].nextSample(module.waveform);
+        average[i] = static_cast<float>(total / static_cast<double>(segmentSamples));
+    }
+
+    for (auto& type : audioFxLfoOverrides)
+        for (auto& slot : type)
+            for (auto& parameter : slot)
+                parameter = {};
+
+    std::array<std::array<std::array<float, 9>, hypercolor::plugin::maximumFxInstancesPerType>,
+               hypercolor::plugin::fxTypeCount> sums {};
+    std::array<std::array<std::array<bool, 9>, hypercolor::plugin::maximumFxInstancesPerType>,
+               hypercolor::plugin::fxTypeCount> affected {};
+    for (const auto& assignment : audioLfoAssignments)
+    {
+        if (!assignment.active || assignment.type >= hypercolor::plugin::fxTypeCount
+            || assignment.slot >= hypercolor::plugin::maximumFxInstancesPerType
+            || assignment.parameterIndex >= 9
+            || audioFxInstanceIdentities[assignment.type][assignment.slot] != assignment.fxIdentity)
+            continue;
+        const auto moduleIndex = static_cast<std::size_t>(assignment.lfoSlot);
+        if (moduleIndex >= audioLfoModules.size()
+            || audioLfoModules[moduleIndex].identity != assignment.lfoIdentity
+            || !audioLfoModules[moduleIndex].enabled)
+            continue;
+        const auto& module = audioLfoModules[moduleIndex];
+        auto signal = assignment.bipolar
+            ? average[moduleIndex] * module.depth + module.offset
+            : (average[moduleIndex] + 1.0f) * 0.5f * module.depth + module.offset;
+        signal = assignment.bipolar
+            ? juce::jlimit(-1.0f, 1.0f, signal)
+            : juce::jlimit(0.0f, 1.0f, signal);
+        if (assignment.inverted)
+            signal = assignment.bipolar ? -signal : 1.0f - signal;
+        sums[assignment.type][assignment.slot][assignment.parameterIndex]
+            += signal * assignment.amount;
+        affected[assignment.type][assignment.slot][assignment.parameterIndex] = true;
+    }
+    for (std::size_t type = 0; type < hypercolor::plugin::fxTypeCount; ++type)
+        for (std::size_t slot = 0; slot < hypercolor::plugin::maximumFxInstancesPerType; ++slot)
+            for (std::size_t parameter = 0; parameter < 9; ++parameter)
+            {
+                if (!affected[type][slot][parameter])
+                    continue;
+                const auto& range = audioFxLfoRanges[type][slot][parameter];
+                const auto start = range.start;
+                const auto end = range.end;
+                const auto skew = range.skew;
+                const auto interval = range.interval;
+                const auto base = readFxBaseParameterValue(type, slot, parameter);
+                const auto proportion = juce::jlimit(0.0f, 1.0f, (base - start) / (end - start));
+                const auto normalized = skew > 0.0f && std::abs(skew - 1.0f) > 1.0e-6f
+                    ? std::pow(proportion, skew) : proportion;
+                const auto modulated = juce::jlimit(0.0f, 1.0f,
+                    normalized + sums[type][slot][parameter]);
+                auto raw = start + (end - start) * (skew > 0.0f
+                    ? std::pow(modulated, 1.0f / skew) : modulated);
+                if (interval >= 1.0f)
+                    raw = start + std::round((raw - start) / interval) * interval;
+                audioFxLfoOverrides[type][slot][parameter] = { true, juce::jlimit(start, end, raw) };
+            }
+}
+
+float HypercolorAudioProcessor::readFxParameterValue(
+    std::size_t type,
+    std::size_t slot,
+    std::size_t parameterIndex,
+    float fallback
+) const noexcept
+{
+    if (type >= hypercolor::plugin::fxTypeCount
+        || slot >= hypercolor::plugin::maximumFxInstancesPerType
+        || parameterIndex >= 9)
+        return fallback;
+    const auto lfoOverride = audioFxLfoOverrides[type][slot][parameterIndex];
+    if (lfoOverride.active)
+        return lfoOverride.value;
+    return readFxBaseParameterValue(type, slot, parameterIndex, fallback);
+}
+
+float HypercolorAudioProcessor::readFxBaseParameterValue(
+    std::size_t type,
+    std::size_t slot,
+    std::size_t parameterIndex,
+    float fallback
+) const noexcept
+{
+    if (type >= hypercolor::plugin::fxTypeCount
+        || slot >= hypercolor::plugin::maximumFxInstancesPerType
+        || parameterIndex >= 9)
+        return fallback;
+    const auto override = audioFxMacroOverrides[type][slot][parameterIndex];
+    if (override.active)
+        return override.value;
+    const auto* parameter = fxRawParameters[type][slot].values[parameterIndex];
+    return parameter != nullptr
+        ? parameter->load(std::memory_order_relaxed)
+        : fallback;
 }
 
 juce::AudioProcessorValueTreeState&

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <JuceHeader.h>
 
@@ -15,6 +16,7 @@ struct FxInstanceId
 {
     FxType type = FxType::space;
     std::uint8_t slot = 0;
+    std::uint64_t stableIdentity = 0;
 
     friend constexpr bool operator==(FxInstanceId, FxInstanceId) = default;
 };
@@ -22,6 +24,7 @@ struct FxInstanceId
 inline constexpr std::size_t maximumFxInstancesPerType = 3;
 inline constexpr std::size_t maximumFxChainModules = 12;
 inline constexpr std::size_t fxTypeCount = 8;
+inline constexpr std::size_t maximumFxMacroAssignments = 32;
 
 struct FxChainConfiguration
 {
@@ -32,6 +35,38 @@ struct FxChainConfiguration
 constexpr std::uint8_t toIndex(FxType type) noexcept
 {
     return static_cast<std::uint8_t>(type);
+}
+
+constexpr std::uint64_t legacyFxIdentity(FxType type, std::uint8_t slot) noexcept
+{
+    return 1u + static_cast<std::uint64_t>(toIndex(type))
+        * maximumFxInstancesPerType + slot;
+}
+
+enum class MacroAxis : std::uint8_t { x, y };
+
+struct FxMacroAssignment
+{
+    MacroAxis axis = MacroAxis::x;
+    std::uint64_t instanceIdentity = 0;
+    juce::String parameterID;
+    float minimum = 0.0f;
+    float maximum = 1.0f;
+};
+
+struct FxMacroAssignmentSet
+{
+    std::array<FxMacroAssignment, maximumFxMacroAssignments> assignments {};
+    std::uint8_t count = 0;
+};
+
+inline float mapMacroRange(float macroValue, float minimum, float maximum) noexcept
+{
+    if (!std::isfinite(macroValue) || !std::isfinite(minimum)
+        || !std::isfinite(maximum))
+        return 0.0f;
+    const auto normalized = juce::jlimit(0.0f, 1.0f, macroValue);
+    return minimum + normalized * (maximum - minimum);
 }
 
 inline constexpr std::array<const char*, fxTypeCount> fxTypeNames {
